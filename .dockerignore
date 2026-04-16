@@ -1,0 +1,9 @@
+.git
+.github
+.context
+target
+**/target
+**/*.db
+**/*.sqlite
+**/*.cursor
+demo-state

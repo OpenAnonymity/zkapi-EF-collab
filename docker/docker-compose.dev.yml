@@ -1,0 +1,100 @@
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    command: ["anvil", "--host", "0.0.0.0", "--port", "8545"]
+    ports:
+      - "8545:8545"
+
+  protocol-indexer:
+    image: zkapi/ef-collaboration:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["zkapi"]
+    command:
+      - --contract-address
+      - ${VAULT_CONTRACT_FELT:-0x0000000000000000000000000000000000000000}
+      - indexer
+      - --listen
+      - 0.0.0.0:3001
+      - --rpc-url
+      - http://anvil:8545
+      - --contract-address
+      - ${VAULT_CONTRACT_ADDRESS:-0x0000000000000000000000000000000000000000}
+      - --from-block
+      - ${INDEXER_FROM_BLOCK:-0}
+      - --cursor-path
+      - /data/indexer.cursor
+    depends_on:
+      - anvil
+    ports:
+      - "3001:3001"
+    volumes:
+      - zkapi-state:/data
+
+  protocol-server:
+    image: zkapi/ef-collaboration:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["zkapi"]
+    command:
+      - --chain-id
+      - ${CHAIN_ID:-31337}
+      - --contract-address
+      - ${VAULT_CONTRACT_FELT:-0x0000000000000000000000000000000000000000}
+      - server
+      - --listen
+      - 0.0.0.0:3000
+      - --provider
+      - ${ZKAPI_PROVIDER:-echo}
+      - --flat-charge
+      - ${ECHO_FLAT_CHARGE:-1}
+      - --db-path
+      - /data/zkapi-server.db
+      - --indexer-url
+      - http://protocol-indexer:3001
+      - --root-poll-interval-ms
+      - ${ROOT_POLL_INTERVAL_MS:-1000}
+    depends_on:
+      - protocol-indexer
+    ports:
+      - "3000:3000"
+    volumes:
+      - zkapi-state:/data
+
+  zkapi-authd:
+    depends_on:
+      - protocol-indexer
+      - protocol-server
+    command:
+      - --listen
+      - 0.0.0.0:11434
+      - --state-dir
+      - /data/.zkapi
+      - --protocol-server-url
+      - http://protocol-server:3000
+      - --indexer-url
+      - http://protocol-indexer:3001
+      - --protocol-version
+      - ${PROTOCOL_VERSION:-1}
+      - --chain-id
+      - ${CHAIN_ID:-31337}
+      - --contract-address
+      - ${VAULT_CONTRACT_FELT:-0x0000000000000000000000000000000000000000}
+      - --request-charge-cap
+      - ${REQUEST_CHARGE_CAP:-1000000}
+      - --policy-charge-cap
+      - ${POLICY_CHARGE_CAP:-10000000}
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  zkapi-state:
+  ollama-data:

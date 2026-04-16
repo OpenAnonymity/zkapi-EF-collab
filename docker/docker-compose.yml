@@ -1,0 +1,35 @@
+services:
+  zkapi-authd:
+    image: zkapi/ef-collaboration:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command:
+      - --listen
+      - 0.0.0.0:11434
+      - --state-dir
+      - /data/.zkapi
+      - --protocol-server-url
+      - ${PROTOCOL_SERVER_URL:-http://protocol-server:3000}
+      - --indexer-url
+      - ${INDEXER_URL:-http://protocol-indexer:3001}
+      - --protocol-version
+      - ${PROTOCOL_VERSION:-1}
+      - --chain-id
+      - ${CHAIN_ID:-31337}
+      - --contract-address
+      - ${VAULT_CONTRACT_FELT:-0x0000000000000000000000000000000000000000}
+      - --request-charge-cap
+      - ${REQUEST_CHARGE_CAP:-1000000}
+      - --policy-charge-cap
+      - ${POLICY_CHARGE_CAP:-10000000}
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    volumes:
+      - zkapi-state:/data
+
+volumes:
+  zkapi-state:
