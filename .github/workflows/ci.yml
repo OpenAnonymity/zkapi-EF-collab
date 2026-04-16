@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  app-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Build app crates
+        run: cargo build --workspace --exclude zkapi-integration-tests
+
+      - name: Test app crates
+        run: cargo test --workspace --exclude zkapi-integration-tests
+
+      - name: Clippy app crates
+        run: cargo clippy --workspace --exclude zkapi-integration-tests -- -D warnings
+
+      - name: Validate demo scripts
+        run: bash -n scripts/e2e-demo.sh docker/tee/attestation-hook.sh
+
+  protocol-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test protocol Rust workspace
+        run: cargo test --manifest-path protocol/rust/Cargo.toml --workspace
+
+      - name: Clippy protocol Rust workspace
+        run: cargo clippy --manifest-path protocol/rust/Cargo.toml --workspace -- -D warnings
+
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Forge build
+        working-directory: protocol/contracts
+        run: forge build
+
+      - name: Forge test
+        working-directory: protocol/contracts
+        run: forge test -vvv
+
+  cairo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Scarb
+        uses: software-mansion/setup-scarb@v1
+
+      - name: Scarb build
+        working-directory: protocol/cairo
+        run: scarb build
+
+      - name: Scarb test
+        working-directory: protocol/cairo
+        run: scarb test
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Start Anvil
+        run: |
+          nohup anvil --host 127.0.0.1 --port 8545 > /tmp/anvil.log 2>&1 &
+          sleep 3
+
+      - name: Run integration tests
+        run: cargo test -p zkapi-integration-tests --all-features -- --test-threads=1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Docker image
+        run: docker build -f docker/Dockerfile -t zkapi/ef-collaboration:ci .
