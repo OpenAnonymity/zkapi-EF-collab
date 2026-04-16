@@ -1,0 +1,31 @@
+[package]
+name = "zkapi-integration-tests"
+publish = false
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+http-tests = []
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+starknet-types-core.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower.workspace = true
+zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
+zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
+zkapi-crypto = { path = "../../protocol/rust/crates/zkapi-crypto" }
+zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof" }
+zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
+
+[[test]]
+name = "http_wallet"
+path = "tests/http_wallet.rs"
+required-features = ["http-tests"]

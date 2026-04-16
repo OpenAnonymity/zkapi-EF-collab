@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>zkAPI Funding</title>
+  <link rel="stylesheet" href="/funding/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">zkAPI wallet funding</p>
+      <h1>Turn a deposit into private request credits.</h1>
+      <p class="lede">
+        This page talks directly to the local auth daemon. Generate a deposit commitment,
+        send it on-chain, then confirm the resulting note here so compatible clients can
+        spend credits through the proxy endpoints.
+      </p>
+      <div class="status-card">
+        <div>
+          <p class="label">Wallet</p>
+          <strong id="wallet-balance">Loading...</strong>
+        </div>
+        <div>
+          <p class="label">State</p>
+          <strong id="wallet-state">Checking...</strong>
+        </div>
+        <button id="refresh-status" class="ghost">Refresh</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <p class="panel-kicker">1. Prepare deposit</p>
+        <h2>Generate the commitment and Merkle inputs</h2>
+        <form id="prepare-form" class="stack">
+          <label>
+            Deposit amount
+            <input id="deposit-amount" name="amount" type="number" min="1" step="1" value="100">
+          </label>
+          <button type="submit">Prepare funding</button>
+        </form>
+        <pre id="prepare-output" class="output">No deposit prepared yet.</pre>
+      </article>
+
+      <article class="panel">
+        <p class="panel-kicker">2. Confirm deposit</p>
+        <h2>Install the funded note into the local wallet</h2>
+        <form id="confirm-form" class="stack">
+          <label>
+            Secret
+            <input id="secret" name="secret" type="text" placeholder="0x...">
+          </label>
+          <label>
+            Note ID
+            <input id="note-id" name="note_id" type="number" min="0" step="1">
+          </label>
+          <label>
+            Amount
+            <input id="confirm-amount" name="amount" type="number" min="1" step="1">
+          </label>
+          <label>
+            Expiry timestamp
+            <input id="expiry-ts" name="expiry_ts" type="number" min="1" step="1" placeholder="unix seconds">
+          </label>
+          <button type="submit">Confirm funding</button>
+        </form>
+        <pre id="confirm-output" class="output">Waiting for a confirmed on-chain deposit.</pre>
+      </article>
+    </section>
+
+    <section class="panel wide">
+      <p class="panel-kicker">Compatibility endpoints</p>
+      <h2>Use the auth daemon as an app-facing proxy</h2>
+      <div class="endpoint-list">
+        <code>POST /request</code>
+        <code>POST /v1/chat/completions</code>
+        <code>POST /v1/responses</code>
+        <code>POST /api/chat</code>
+        <code>GET /v1/models</code>
+        <code>GET /api/tags</code>
+      </div>
+    </section>
+  </main>
+
+  <script src="/funding/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+/target
+/.zkapi
+.demo/
+.verify-run-*/
+*.db
+*.sqlite
+*.cursor
+*.pid
+/demo-state
+/tmp

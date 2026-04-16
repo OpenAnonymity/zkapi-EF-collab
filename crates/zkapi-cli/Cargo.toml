@@ -1,0 +1,24 @@
+[package]
+name = "zkapi-cli"
+description = "Command-line interface for the zkAPI app-layer workspace"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zkapi"
+path = "src/main.rs"
+
+[dependencies]
+zkapi-auth = { path = "../zkapi-auth" }
+zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
+zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
+zkapi-indexer = { path = "../../protocol/rust/crates/zkapi-indexer" }
+zkapi-server = { path = "../../protocol/rust/crates/zkapi-server" }
+zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
