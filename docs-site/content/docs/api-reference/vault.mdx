@@ -1,0 +1,63 @@
+---
+title: ZkApiVault
+description: Ethereum settlement contract
+---
+
+The user's wallet calls `ZkApiVault` directly on chain for deposits, mutual
+close, and escape-hatch withdrawals.
+
+## Deposit
+
+| Field | Value |
+|---|---|
+| Method | `deposit(bytes32 commitment, uint128 amount, uint256[32] siblings)` |
+| Caller | User's wallet (first calls `token.approve(vault, amount)`) |
+| Effect | Verifies siblings + empty leaf against current root; updates root with new leaf; escrows `amount` of token; emits `NoteDeposited(noteId, commitment, amount, expiryTs, newRoot)` |
+
+## Mutual close
+
+| Field | Value |
+|---|---|
+| Method | `mutualClose(WithdrawalPublicInputs inputs, bytes proofEnvelope)` |
+| Caller | User's wallet |
+| Effect | Verifies proof via `IZkApiProofAdapter`; checks `inputs.clear_sig_epoch / root` match registered XMSS root; transfers `final_balance → destination`, `deposit − final_balance → treasury`; marks note `Closed`; emits `MutualClose` |
+
+## Initiate escape-hatch withdrawal
+
+| Field | Value |
+|---|---|
+| Method | `initiateEscapeWithdrawal(WithdrawalPublicInputs inputs, bytes proofEnvelope)` |
+| Caller | User's wallet |
+| Effect | Verifies proof; zeroes leaf immediately; stores `challengeDeadline = now + 24h`; emits `EscapeWithdrawalInitiated` |
+
+## Challenge a stale escape withdrawal
+
+| Field | Value |
+|---|---|
+| Method | `challengeEscapeWithdrawal(uint32 noteId, RequestPublicInputs inputs, bytes proofEnvelope)` |
+| Caller | Server's wallet (during 24h window) |
+| Effect | Verifies the prior request proof; checks its nullifier matches the withdrawal nullifier; restores the leaf; cancels the pending withdrawal; emits `EscapeWithdrawalChallenged` |
+
+## Finalize escape withdrawal
+
+| Field | Value |
+|---|---|
+| Method | `finalizeEscapeWithdrawal(uint32 noteId, address destination, uint128 finalBalance)` |
+| Caller | Anyone (after deadline) |
+| Effect | Requires `now > challengeDeadline`; transfers `finalBalance → destination`, `deposit − finalBalance → treasury`; emits `EscapeWithdrawalFinalized` |
+
+## Claim expired note (treasury sweep)
+
+| Field | Value |
+|---|---|
+| Method | `claimExpired(uint32 noteId, uint256[32] siblings)` |
+| Caller | Anyone (funds go to treasury regardless) |
+| Effect | Requires `now > expiry_ts`; zeroes leaf; transfers full `deposit` to treasury; emits `ExpiredClaimed` |
+
+## Rotate server's XMSS roots
+
+| Field | Value |
+|---|---|
+| Method | `rotateServerRoots(uint32 epoch, bytes32 stateSigRoot, bytes32 clearSigRoot)` |
+| Caller | Contract owner (operator only) |
+| Effect | Publishes XMSS public roots for the new epoch, enabling withdrawal-proof verification against this epoch |

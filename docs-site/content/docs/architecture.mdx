@@ -1,0 +1,129 @@
+---
+title: Architecture
+description: Daemons, contracts, and crypto module layout
+---
+
+zkAPI ships two daemons that wire the simplified-nullifier protocol into a
+drop-in OpenAI-compatible proxy. All crypto primitives live in the
+[`curryrasul/zkAPI`](https://github.com/curryrasul/zkAPI) submodule. The
+operational layer is **orchestration, not crypto**.
+
+## Repository layout
+
+```
+cairo/          - ZK proof programs (request + withdrawal)
+contracts/      - Solidity settlement contract (ZkApiVault)
+rust/           - Off-chain Rust implementation
+  crates/
+    zkapi-types     - Shared types, serialization, domain constants
+    zkapi-core      - Poseidon hash, Merkle tree, nullifier, leaf helpers
+    zkapi-crypto    - Pedersen commitment, XMSS/WOTS+ signatures
+    zkapi-proof     - Proof generation/verification orchestration
+    zkapi-client    - Client wallet, note lifecycle, recovery
+    zkapi-serverd   - Server: proof verification, nullifier store, signing
+    zkapi-indexerd  - Merkle tree mirror from on-chain events
+    zkapi-cli       - Command-line interface
+```
+
+## `clientd` launch
+
+```mermaid
+flowchart TD
+  A[zkapi-clientd] --> B[AuthService::new]
+  B --> C[lock state_dir; load note_state + journal]
+  C --> D[construct zkapi-client Wallet]
+  D --> E[init HTTP clients to serverd + indexer]
+  E --> F[build_router]
+  F --> G[axum::serve 127.0.0.1:11434]
+```
+
+Routes registered: LLM-compat (`/v1/chat/completions`, `/v1/responses`,
+`/api/chat`), core (`POST /request`), wallet (`/status`, `/wallet/recover`),
+deposit (`/deposit/{prepare,confirm}`), funding UI (`/funding`,
+`/funding/api/*`).
+
+## `serverd` launch
+
+```mermaid
+flowchart TD
+  A[zkapi-cli server] --> B[load ServerConfig]
+  B --> C[open SQLite NullifierStore]
+  C --> D[init ServerSigner: state + clear XMSS, h=20]
+  D --> E[build ApiProvider: Echo or HttpProxy]
+  E --> F[fetch initial Merkle root from indexer]
+  F --> G[spawn root poller]
+  G --> H[create_router]
+  H --> I[axum::serve :3000]
+```
+
+Routes registered: `/health`, `/v1/attestation`, `POST /v1/requests`,
+`POST /v1/withdraw/clearance`, `GET /v1/requests/{id}`, `GET /v1/nullifiers/{x}`.
+
+## Modularity
+
+The auth craft on `clientd` and the auth check on `serverd` are each a single
+trait. Swapping schemes is a trait swap, nothing else touches.
+
+| Mode | clientd auth craft | serverd auth check |
+|---|---|---|
+| ZK (default) | build `x`, `E(B)_anon`, `π_req` | verify proof, spend nullifier, sign next state |
+| User-supplied API key | inject `Authorization: Bearer …` | passthrough; `serverd` is a plain proxy |
+| Future (RLN / ARC) | alternate credential scheme | alternate verifier |
+
+The upstream-provider side of `serverd` is a separate `ApiProvider` trait with
+two working impls — `EchoProvider` for tests, `HttpProxyProvider` for anything
+speaking HTTP (Ollama, OpenAI, web search, Ethereum RPC). None of it touches
+the crypto path.
+
+## Deposit flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant C as clientd
+  participant I as indexer
+  participant V as ZkApiVault
+  U->>C: POST /deposit/prepare { amount: D }
+  C->>I: GET /v1/tree/next-note-id + /tree/notes/{id}/zero-path
+  I-->>C: note_id, siblings
+  C-->>U: { s, C_reg, note_id, siblings, vault calldata }
+  U->>V: vault.deposit(C_reg, D, siblings)
+  V-->>I: emit NoteDeposited(note_id, C_reg, D, expiry_ts, newRoot)
+  U->>C: POST /deposit/confirm { s, note_id, D, expiry_ts }
+  C-->>U: ok
+```
+
+## Authenticated request flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User app
+  participant C as clientd
+  participant I as indexer
+  participant S as serverd
+  participant X as Upstream API
+  U->>C: POST /v1/chat/completions
+  C->>I: GET /tree/root + /tree/notes/{id}/path
+  I-->>C: active_root, siblings
+  C->>S: POST /v1/requests { public_inputs, proof, payload }
+  S->>X: forward payload with server-held API key
+  X-->>S: response, charge Δ
+  S-->>C: { response, E(B_new), τ_new, σ_new, Δ, blind_delta }
+  C-->>U: translated response
+```
+
+## Mutual-close withdrawal
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as clientd
+  participant S as serverd
+  participant V as ZkApiVault
+  C->>S: POST /v1/withdraw/clearance { x_w }
+  S-->>C: { σ_clear, epoch, root }
+  C->>V: vault.mutualClose(B_final, Dest, x_w, π_wd, σ_clear)
+  V-->>C: settled
+```

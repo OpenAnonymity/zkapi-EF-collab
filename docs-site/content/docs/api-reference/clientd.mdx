@@ -1,0 +1,65 @@
+---
+title: clientd
+description: User-app-facing HTTP server on localhost:11434
+---
+
+The user's app calls `clientd` as if it were the upstream API. Clientd handles
+auth transparently.
+
+## OpenAI chat completions
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /v1/chat/completions` |
+| Request body | OpenAI standard: `{ model, messages[], temperature?, max_tokens?, ... }` |
+| Response | OpenAI `ChatCompletion` with extra `zkapi: { charge_applied, next_anchor, remaining_balance }` |
+
+## OpenAI Responses
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /v1/responses` |
+| Request body | `{ model, input, ... }` |
+| Response | OpenAI Responses object with `zkapi: {...}` |
+
+## Ollama native chat
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /api/chat` |
+| Request body | `{ model, messages[], ... }` |
+| Response | `{ model, created_at, message: {role, content}, done, zkapi: {...} }` |
+
+## Wallet status
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /status` |
+| Request | — |
+| Response | `{ has_note, pending_request, funding_url, note?: { note_id, deposit_amount, current_balance, expiry_ts, is_genesis, current_anchor, current_commitment_x/y } }` |
+
+## Deposit lifecycle
+
+### Prepare
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /deposit/prepare` |
+| Request | `{ amount: u128 }` |
+| Response | `{ amount, secret, commitment, next_note_id, active_root, zero_path: [Felt252; 32] }` |
+
+### Confirm
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /deposit/confirm` |
+| Request | `{ secret, note_id, amount, expiry_ts }` |
+| Response | same shape as `GET /status` |
+
+## Recovery after crash
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /wallet/recover` |
+| Request | `{}` |
+| Response | `{ recovered: bool, request?: CoreResponse, wallet: WalletStatus }` |

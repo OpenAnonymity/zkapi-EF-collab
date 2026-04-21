@@ -1,0 +1,50 @@
+---
+title: indexer
+description: Merkle tree mirror on :3001
+---
+
+The indexer mirrors the on-chain Merkle tree by watching `ZkApiVault` events.
+`clientd` reads from it to build proofs; `serverd` reads from it to validate
+the current root.
+
+## Current root
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /v1/tree/root` |
+| Purpose | Current Merkle root |
+| Response | `{ root: Felt252 }` |
+
+## Next unused slot
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /v1/tree/next-note-id` |
+| Purpose | Next unused slot, for deposit |
+| Response | `{ next_note_id: u32 }` |
+
+## Path to an occupied leaf
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /v1/tree/notes/{note_id}/path` |
+| Purpose | Siblings for a currently-occupied leaf (used in request + withdrawal proofs) |
+| Path param | `note_id: u32` |
+| Response | `{ note_id, leaf, siblings: [Felt252; 32] }` |
+
+## Path to an empty slot
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /v1/tree/notes/{note_id}/zero-path` |
+| Purpose | Siblings for an empty slot (used in deposit tx) |
+| Path param | `note_id: u32` |
+| Response | `{ note_id, leaf: 0, siblings: [Felt252; 32] }` |
+
+## Chain → indexer
+
+Not a user-facing API. The indexer calls `eth_getLogs` against an Ethereum
+JSON-RPC endpoint to observe `ZkApiVault` events (`NoteDeposited`,
+`MutualClose`, `EscapeWithdrawalInitiated`, `EscapeWithdrawalChallenged`,
+`EscapeWithdrawalFinalized`, `ExpiredClaimed`), parses them, and applies them
+to its in-memory `TreeMirror`.

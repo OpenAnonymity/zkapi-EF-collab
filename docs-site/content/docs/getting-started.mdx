@@ -1,0 +1,80 @@
+---
+title: Getting Started
+description: Build zkAPI from source and run the end-to-end demo
+---
+
+The zkAPI repository is a monorepo containing Rust daemons, Solidity contracts,
+and Cairo proof circuits.
+
+## Prerequisites
+
+- **Rust** 1.80+ (`rustup default stable`)
+- **Foundry** for Solidity (`curl -L https://foundry.paradigm.xyz | bash`)
+- **Scarb** 2.8+ for Cairo (`curl --proto '=https' --tlsv1.2 -sSf https://docs.swmansion.com/scarb/install.sh | sh`)
+
+## Build
+
+```bash
+# Rust daemons
+cd rust
+cargo build
+cargo test
+
+# Solidity contract (ZkApiVault)
+cd ../contracts
+forge build
+forge test
+
+# Cairo proof circuits
+cd ../cairo
+scarb build
+```
+
+## End-to-end demo
+
+```bash
+./scripts/e2e-demo.sh
+```
+
+This spins up Anvil, deploys `ZkApiVault` plus a mock ERC-20, starts the
+indexer, `serverd`, and `clientd`, then runs:
+
+1. Keygen
+2. Deposit
+3. Deposit confirmation
+4. Three authenticated requests
+5. Mutual-close withdrawal
+6. On-chain net settlement verification
+
+## Use `clientd` as a drop-in OpenAI proxy
+
+Once `clientd` is running on `:11434`, point your OpenAI SDK at it:
+
+```ts
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  baseURL: 'http://localhost:11434/v1',
+  apiKey: 'not-used', // clientd handles auth
+});
+
+const res = await client.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'hello' }],
+});
+```
+
+The response carries a standard OpenAI `ChatCompletion` shape with an extra
+`zkapi` field:
+
+```json
+{
+  "id": "chatcmpl-…",
+  "choices": [ … ],
+  "zkapi": {
+    "charge_applied": 1200,
+    "next_anchor": "0x…",
+    "remaining_balance": 48800
+  }
+}
+```

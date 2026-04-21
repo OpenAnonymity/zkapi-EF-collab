@@ -1,0 +1,100 @@
+---
+title: Protocol
+description: The state-anchor chain and per-request flow
+---
+
+Compared to the original [RLN-based design](https://ethresear.ch/t/zk-api-usage-credits-llms-and-beyond/24104),
+this version removes the two-points-on-a-line construction, ticket indices,
+and growing refund histories. Instead it uses a much simpler **state-anchor
+chain**: each valid request consumes the user's current private spend state
+and yields a fresh next state signed by the server.
+
+## Primitives
+
+| Symbol | Meaning |
+|---|---|
+| `s` | User secret |
+| `C = H(s, 0)` | On-chain registration commitment |
+| `D` | Prepaid usage deposit locked in the contract |
+| `C_max` | Maximum ordinary per-request charge |
+| `S_max` | Optional higher cap for policy-violation deductions |
+| `B` | Current private available balance |
+| `E(B)` | Homomorphic Pedersen commitment to `B` |
+| `τ` | Current state anchor |
+| `σ_srv` | Server signature on the current state `(E(B), τ)` |
+| `x_w` | Withdrawal nullifier |
+| `σ_clear` | Server clearance signature on `x_w` |
+
+Initial private state: `B = D`, `τ = 1`.
+
+## Registration
+
+1. The user samples a secret `s`.
+2. The user computes `C = H(s, 0)`.
+3. The user deposits `D` into `ZkApiVault`.
+4. The contract inserts `C` into the on-chain Merkle tree, records the deposit
+   amount, and sets an expiry `T_exp` for the note.
+
+## Per-request flow
+
+To make a request, the user sends payload `M`, nullifier `x`, rerandomized
+balance commitment `E(B)_anon`, and a STARK proof `π_req` over:
+
+- knowledge of `s` behind a registered commitment,
+- knowledge of a valid current state `(E(B), τ, σ_srv)`,
+- solvency: balance ≥ `C_max`,
+- correct nullifier derivation `x = H(s, τ)`,
+- correct rerandomization of `E(B)` to `E(B)_anon`.
+
+The server verifies, checks `x` is unseen, executes the upstream call, deducts
+actual charge `Δ ≤ C_max`, computes:
+
+- `E(B_new) = E(B)_anon − Δ·G + blind·H`
+- `τ_new = H("anchor", …)`
+- `σ_new = XMSS_state.sign(H("state", …))`
+
+and returns `(response, E(B_new), τ_new, σ_new, Δ, blind)` to the client. The
+client verifies `σ_new`, replays the Pedersen update, and atomically commits
+the new `NoteState`.
+
+## Refunds
+
+**Refunds are implicit and aggregate.** No tokens ever flow back per request.
+The client proves solvency against a pessimistic cap `C_max`; `serverd`
+deducts the actual `Δ ≤ C_max`. The difference stays inside the Pedersen
+commitment as part of `B_new` and is paid out at withdrawal via net settlement:
+
+```
+payout_to_user   = B_final
+payout_to_server = D − B_final
+```
+
+Variable-size refunds are free — they're just the Pedersen homomorphism.
+
+## Withdrawal
+
+**Mutual close.** `clientd` sends `x_w = H("null", s, τ_current)` to `serverd`,
+gets back `σ_clear`, then submits `(B_final, Dest, x_w, π_wd, σ_clear)` to the
+contract. The contract verifies and pays `B_final → user`, `D − B_final →
+treasury`, then zeros the leaf.
+
+**Escape hatch.** Client submits without `σ_clear`. The contract zeros the leaf
+and opens a 24h challenge window. If the user escaped from a stale state,
+`serverd` posts the later transcript for the same `x_w` and the withdrawal is
+voided. Otherwise `finalizeEscapeWithdrawal` pays out after the window.
+
+## Slashing
+
+**Today's slashing** is the escape-hatch challenge rule. A stale-state escape
+is slashed automatically because the server's later-state transcript for the
+same `x_w` overrides the user's claim. No separate on-chain stake — every
+dollar of over-withdrawal is a dollar the treasury loses at settlement, so
+incentive is aligned.
+
+**Policy slashing** (`S_max`) is a bounded, auditable higher cap wired through
+normal net settlement — server must attach signed `(reason_code,
+evidence_hash)` into the next state, no separate contract call.
+
+Future slashing hooks (documented but not implemented): algebraic double-spend
+slashing (RLN-style key recovery), operator-bond slashing, burn-only policy
+slashing. All three layer on top without touching the state-anchor chain.

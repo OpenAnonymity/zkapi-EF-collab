@@ -1,0 +1,44 @@
+---
+title: API Reference
+description: Every API surface touched in a zkAPI deployment
+---
+
+zkAPI has four API surfaces:
+
+<Cards>
+  <Card
+    title="clientd"
+    description="HTTP server on localhost:11434. Users call it as if it were the upstream API."
+    href="/docs/api-reference/clientd"
+  />
+  <Card
+    title="serverd"
+    description="HTTP server on :3000. Verifies proofs, forwards to upstream, signs next state."
+    href="/docs/api-reference/serverd"
+  />
+  <Card
+    title="indexer"
+    description="HTTP server on :3001. Mirrors the on-chain Merkle tree."
+    href="/docs/api-reference/indexer"
+  />
+  <Card
+    title="ZkApiVault"
+    description="Ethereum settlement contract: deposits, mutual-close, escape-hatch."
+    href="/docs/api-reference/vault"
+  />
+</Cards>
+
+## Data flow
+
+```
+User app  ──►  clientd  ──►  serverd  ──►  upstream API
+                 │              │
+                 ▼              ▼
+               indexer      nullifier store (SQLite)
+                 │
+                 ▼
+          ZkApiVault (chain)
+```
+
+Full JSON shapes and error codes for all endpoints live in `docs/openapi.yaml`
+and `docs/api-spec.md` in the repository.

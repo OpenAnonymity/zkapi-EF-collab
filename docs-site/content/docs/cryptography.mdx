@@ -1,0 +1,71 @@
+---
+title: Cryptography
+description: Primitives, post-quantum posture, domain separation
+---
+
+## Post-quantum security posture
+
+The protocol is post-quantum wherever practical:
+
+| Component | Scheme | PQ-secure |
+|---|---|---|
+| Proof system | Cairo STARK proofs | Yes |
+| Hash function | Poseidon over the Stark field | Yes |
+| Merkle tree | Poseidon-based | Yes |
+| Server signatures | XMSS (WOTS+, h=20) | Yes |
+| Nullifiers | Poseidon-derived | Yes |
+| **Balance commitment** | **Pedersen on Stark curve** | **No** |
+
+The Pedersen balance commitment is the single accepted non-PQ component in v1,
+required for homomorphic addition and rerandomization. This exception is
+isolated to the `pedersen_balance` module in Cairo and `zkapi-crypto/pedersen`
+in Rust.
+
+## Primitives
+
+- **Field**: Stark field `felt252`
+- **Hash**: Poseidon builtin, domain-separated
+- **Balance commitment**: Pedersen on Stark curve: `E(B, r) = B·G_balance + r·H_blind`
+- **Server signatures**: XMSS with WOTS+ (w=16, n=248 bits, tree height=20)
+- **Nullifiers**: `x = Poseidon(domain("zkapi.null"), secret, anchor)`
+
+All Poseidon invocations use domain separation tags. No unlabeled hash
+invocation exists in the codebase.
+
+## Domain tags
+
+| Label | Usage |
+|---|---|
+| `zkapi.reg` | Registration commitment |
+| `zkapi.leaf` | Active note leaf |
+| `zkapi.node` | Merkle tree internal node |
+| `zkapi.null` | Nullifier derivation |
+| `zkapi.state` | State signature message |
+| `zkapi.clear` | Clearance signature message |
+| `zkapi.anchor` | Next anchor derivation |
+| `zkapi.blind` | Blind delta derivation |
+| `zkapi.xmss.*` | XMSS/WOTS+ internal hashing |
+| `zkapi.payload` | Payload commitment |
+
+## Public inputs on the wire
+
+Visible to the verifier (and therefore to anyone):
+
+`protocol_version`, `chain_id`, `contract_address`, `active_root`, XMSS epoch
+and root, `x`, `E(B)_anon`, `expiry_ts`, `solvency_bound`.
+
+Kept private inside the STARK witness:
+
+`s`, `note_id`, `D`, Merkle siblings, `B`, `r`, `ε`, `τ`, `σ_srv`.
+
+## Crypto wiring by step
+
+| Step | Primitive | Where |
+|---|---|---|
+| Register / deposit | `C = Poseidon("reg", s, 0)`, Merkle insert | `ZkApiVault.deposit` |
+| Note confirm (local) | store `(s, note_id, D, expiry)`, set `B=D, r=0, τ=1` | `Wallet::confirm_deposit` |
+| Per-request proof | `x = Poseidon("null", s, τ)`; rerandomize `E(B)`; STARK `π_req` | `zkapi-proof::RequestProofBuilder` |
+| Server verify | proof check, root match, nullifier unseen, cap enforcement | `zkapi-serverd::RequestProcessor` |
+| Next-state signing | `E(B_new) = E(B)_anon − Δ·G + blind·H`; fresh `τ_new`; XMSS sign | `zkapi-serverd::signer` |
+| Client state update | verify XMSS sig, recompute commitment, atomic `NoteState` commit | `Wallet::request_flow` |
+| Mutual-close withdrawal | `x_w = Poseidon("null", s, τ_cur)`; XMSS-sign `Poseidon("clear", x_w)`; `π_wd` reveals `B_final` | `POST /v1/withdraw/clearance`, `ZkApiVault.mutualClose` |

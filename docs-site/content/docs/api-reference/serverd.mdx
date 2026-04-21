@@ -1,0 +1,51 @@
+---
+title: serverd
+description: Authenticated-request channel on :3000
+---
+
+`clientd` calls `serverd` to submit authenticated requests, obtain withdrawal
+clearance signatures, and recover transcripts.
+
+## Submit authenticated request
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /v1/requests` |
+| Request | `ApiRequest { client_request_id: uuid, payload: string, payload_hash: Felt252, public_inputs: RequestPublicInputs, proof_envelope: base64 }` |
+| Response (200) | `RequestResponse { status, client_request_id, request_nullifier, response_code, response_payload, response_hash, charge_applied, next_commitment: {x,y}, next_anchor, blind_delta_srv, next_state_sig: XmssSignature, policy_reason_code?, policy_evidence_hash? }` |
+| Errors | `400 INVALID_PROOF`, `409 STALE_ROOT {latest_root}`, `409 REPLAY`, `410 NOTE_EXPIRED`, `500 CAPACITY_EXHAUSTED` |
+
+## Request mutual-close clearance
+
+| Field | Value |
+|---|---|
+| Method + path | `POST /v1/withdraw/clearance` |
+| Request | `ClearanceRequest { withdrawal_nullifier: Felt252 }` |
+| Response (200) | `ClearanceResponse { clear_sig: XmssSignature, clear_sig_epoch: u32, clear_sig_root: Felt252 }` |
+| Errors | `409 NULLIFIER_USED` |
+
+## Recover a transcript
+
+| Field | Value |
+|---|---|
+| Method + path | `GET /v1/requests/{client_request_id}` |
+| Path param | `client_request_id: uuid` |
+| Response | `RecoveryResponse { nullifier_status: "Reserved" \| "Finalized" \| "ClearanceReserved" \| "NotFound", request_response?: RequestResponse }` |
+
+## Health and attestation
+
+| Method + path | Purpose |
+|---|---|
+| `GET /health` | Liveness |
+| `GET /v1/attestation` | Returns attestation report (shape is correct; platform-signed report for Nitro is `[open]`) |
+| `GET /v1/nullifiers/{x}` | Check nullifier status |
+
+## Upstream provider trait
+
+`serverd` dispatches requests through an `ApiProvider` trait:
+
+- `EchoProvider` — used in tests, echoes back a synthetic response.
+- `HttpProxyProvider` — forwards verbatim to any HTTP upstream using the
+  operator's API key. Works for OpenAI (`POST
+  https://api.openai.com/v1/chat/completions`), Ollama (`POST
+  http://localhost:11434/api/chat`), web search, Ethereum RPC.

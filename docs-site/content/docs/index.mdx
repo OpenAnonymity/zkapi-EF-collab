@@ -1,0 +1,61 @@
+---
+title: Introduction
+description: Anonymous prepaid API usage credits using zero-knowledge proofs
+---
+
+zkAPI lets users deposit funds on-chain once, then make many anonymous off-chain
+API requests. The server is protected against replay and non-payment, while
+honest users remain unlinkable.
+
+The protocol uses a **state-anchor chain**: each valid request consumes the
+user's current private state and yields a fresh next state signed by the server.
+
+## What you get
+
+<Cards>
+  <Card
+    title="Drop-in OpenAI proxy"
+    description="clientd speaks /v1/chat/completions, /v1/responses, and Ollama /api/chat unchanged."
+    href="/docs/architecture"
+  />
+  <Card
+    title="Per-request unlinkability"
+    description="Server never learns which depositor made any given request."
+    href="/docs/protocol"
+  />
+  <Card
+    title="Variable-size refunds"
+    description="No tokens flow per request. Everything net-settles at withdrawal."
+    href="/docs/protocol#refunds"
+  />
+  <Card
+    title="Post-quantum by default"
+    description="Cairo STARKs, Poseidon, XMSS. Pedersen is the one isolated EC exception."
+    href="/docs/cryptography"
+  />
+</Cards>
+
+## The daemons
+
+**`clientd`** — localhost HTTP server on `:11434`. Speaks OpenAI, OpenResponses,
+and Ollama dialects unchanged. For each call it builds a zkAPI auth header
+(nullifier `x`, rerandomized balance commitment `E(B)_anon`, STARK request
+proof `π_req`) and forwards the payload to `serverd`. Holds the user's private
+state `(s, B, r, τ, σ_srv)` in a locked local file.
+
+**`serverd`** — verifies the auth header against the current on-chain Merkle
+root, rejects replays via its nullifier store, forwards the payload to the real
+upstream using its own API keys, deducts the actual charge `Δ`, signs the next
+state with its XMSS key, and returns it alongside the upstream response.
+
+Neither side learns which depositor made any given request; the server never
+sees `s`, `B`, `τ`, or anything linking the request to the original on-chain
+deposit.
+
+## Next steps
+
+<Cards>
+  <Card title="Getting started" href="/docs/getting-started" />
+  <Card title="Protocol overview" href="/docs/protocol" />
+  <Card title="API reference" href="/docs/api-reference" />
+</Cards>
