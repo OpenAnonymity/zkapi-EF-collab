@@ -1,0 +1,1145 @@
+openapi: 3.0.3
+info:
+  title: zkAPI HTTP Interfaces
+  version: 0.1.0
+  description: |
+    HTTP specification for the three zkAPI daemons: `zkapi-clientd` (local
+    user-facing), `zkapi-serverd` (operator-facing, runs in TEE), and
+    `zkapi-indexerd` (chain mirror). See `docs/architecture.md` for topology
+    and `docs/design-note.md` for protocol rationale.
+  license:
+    name: MIT OR Apache-2.0
+
+servers:
+  - url: http://127.0.0.1:11434
+    description: zkapi-clientd (local daemon, default)
+  - url: http://127.0.0.1:3000
+    description: zkapi-serverdd (operator daemon, default)
+  - url: http://127.0.0.1:3001
+    description: zkapi-indexerdd (chain mirror, default)
+
+# No authentication is required at the HTTP layer. Credentials are carried
+# inside `ApiRequest.proof_envelope` as a zero-knowledge proof; the HTTP
+# transport itself is unauthenticated and expected to run on localhost (for
+# zkapi-clientd) or inside a protected TEE perimeter (for zkapi-serverdd).
+security: []
+
+tags:
+  - name: auth-core
+    description: zkapi-clientd core authenticated request endpoint
+  - name: auth-compat
+    description: zkapi-clientd upstream API compatibility shims
+  - name: auth-wallet
+    description: zkapi-clientd wallet status, deposit, recovery
+  - name: auth-funding
+    description: zkapi-clientd funding page and its supporting API
+  - name: server
+    description: zkapi-serverdd authenticated request + clearance + recovery
+  - name: indexer
+    description: zkapi-indexerdd Merkle tree reads
+  - name: health
+    description: Liveness and attestation
+
+paths:
+  # =====================================================================
+  # zkapi-clientd
+  # =====================================================================
+
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness check (auth / server)
+      responses:
+        "200":
+          description: healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness check alias
+      responses:
+        "200":
+          description: healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /request:
+    post:
+      tags: [auth-core]
+      summary: Submit an opaque authenticated request
+      description: |
+        Core entrypoint: wraps an opaque payload with a ZK proof and forwards
+        to `zkapi-serverd`. Returns the upstream API response plus metadata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CoreRequest" }
+      responses:
+        "200":
+          description: authenticated response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CoreResponse" }
+        "402":
+          description: no active note; visit /funding first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+        "409":
+          description: stale root or replay conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+        "429":
+          description: wallet is busy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+        "502":
+          description: server or upstream error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+
+  /v1/chat/completions:
+    post:
+      tags: [auth-compat]
+      summary: OpenAI-compatible chat completions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenAIChatRequest" }
+      responses:
+        "200":
+          description: OpenAI ChatCompletion response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpenAIChatResponse" }
+        "402": { $ref: "#/components/responses/AuthError" }
+        "409": { $ref: "#/components/responses/AuthError" }
+        "429": { $ref: "#/components/responses/AuthError" }
+        "502": { $ref: "#/components/responses/AuthError" }
+
+  /v1/responses:
+    post:
+      tags: [auth-compat]
+      summary: OpenAI Responses-compatible endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenAIResponsesRequest" }
+      responses:
+        "200":
+          description: OpenAI Responses payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpenAIResponsesPayload" }
+        "402": { $ref: "#/components/responses/AuthError" }
+        "409": { $ref: "#/components/responses/AuthError" }
+        "429": { $ref: "#/components/responses/AuthError" }
+        "502": { $ref: "#/components/responses/AuthError" }
+
+  /api/chat:
+    post:
+      tags: [auth-compat]
+      summary: Ollama native chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OllamaChatRequest" }
+      responses:
+        "200":
+          description: Ollama chat response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OllamaChatResponse" }
+        "402": { $ref: "#/components/responses/AuthError" }
+        "409": { $ref: "#/components/responses/AuthError" }
+        "429": { $ref: "#/components/responses/AuthError" }
+        "502": { $ref: "#/components/responses/AuthError" }
+
+  /v1/models:
+    get:
+      tags: [auth-compat]
+      summary: OpenAI-format model list
+      responses:
+        "200":
+          description: model list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpenAIModelsResponse" }
+
+  /api/tags:
+    get:
+      tags: [auth-compat]
+      summary: Ollama-format model list
+      responses:
+        "200":
+          description: tags list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OllamaTagsResponse" }
+
+  /status:
+    get:
+      tags: [auth-wallet]
+      summary: Current wallet status
+      responses:
+        "200":
+          description: wallet status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatus" }
+
+  /wallet/status:
+    get:
+      tags: [auth-wallet]
+      summary: Wallet status alias
+      responses:
+        "200":
+          description: wallet status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatus" }
+
+  /wallet/recover:
+    post:
+      tags: [auth-wallet]
+      summary: Recover from a pending request journal
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: recovery result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoverResult" }
+
+  /deposit/prepare:
+    post:
+      tags: [auth-wallet]
+      summary: Generate a deposit commitment + indexer snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositPrepareRequest" }
+      responses:
+        "200":
+          description: prepared deposit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositPlan" }
+        "400":
+          description: invalid input (e.g., wallet already has an active note)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+
+  /deposit/confirm:
+    post:
+      tags: [auth-wallet]
+      summary: Activate a note locally after on-chain confirmation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositConfirmRequest" }
+      responses:
+        "200":
+          description: updated wallet status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatus" }
+
+  /:
+    get:
+      tags: [auth-funding]
+      summary: Funding page HTML
+      responses:
+        "200":
+          description: HTML funding page
+          content:
+            text/html:
+              schema: { type: string }
+
+  /funding:
+    get:
+      tags: [auth-funding]
+      summary: Funding page HTML (alias)
+      responses:
+        "200":
+          description: HTML funding page
+          content:
+            text/html:
+              schema: { type: string }
+
+  /funding/styles.css:
+    get:
+      tags: [auth-funding]
+      summary: Funding page stylesheet
+      responses:
+        "200":
+          description: CSS
+          content:
+            text/css:
+              schema: { type: string }
+
+  /funding/app.js:
+    get:
+      tags: [auth-funding]
+      summary: Funding page client-side JS
+      responses:
+        "200":
+          description: JavaScript
+          content:
+            application/javascript:
+              schema: { type: string }
+
+  /funding/config:
+    get:
+      tags: [auth-funding]
+      summary: Funding page config (vault address, chain id, models)
+      responses:
+        "200":
+          description: config payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FundingConfig" }
+
+  /funding/api/demo:
+    get:
+      tags: [auth-funding]
+      summary: Rolled-up demo overview (wallet + service health)
+      responses:
+        "200":
+          description: overview payload
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /funding/api/status:
+    get:
+      tags: [auth-funding]
+      summary: Wallet status (alias of /status)
+      responses:
+        "200":
+          description: wallet status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatus" }
+
+  /funding/api/deposit/prepare:
+    post:
+      tags: [auth-funding]
+      summary: Prepare deposit (alias of /deposit/prepare)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositPrepareRequest" }
+      responses:
+        "200":
+          description: prepared deposit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositPlan" }
+
+  /funding/api/deposit/confirm:
+    post:
+      tags: [auth-funding]
+      summary: Confirm deposit (alias of /deposit/confirm)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositConfirmRequest" }
+      responses:
+        "200":
+          description: updated wallet status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletStatus" }
+
+  /funding/api/request/preview:
+    post:
+      tags: [auth-funding]
+      summary: Preview proof fields for a prospective request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CoreRequest" }
+      responses:
+        "200":
+          description: preview data
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /funding/api/request/submit:
+    post:
+      tags: [auth-funding]
+      summary: Submit a request from the funding UI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CoreRequest" }
+      responses:
+        "200":
+          description: execution result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /funding/api/recover:
+    post:
+      tags: [auth-funding]
+      summary: Recover pending journal (alias of /wallet/recover)
+      responses:
+        "200":
+          description: recovery result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoverResult" }
+
+  # =====================================================================
+  # zkapi-serverdd
+  # =====================================================================
+
+  /v1/requests:
+    post:
+      tags: [server]
+      summary: Submit an authenticated request with ZK proof
+      description: |
+        Consumed by `zkapi-clientd`. Verifies the proof, checks nullifier
+        uniqueness, executes the upstream via `ApiProvider`, applies the
+        homomorphic balance update, and signs the next state with XMSS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApiRequest" }
+      responses:
+        "200":
+          description: authenticated response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestResponse" }
+        "400":
+          description: invalid proof or malformed request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: stale root or replayed nullifier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "410":
+          description: note expired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          description: internal error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/withdraw/clearance:
+    post:
+      tags: [server]
+      summary: Request mutual-close clearance signature
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClearanceRequest" }
+      responses:
+        "200":
+          description: clearance signature
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearanceResponse" }
+        "409":
+          description: nullifier already used
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/requests/{client_request_id}:
+    get:
+      tags: [server]
+      summary: Recover transcript by client request id
+      parameters:
+        - in: path
+          name: client_request_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: recovery payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryResponse" }
+
+  /v1/nullifiers/{nullifier_hex}:
+    get:
+      tags: [server]
+      summary: Recover transcript by nullifier
+      parameters:
+        - in: path
+          name: nullifier_hex
+          required: true
+          schema: { type: string, pattern: "^0x[0-9a-fA-F]+$" }
+      responses:
+        "200":
+          description: recovery payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryResponse" }
+
+  /v1/attestation:
+    get:
+      tags: [health]
+      summary: Attestation metadata (TEE hook)
+      description: |
+        Returns binary hash, config hash, XMSS roots, and (when running inside
+        a TEE) a platform-specific attestation report. Null platform fields
+        indicate the server is not running in a TEE.
+      responses:
+        "200":
+          description: attestation payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttestationResponse" }
+
+  # =====================================================================
+  # zkapi-indexerdd
+  # =====================================================================
+
+  /v1/tree/root:
+    get:
+      tags: [indexer]
+      summary: Current Merkle root
+      responses:
+        "200":
+          description: root
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TreeRootResponse" }
+
+  /v1/tree/next-note-id:
+    get:
+      tags: [indexer]
+      summary: Next empty note slot
+      responses:
+        "200":
+          description: next note id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NextNoteIdResponse" }
+
+  /v1/tree/notes/{note_id}/path:
+    get:
+      tags: [indexer]
+      summary: Sibling path for an occupied leaf
+      parameters:
+        - in: path
+          name: note_id
+          required: true
+          schema: { type: integer, format: uint32 }
+      responses:
+        "200":
+          description: path with leaf and siblings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TreePathResponse" }
+
+  /v1/tree/notes/{note_id}/zero-path:
+    get:
+      tags: [indexer]
+      summary: Sibling path assuming a zero leaf at the slot
+      parameters:
+        - in: path
+          name: note_id
+          required: true
+          schema: { type: integer, format: uint32 }
+      responses:
+        "200":
+          description: path with zero leaf and siblings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TreePathResponse" }
+
+components:
+  responses:
+    AuthError:
+      description: auth-daemon error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/AuthErrorResponse" }
+
+  schemas:
+    # ---- Primitives ----
+    Felt252:
+      type: string
+      description: Stark field element, hex-encoded (<= 32 bytes, zero-padded)
+      pattern: "^0x[0-9a-fA-F]+$"
+      example: "0x01a2b3c4d5e6f7"
+
+    CurvePointWire:
+      type: object
+      required: [x, y]
+      properties:
+        x: { $ref: "#/components/schemas/Felt252" }
+        y: { $ref: "#/components/schemas/Felt252" }
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, example: ok }
+
+    # ---- Auth-daemon shapes ----
+    CoreRequest:
+      type: object
+      required: [path]
+      properties:
+        method:
+          type: string
+          default: POST
+        path:
+          type: string
+          example: /v1/chat/completions
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        body:
+          description: arbitrary JSON body forwarded to the upstream API
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    CoreResponse:
+      type: object
+      required: [client_request_id, response_code, raw_payload, charge_applied, next_anchor]
+      properties:
+        client_request_id: { type: string }
+        response_code: { type: integer, format: uint16 }
+        raw_payload:
+          type: string
+          description: upstream response body as a string
+        payload:
+          description: parsed JSON body when parseable
+          type: object
+          additionalProperties: true
+          nullable: true
+        charge_applied: { type: integer, format: uint128 }
+        next_anchor: { $ref: "#/components/schemas/Felt252" }
+        remaining_balance:
+          type: integer
+          format: uint128
+          nullable: true
+
+    WalletStatus:
+      type: object
+      required: [has_note, pending_request, funding_url]
+      properties:
+        has_note: { type: boolean }
+        pending_request: { type: boolean }
+        funding_url: { type: string, example: "/funding" }
+        note:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/NoteStatus"
+
+    NoteStatus:
+      type: object
+      required:
+        - note_id
+        - deposit_amount
+        - current_balance
+        - expiry_ts
+        - is_genesis
+        - current_anchor
+        - current_commitment_x
+        - current_commitment_y
+      properties:
+        note_id: { type: integer, format: uint32 }
+        deposit_amount: { type: integer, format: uint128 }
+        current_balance: { type: integer, format: uint128 }
+        expiry_ts: { type: integer, format: uint64 }
+        is_genesis: { type: boolean }
+        current_anchor: { $ref: "#/components/schemas/Felt252" }
+        current_commitment_x: { $ref: "#/components/schemas/Felt252" }
+        current_commitment_y: { $ref: "#/components/schemas/Felt252" }
+
+    DepositPrepareRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount: { type: integer, format: uint128, minimum: 1 }
+
+    DepositPlan:
+      type: object
+      required: [amount, secret, commitment, next_note_id, active_root, zero_path]
+      properties:
+        amount: { type: integer, format: uint128 }
+        secret: { $ref: "#/components/schemas/Felt252" }
+        commitment: { $ref: "#/components/schemas/Felt252" }
+        next_note_id: { type: integer, format: uint32 }
+        active_root: { $ref: "#/components/schemas/Felt252" }
+        zero_path:
+          type: array
+          minItems: 32
+          maxItems: 32
+          items: { $ref: "#/components/schemas/Felt252" }
+
+    DepositConfirmRequest:
+      type: object
+      required: [secret, note_id, amount, expiry_ts]
+      properties:
+        secret: { $ref: "#/components/schemas/Felt252" }
+        note_id: { type: integer, format: uint32 }
+        amount: { type: integer, format: uint128, minimum: 1 }
+        expiry_ts: { type: integer, format: uint64 }
+
+    RecoverResult:
+      type: object
+      required: [recovered, wallet]
+      properties:
+        recovered: { type: boolean }
+        request:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/CoreResponse"
+        wallet: { $ref: "#/components/schemas/WalletStatus" }
+
+    FundingConfig:
+      type: object
+      required: [contract_address, chain_id, indexer_url, models]
+      properties:
+        contract_address: { $ref: "#/components/schemas/Felt252" }
+        chain_id: { type: integer, format: uint64 }
+        indexer_url: { type: string, format: uri }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ModelDescriptor" }
+
+    ModelDescriptor:
+      type: object
+      required: [id, owned_by]
+      properties:
+        id: { type: string, example: "zkapi-echo" }
+        owned_by: { type: string, example: "zkapi" }
+
+    AuthErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                [
+                  NO_ACTIVE_NOTE,
+                  WALLET_BUSY,
+                  INVALID_INPUT,
+                  WALLET,
+                  SERIALIZATION,
+                  STALE_ROOT,
+                  REPLAY,
+                  NULLIFIER_USED,
+                  NOTE_EXPIRED,
+                  SERVER_ERROR,
+                ]
+            message: { type: string }
+            funding_url:
+              type: string
+              nullable: true
+              example: "/funding"
+
+    # ---- OpenAI / Ollama compat shapes (subset — upstream-defined) ----
+    OpenAIChatRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant]
+              content: { type: string }
+        temperature: { type: number, nullable: true }
+        max_tokens: { type: integer, nullable: true }
+        stream: { type: boolean, nullable: true }
+      additionalProperties: true
+
+    OpenAIChatResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { type: string, example: "chat.completion" }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              message:
+                type: object
+                properties:
+                  role: { type: string }
+                  content: { type: string }
+              finish_reason: { type: string, nullable: true }
+        usage:
+          nullable: true
+          type: object
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+        zkapi:
+          description: zkAPI metadata attached to the response
+          type: object
+          properties:
+            response_code: { type: integer }
+            charge_applied: { type: integer }
+            remaining_balance: { type: integer, nullable: true }
+            next_anchor: { $ref: "#/components/schemas/Felt252" }
+
+    OpenAIResponsesRequest:
+      type: object
+      required: [model, input]
+      properties:
+        model: { type: string }
+        input: { type: string }
+      additionalProperties: true
+
+    OpenAIResponsesPayload:
+      type: object
+      properties:
+        id: { type: string }
+        object: { type: string, example: response }
+        created_at: { type: integer }
+        status: { type: string }
+        model: { type: string }
+        output:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        zkapi:
+          type: object
+          additionalProperties: true
+
+    OllamaChatRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string }
+              content: { type: string }
+      additionalProperties: true
+
+    OllamaChatResponse:
+      type: object
+      properties:
+        model: { type: string }
+        created_at: { type: string }
+        message:
+          type: object
+          properties:
+            role: { type: string }
+            content: { type: string }
+        done: { type: boolean }
+        done_reason: { type: string, nullable: true }
+        zkapi:
+          type: object
+          additionalProperties: true
+
+    OpenAIModelsResponse:
+      type: object
+      required: [object, data]
+      properties:
+        object: { type: string, example: list }
+        data:
+          type: array
+          items:
+            type: object
+            required: [id, object, created, owned_by]
+            properties:
+              id: { type: string }
+              object: { type: string, example: model }
+              created: { type: integer }
+              owned_by: { type: string }
+
+    OllamaTagsResponse:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              model: { type: string }
+              modified_at: { type: string }
+              size: { type: integer }
+              digest: { type: string }
+              details:
+                type: object
+                additionalProperties: true
+
+    # ---- Server shapes ----
+    ApiRequest:
+      type: object
+      required: [client_request_id, payload, payload_hash, public_inputs, proof_envelope]
+      properties:
+        client_request_id: { type: string, description: uuid-v4 recommended }
+        payload: { type: string, description: opaque payload bytes as string }
+        payload_hash: { $ref: "#/components/schemas/Felt252" }
+        public_inputs: { $ref: "#/components/schemas/RequestPublicInputs" }
+        proof_envelope:
+          type: string
+          format: byte
+          description: base64-encoded proof envelope
+
+    RequestPublicInputs:
+      type: object
+      required:
+        - protocol_version
+        - chain_id
+        - contract_address
+        - active_root
+        - state_sig_epoch
+        - state_sig_root
+        - request_nullifier
+        - anon_commitment
+        - expiry_ts
+        - solvency_bound
+      properties:
+        protocol_version: { type: integer, format: uint16 }
+        chain_id: { type: integer, format: uint64 }
+        contract_address: { $ref: "#/components/schemas/Felt252" }
+        active_root: { $ref: "#/components/schemas/Felt252" }
+        state_sig_epoch:
+          type: integer
+          format: uint32
+          description: 0 for genesis
+        state_sig_root:
+          allOf: [{ $ref: "#/components/schemas/Felt252" }]
+          description: 0 for genesis
+        request_nullifier: { $ref: "#/components/schemas/Felt252" }
+        anon_commitment: { $ref: "#/components/schemas/CurvePointWire" }
+        expiry_ts: { type: integer, format: uint64 }
+        solvency_bound: { type: integer, format: uint128 }
+
+    WithdrawalPublicInputs:
+      type: object
+      required:
+        - protocol_version
+        - chain_id
+        - contract_address
+        - active_root
+        - note_id
+        - final_balance
+        - destination
+        - withdrawal_nullifier
+        - is_genesis
+        - has_clearance
+        - state_sig_epoch
+        - state_sig_root
+        - clear_sig_epoch
+        - clear_sig_root
+      properties:
+        protocol_version: { type: integer, format: uint16 }
+        chain_id: { type: integer, format: uint64 }
+        contract_address: { $ref: "#/components/schemas/Felt252" }
+        active_root: { $ref: "#/components/schemas/Felt252" }
+        note_id: { type: integer, format: uint32 }
+        final_balance: { type: integer, format: uint128 }
+        destination:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+          description: Ethereum address (20 bytes hex)
+        withdrawal_nullifier: { $ref: "#/components/schemas/Felt252" }
+        is_genesis: { type: boolean }
+        has_clearance: { type: boolean }
+        state_sig_epoch: { type: integer, format: uint32 }
+        state_sig_root: { $ref: "#/components/schemas/Felt252" }
+        clear_sig_epoch: { type: integer, format: uint32 }
+        clear_sig_root: { $ref: "#/components/schemas/Felt252" }
+
+    RequestResponse:
+      type: object
+      required:
+        - status
+        - client_request_id
+        - request_nullifier
+        - response_code
+        - response_payload
+        - response_hash
+        - charge_applied
+        - next_commitment
+        - next_anchor
+        - blind_delta_srv
+        - next_state_sig
+      properties:
+        status: { type: string, example: ok }
+        client_request_id: { type: string }
+        request_nullifier: { $ref: "#/components/schemas/Felt252" }
+        response_code: { type: integer, format: uint16 }
+        response_payload: { type: string }
+        response_hash: { $ref: "#/components/schemas/Felt252" }
+        charge_applied: { type: integer, format: uint128 }
+        next_commitment: { $ref: "#/components/schemas/CurvePointWire" }
+        next_anchor: { $ref: "#/components/schemas/Felt252" }
+        blind_delta_srv: { $ref: "#/components/schemas/Felt252" }
+        next_state_sig: { $ref: "#/components/schemas/XmssSignature" }
+        policy_reason_code:
+          type: integer
+          format: uint32
+          nullable: true
+        policy_evidence_hash:
+          type: string
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/Felt252" }]
+
+    XmssSignature:
+      type: object
+      required: [epoch, leaf_index, wots_sig, auth_path]
+      properties:
+        epoch: { type: integer, format: uint32 }
+        leaf_index: { type: integer, format: uint32 }
+        wots_sig:
+          type: array
+          items: { $ref: "#/components/schemas/Felt252" }
+        auth_path:
+          type: array
+          items: { $ref: "#/components/schemas/Felt252" }
+
+    ClearanceRequest:
+      type: object
+      required: [withdrawal_nullifier]
+      properties:
+        withdrawal_nullifier: { $ref: "#/components/schemas/Felt252" }
+
+    ClearanceResponse:
+      type: object
+      required: [clear_sig, clear_sig_epoch, clear_sig_root]
+      properties:
+        clear_sig: { $ref: "#/components/schemas/XmssSignature" }
+        clear_sig_epoch: { type: integer, format: uint32 }
+        clear_sig_root: { $ref: "#/components/schemas/Felt252" }
+
+    RecoveryResponse:
+      type: object
+      required: [nullifier_status]
+      properties:
+        nullifier_status:
+          type: string
+          enum: [Reserved, Finalized, ClearanceReserved, NotFound]
+        request_response:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/RequestResponse"
+
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+          enum:
+            - INVALID_PROOF
+            - INVALID_REQUEST
+            - PROTOCOL_MISMATCH
+            - STALE_ROOT
+            - REPLAY
+            - NULLIFIER_USED
+            - NOTE_EXPIRED
+            - CAPACITY_EXHAUSTED
+            - DATABASE_ERROR
+            - INTERNAL
+        message: { type: string }
+        latest_root:
+          type: string
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/Felt252" }]
+
+    AttestationResponse:
+      type: object
+      required: [binary_sha256, protocol_version, chain_id, contract_address, state_sig_epoch, state_sig_root, clear_sig_root]
+      properties:
+        binary_sha256: { type: string, description: hex sha256 of the running binary }
+        protocol_version: { type: integer, format: uint16 }
+        chain_id: { type: integer, format: uint64 }
+        contract_address: { $ref: "#/components/schemas/Felt252" }
+        state_sig_epoch: { type: integer, format: uint32 }
+        state_sig_root: { $ref: "#/components/schemas/Felt252" }
+        clear_sig_root: { $ref: "#/components/schemas/Felt252" }
+        platform:
+          nullable: true
+          description: TEE-platform-specific attestation document (null when not running in a TEE)
+          type: object
+          additionalProperties: true
+
+    # ---- Indexer shapes ----
+    TreeRootResponse:
+      type: object
+      required: [root]
+      properties:
+        root: { $ref: "#/components/schemas/Felt252" }
+
+    NextNoteIdResponse:
+      type: object
+      required: [next_note_id]
+      properties:
+        next_note_id: { type: integer, format: uint32 }
+
+    TreePathResponse:
+      type: object
+      required: [note_id, leaf, siblings]
+      properties:
+        note_id: { type: integer, format: uint32 }
+        leaf: { $ref: "#/components/schemas/Felt252" }
+        siblings:
+          type: array
+          minItems: 32
+          maxItems: 32
+          items: { $ref: "#/components/schemas/Felt252" }
