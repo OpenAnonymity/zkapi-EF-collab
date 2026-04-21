@@ -3,10 +3,10 @@
 ## Components
 
 - `protocol/contracts`: on-chain vault, proof adapter, token
-- `zkapi-indexer`: mirrors vault events into a local Merkle tree view
-- `zkapi-server`: verifies proofs, charges requests, signs next state
-- `zkapi-auth`: local daemon used by apps and UIs
-- `funding-page/`: static deposit UI served by `zkapi-auth`
+- `zkapi-indexerd`: mirrors vault events into a local Merkle tree view
+- `zkapi-serverd`: verifies proofs, charges requests, signs next state
+- `zkapi-clientd`: local daemon used by apps and UIs
+- `funding-page/`: static deposit UI served by `zkapi-clientd`
 
 ## Minimal Local Stack
 
@@ -69,8 +69,8 @@ cargo run -p zkapi-cli -- auth --listen 127.0.0.1:11434
 
 ## Docker
 
-- `docker/Dockerfile` builds `zkapi` and `zkapi-authd`
-- `docker/docker-compose.yml` runs `zkapi-authd`
+- `docker/Dockerfile` builds `zkapi` and `zkapi-clientd`
+- `docker/docker-compose.yml` runs `zkapi-clientd`
 - `docker/docker-compose.dev.yml` adds `anvil` and an example `ollama` service
 - `docker/tee/attestation-hook.sh` snapshots `/v1/attestation` into JSON and `.env` formats
 
@@ -78,7 +78,7 @@ cargo run -p zkapi-cli -- auth --listen 127.0.0.1:11434
 
 - The auth daemon serializes wallet access with both an in-process mutex and a filesystem lock file.
 - The server and client both use the canonical payload hash helper from `zkapi-core`.
-- `zkapi-server` now persists `response_payload` so recovery returns the real upstream response body.
+- `zkapi-serverd` now persists `response_payload` so recovery returns the real upstream response body.
 - The indexer is untrusted. Bad paths cause proof/transaction failure rather than silent state corruption.
 
 ## Mock-Proof Caveat

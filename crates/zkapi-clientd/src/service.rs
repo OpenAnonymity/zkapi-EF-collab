@@ -5,11 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use fs2::FileExt;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zkapi_client::config::ClientConfig;
 use zkapi_client::wallet::Wallet;
 use zkapi_core::compute_payload_hash;
+use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
+use zkapi_core::nullifier::compute_nullifier;
 use zkapi_types::wire::RequestResponse;
 use zkapi_types::{Felt252, WithdrawalPublicInputs};
 
@@ -67,7 +70,119 @@ pub struct FundingConfig {
     pub contract_address: Felt252,
     pub chain_id: u64,
     pub indexer_url: String,
+    pub protocol_server_url: String,
     pub models: Vec<ModelDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demo_rpc_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demo_billing_token_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demo_private_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demo_note_ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DemoOverview {
+    pub wallet: WalletStatus,
+    pub funding: FundingConfig,
+    pub indexer: IndexerSnapshot,
+    pub server: ServerSnapshot,
+    pub runtime_proof_backend: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexerSnapshot {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<Felt252>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_note_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerSnapshot {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<ServerHealthSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<ServerAttestationSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerHealthSnapshot {
+    pub status: String,
+    pub protocol_version: u16,
+    pub chain_id: u64,
+    pub contract_address: Felt252,
+    pub current_root: Felt252,
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexer_url: Option<String>,
+    pub policy_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerAttestationSnapshot {
+    pub status: String,
+    pub protocol_version: u16,
+    pub chain_id: u64,
+    pub contract_address: Felt252,
+    pub current_root: Felt252,
+    pub state_sig_epoch: u32,
+    pub clear_sig_epoch: u32,
+    pub state_sig_root: Felt252,
+    pub clear_sig_root: Felt252,
+    pub state_signatures_remaining: u32,
+    pub clear_signatures_remaining: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestPreview {
+    pub request: CoreRequest,
+    pub payload: String,
+    pub payload_hash: Felt252,
+    pub registration_commitment: Felt252,
+    pub note_leaf: Felt252,
+    pub request_nullifier: Felt252,
+    pub active_root: Felt252,
+    pub merkle_siblings: Vec<Felt252>,
+    pub solvency_bound: u128,
+    pub wallet_note: NoteStatus,
+    pub state_sig_epoch: u32,
+    pub state_sig_root: Felt252,
+    pub runtime_proof_backend: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProtocolResponseTrace {
+    pub client_request_id: String,
+    pub request_nullifier: Felt252,
+    pub response_code: u16,
+    pub response_hash: Felt252,
+    pub charge_applied: u128,
+    pub next_commitment_x: Felt252,
+    pub next_commitment_y: Felt252,
+    pub next_anchor: Felt252,
+    pub blind_delta_srv: Felt252,
+    pub next_state_sig_epoch: u32,
+    pub next_state_sig_root: Felt252,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_reason_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_evidence_hash: Option<Felt252>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestDemoResult {
+    pub preview: RequestPreview,
+    pub response: CoreResponse,
+    pub protocol_response: ProtocolResponseTrace,
+    pub wallet: WalletStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -241,11 +356,54 @@ impl AuthService {
             contract_address: self.config.contract_address,
             chain_id: self.config.chain_id,
             indexer_url: self.config.indexer_url.clone(),
+            protocol_server_url: self.config.protocol_server_url.clone(),
             models: self.config.models.clone(),
+            demo_rpc_url: self.config.demo_rpc_url.clone(),
+            demo_billing_token_address: self.config.demo_billing_token_address.clone(),
+            demo_private_key: self.config.demo_private_key.clone(),
+            demo_note_ttl_seconds: self.config.demo_note_ttl_seconds,
         }
     }
 
     pub async fn execute_request(&self, request: CoreRequest) -> Result<CoreResponse, AuthError> {
+        Ok(self.execute_request_demo(request).await?.response)
+    }
+
+    pub async fn demo_overview(&self) -> Result<DemoOverview, AuthError> {
+        let wallet = self.status().await?;
+        let funding = self.funding_config();
+        let indexer = self.fetch_indexer_snapshot().await;
+        let server = self.fetch_server_snapshot().await;
+
+        Ok(DemoOverview {
+            wallet,
+            funding,
+            indexer,
+            server,
+            runtime_proof_backend: "mock_envelope".to_string(),
+        })
+    }
+
+    pub async fn preview_request(&self, request: CoreRequest) -> Result<RequestPreview, AuthError> {
+        let config = self.config.clone();
+        let wallet_mutex = self.wallet_mutex.clone();
+        let indexer = self.indexer.clone();
+        spawn_blocking(move || {
+            let _guard = wallet_mutex
+                .lock()
+                .map_err(|err| AuthError::Wallet(err.to_string()))?;
+            let _lockfile = acquire_wallet_lock(&config.state_dir)?;
+            let wallet = load_wallet(&config)?;
+            let runtime = current_thread_runtime()?;
+            runtime.block_on(async move { build_request_preview(&config, &indexer, &wallet, request).await })
+        })
+        .await
+    }
+
+    pub async fn execute_request_demo(
+        &self,
+        request: CoreRequest,
+    ) -> Result<RequestDemoResult, AuthError> {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
@@ -267,19 +425,31 @@ impl AuthService {
 
                 let note_id = wallet.state().ok_or(AuthError::NoActiveNote)?.note_id;
                 for attempt in 0..2 {
-                    let root = indexer.root().await?;
-                    let siblings = indexer.note_path(note_id).await?;
+                    let preview = build_request_preview(&config, &indexer, &wallet, request.clone()).await?;
                     match wallet
-                        .request_flow(&payload, payload_hash, root, siblings)
+                        .request_flow(
+                            &payload,
+                            payload_hash,
+                            preview.active_root,
+                            preview.merkle_siblings.clone(),
+                        )
                         .await
                     {
                         Ok(response) => {
-                            return Ok(core_response(
+                            let wallet_status = wallet_status(&wallet);
+                            let core = core_response(
                                 &response,
                                 wallet.state().map(|state| state.current_balance),
-                            ))
+                            );
+                            return Ok(RequestDemoResult {
+                                preview,
+                                response: core,
+                                protocol_response: protocol_response_trace(&response),
+                                wallet: wallet_status,
+                            });
                         }
                         Err(zkapi_client::error::ClientError::StaleRoot) if attempt == 0 => {
+                            let _ = note_id;
                             continue
                         }
                         Err(err) => return Err(err.into()),
@@ -346,6 +516,49 @@ impl AuthService {
     pub fn funding_app_js(&self) -> &'static str {
         include_str!("../../../funding-page/app.js")
     }
+
+    async fn fetch_indexer_snapshot(&self) -> IndexerSnapshot {
+        match tokio::try_join!(self.indexer.root(), self.indexer.next_note_id()) {
+            Ok((root, next_note_id)) => IndexerSnapshot {
+                available: true,
+                root: Some(root),
+                next_note_id: Some(next_note_id),
+                error: None,
+            },
+            Err(err) => IndexerSnapshot {
+                available: false,
+                root: None,
+                next_note_id: None,
+                error: Some(err.to_string()),
+            },
+        }
+    }
+
+    async fn fetch_server_snapshot(&self) -> ServerSnapshot {
+        let health_url = format!("{}/health", self.config.protocol_server_url.trim_end_matches('/'));
+        let attestation_url = format!(
+            "{}/v1/attestation",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
+
+        match tokio::try_join!(
+            fetch_json::<ServerHealthSnapshot>(&health_url),
+            fetch_json::<ServerAttestationSnapshot>(&attestation_url),
+        ) {
+            Ok((health, attestation)) => ServerSnapshot {
+                available: true,
+                health: Some(health),
+                attestation: Some(attestation),
+                error: None,
+            },
+            Err(err) => ServerSnapshot {
+                available: false,
+                health: None,
+                attestation: None,
+                error: Some(err),
+            },
+        }
+    }
 }
 
 impl CoreRequest {
@@ -371,6 +584,24 @@ fn core_response(response: &RequestResponse, remaining_balance: Option<u128>) ->
     }
 }
 
+fn protocol_response_trace(response: &RequestResponse) -> ProtocolResponseTrace {
+    ProtocolResponseTrace {
+        client_request_id: response.client_request_id.clone(),
+        request_nullifier: response.request_nullifier,
+        response_code: response.response_code,
+        response_hash: response.response_hash,
+        charge_applied: response.charge_applied,
+        next_commitment_x: response.next_commitment.x,
+        next_commitment_y: response.next_commitment.y,
+        next_anchor: response.next_anchor,
+        blind_delta_srv: response.blind_delta_srv,
+        next_state_sig_epoch: response.next_state_sig_epoch,
+        next_state_sig_root: response.next_state_sig_root,
+        policy_reason_code: response.policy_reason_code,
+        policy_evidence_hash: response.policy_evidence_hash,
+    }
+}
+
 fn wallet_status(wallet: &Wallet) -> WalletStatus {
     WalletStatus {
         has_note: wallet.state().is_some(),
@@ -391,6 +622,59 @@ fn wallet_status(wallet: &Wallet) -> WalletStatus {
 
 fn hash_payload(payload: &str) -> Felt252 {
     compute_payload_hash(payload.as_bytes())
+}
+
+async fn build_request_preview(
+    config: &AuthConfig,
+    indexer: &IndexerClient,
+    wallet: &Wallet,
+    request: CoreRequest,
+) -> Result<RequestPreview, AuthError> {
+    let payload = serde_json::to_string(&request)
+        .map_err(|err| AuthError::Serialization(err.to_string()))?;
+    let payload_hash = hash_payload(&payload);
+    let state = wallet.state().ok_or(AuthError::NoActiveNote)?;
+    let active_root = indexer.root().await?;
+    let merkle_siblings = indexer.note_path(state.note_id).await?;
+    let registration_commitment = compute_registration_commitment(&state.secret_s);
+    let note_leaf = compute_note_leaf(
+        state.note_id,
+        &registration_commitment,
+        state.deposit_amount,
+        state.expiry_ts,
+    );
+    let request_nullifier = compute_nullifier(&state.secret_s, &state.current_anchor);
+    let solvency_bound = state.solvency_bound(
+        config.policy_enabled,
+        config.request_charge_cap,
+        config.policy_charge_cap,
+    );
+    let wallet_note = NoteStatus {
+        note_id: state.note_id,
+        deposit_amount: state.deposit_amount,
+        current_balance: state.current_balance,
+        expiry_ts: state.expiry_ts,
+        is_genesis: state.is_genesis,
+        current_anchor: state.current_anchor,
+        current_commitment_x: state.current_commitment_x,
+        current_commitment_y: state.current_commitment_y,
+    };
+
+    Ok(RequestPreview {
+        request,
+        payload,
+        payload_hash,
+        registration_commitment,
+        note_leaf,
+        request_nullifier,
+        active_root,
+        merkle_siblings,
+        solvency_bound,
+        wallet_note,
+        state_sig_epoch: state.state_sig_epoch.unwrap_or(0),
+        state_sig_root: state.state_sig_root.unwrap_or(Felt252::ZERO),
+        runtime_proof_backend: "mock_envelope".to_string(),
+    })
 }
 
 fn wallet_lock_path(state_dir: &Path) -> PathBuf {
@@ -433,6 +717,22 @@ fn current_thread_runtime() -> Result<tokio::runtime::Runtime, AuthError> {
         .enable_all()
         .build()
         .map_err(|err| AuthError::Wallet(err.to_string()))
+}
+
+async fn fetch_json<T>(url: &str) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
+    let response = reqwest::get(url)
+        .await
+        .map_err(|err| format!("request failed for {url}: {err}"))?;
+    let response = response
+        .error_for_status()
+        .map_err(|err| format!("non-success response from {url}: {err}"))?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| format!("invalid JSON from {url}: {err}"))
 }
 
 async fn spawn_blocking<T>(
@@ -497,7 +797,7 @@ mod tests {
     }
 
     fn test_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("zkapi_auth_tests").join(name);
+        let dir = std::env::temp_dir().join("zkapi_clientd_tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -589,6 +889,65 @@ mod tests {
         assert_eq!(plan.zero_path.len(), zkapi_types::MERKLE_DEPTH);
         assert!(!plan.secret.is_zero());
         assert!(!plan.commitment.is_zero());
+    }
+
+    #[tokio::test]
+    async fn preview_request_reports_protocol_inputs() {
+        let state_dir = test_dir("preview_request");
+        let tree = Arc::new(RwLock::new(MerkleTree::new()));
+        let indexer_url = spawn_axum(indexer_router(tree.clone())).await;
+
+        let mut seed_wallet = Wallet::new(ClientConfig {
+            protocol_version: 1,
+            chain_id: 1,
+            contract_address: Felt252::from_u64(0xdeadbeef),
+            request_charge_cap: 100,
+            policy_charge_cap: 100,
+            policy_enabled: false,
+            server_url: "http://127.0.0.1:1".to_string(),
+            state_dir: state_dir.to_string_lossy().to_string(),
+        })
+        .unwrap();
+        let (secret, commitment) = seed_wallet.generate_deposit_params();
+        seed_wallet
+            .confirm_deposit(secret, 0, 100, 4_000_000_000)
+            .unwrap();
+
+        let leaf = compute_note_leaf(0, &commitment, 100, 4_000_000_000);
+        tree.write().unwrap().insert(leaf);
+
+        let service = AuthService::new(AuthConfig {
+            indexer_url,
+            state_dir,
+            request_charge_cap: 100,
+            policy_charge_cap: 100,
+            contract_address: Felt252::from_u64(0xdeadbeef),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let preview = service
+            .preview_request(CoreRequest::post_json(
+                "/v1/chat/completions",
+                json!({
+                    "model": "demo",
+                    "messages": [{ "role": "user", "content": "hi" }],
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(preview.wallet_note.note_id, 0);
+        assert_eq!(preview.wallet_note.current_balance, 100);
+        assert_eq!(preview.solvency_bound, 100);
+        assert_eq!(preview.merkle_siblings.len(), zkapi_types::MERKLE_DEPTH);
+        assert_eq!(preview.state_sig_epoch, 0);
+        assert_eq!(preview.state_sig_root, Felt252::ZERO);
+        assert_eq!(preview.runtime_proof_backend, "mock_envelope");
+        assert!(preview.request.path.contains("/v1/chat/completions"));
+        assert!(!preview.payload_hash.is_zero());
+        assert!(!preview.registration_commitment.is_zero());
+        assert!(!preview.request_nullifier.is_zero());
     }
 
     #[tokio::test]

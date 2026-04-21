@@ -1,12 +1,12 @@
 [package]
-name = "zkapi-auth"
-description = "Local auth daemon and wallet bridge for zkAPI applications"
+name = "zkapi-clientd"
+description = "Local client daemon and wallet bridge for zkAPI applications"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "zkapi-authd"
+name = "zkapi-clientd"
 path = "src/main.rs"
 
 [dependencies]

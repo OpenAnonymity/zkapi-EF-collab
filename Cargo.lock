@@ -2683,31 +2683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zkapi-auth"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "clap",
- "fs2",
- "http-body-util",
- "reqwest",
- "serde",
- "serde_json",
- "sha3",
- "thiserror",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "zkapi-client",
- "zkapi-core",
- "zkapi-server",
- "zkapi-types",
-]
-
-[[package]]
 name = "zkapi-cli"
 version = "0.1.0"
 dependencies = [
@@ -2717,8 +2692,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing-subscriber",
- "zkapi-auth",
  "zkapi-client",
+ "zkapi-clientd",
  "zkapi-core",
  "zkapi-indexer",
  "zkapi-server",
@@ -2744,6 +2719,31 @@ dependencies = [
  "zkapi-core",
  "zkapi-crypto",
  "zkapi-proof",
+ "zkapi-types",
+]
+
+[[package]]
+name = "zkapi-clientd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "fs2",
+ "http-body-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "zkapi-client",
+ "zkapi-core",
+ "zkapi-server",
  "zkapi-types",
 ]
 

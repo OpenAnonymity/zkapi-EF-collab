@@ -5,7 +5,7 @@
 The protocol implementation lives in the [`protocol/`](./protocol) submodule. This outer repo adds the app-facing pieces that were missing from the protocol-only repository:
 
 - `zkapi-cli`: operator and local-user CLI
-- `zkapi-auth`: local auth daemon with `/request`, OpenAI-compatible, OpenResponses-compatible, and Ollama-compatible endpoints
+- `zkapi-clientd`: local auth daemon with `/request`, OpenAI-compatible, OpenResponses-compatible, and Ollama-compatible endpoints
 - `funding-page/`: static local deposit UI
 - `zkapi-integration-tests`: end-to-end Rust test harness
 - CI, deployment docs, Docker packaging, and demo scripts
@@ -17,7 +17,7 @@ ef-collaboration/
 ├── protocol/                     # git submodule: curryrasul/zkAPI
 ├── crates/
 │   ├── zkapi-cli/
-│   ├── zkapi-auth/
+│   ├── zkapi-clientd/
 │   └── zkapi-integration-tests/
 ├── funding-page/
 ├── docs/

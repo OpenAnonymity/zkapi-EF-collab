@@ -5,7 +5,7 @@ services:
     ports:
       - "8545:8545"
 
-  protocol-indexer:
+  zkapi-indexerd:
     image: zkapi/ef-collaboration:dev
     build:
       context: ..
@@ -32,7 +32,7 @@ services:
     volumes:
       - zkapi-state:/data
 
-  protocol-server:
+  zkapi-serverd:
     image: zkapi/ef-collaboration:dev
     build:
       context: ..
@@ -43,7 +43,7 @@ services:
       - ${CHAIN_ID:-31337}
       - --contract-address
       - ${VAULT_CONTRACT_FELT:-0x0000000000000000000000000000000000000000}
-      - server
+      - serverd
       - --listen
       - 0.0.0.0:3000
       - --provider
@@ -53,29 +53,29 @@ services:
       - --db-path
       - /data/zkapi-server.db
       - --indexer-url
-      - http://protocol-indexer:3001
+      - http://zkapi-indexerd:3001
       - --root-poll-interval-ms
       - ${ROOT_POLL_INTERVAL_MS:-1000}
     depends_on:
-      - protocol-indexer
+      - zkapi-indexerd
     ports:
       - "3000:3000"
     volumes:
       - zkapi-state:/data
 
-  zkapi-authd:
+  zkapi-clientd:
     depends_on:
-      - protocol-indexer
-      - protocol-server
+      - zkapi-indexerd
+      - zkapi-serverd
     command:
       - --listen
       - 0.0.0.0:11434
       - --state-dir
       - /data/.zkapi
       - --protocol-server-url
-      - http://protocol-server:3000
+      - http://zkapi-serverd:3000
       - --indexer-url
-      - http://protocol-indexer:3001
+      - http://zkapi-indexerd:3001
       - --protocol-version
       - ${PROTOCOL_VERSION:-1}
       - --chain-id

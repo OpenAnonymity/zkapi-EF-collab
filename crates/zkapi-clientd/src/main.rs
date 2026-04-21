@@ -1,9 +1,9 @@
 use clap::Parser;
-use zkapi_auth::{run, AuthConfig, AuthService, ModelDescriptor};
+use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor};
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
-#[command(name = "zkapi-authd", about = "Local auth daemon for zkAPI wallets")]
+#[command(name = "zkapi-clientd", about = "Local client daemon for zkAPI wallets")]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:11434")]
     listen: String,
@@ -27,6 +27,14 @@ struct Args {
     policy_enabled: bool,
     #[arg(long = "model", default_values_t = vec!["zkapi-echo".to_string()])]
     models: Vec<String>,
+    #[arg(long)]
+    demo_rpc_url: Option<String>,
+    #[arg(long)]
+    demo_billing_token_address: Option<String>,
+    #[arg(long)]
+    demo_private_key: Option<String>,
+    #[arg(long)]
+    demo_note_ttl_seconds: Option<u64>,
 }
 
 #[tokio::main]
@@ -51,6 +59,10 @@ async fn main() -> anyhow::Result<()> {
         listen_addr: args.listen.clone(),
         state_dir: args.state_dir,
         models: args.models.into_iter().map(ModelDescriptor::new).collect(),
+        demo_rpc_url: args.demo_rpc_url,
+        demo_billing_token_address: args.demo_billing_token_address,
+        demo_private_key: args.demo_private_key,
+        demo_note_ttl_seconds: args.demo_note_ttl_seconds,
     })?;
 
     run(service, &args.listen).await

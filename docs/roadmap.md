@@ -3,7 +3,7 @@
 ## Delivered In This Workspace
 
 - Outer Cargo workspace that cleanly excludes the nested `protocol/` workspace while consuming protocol crates through direct path dependencies.
-- `zkapi-authd` with native `/request`, OpenAI `/v1/chat/completions`, OpenResponses `/v1/responses`, Ollama `/api/chat`, wallet funding endpoints, and embedded funding-page assets.
+- `zkapi-clientd` with native `/request`, OpenAI `/v1/chat/completions`, OpenResponses `/v1/responses`, Ollama `/api/chat`, wallet funding endpoints, and embedded funding-page assets.
 - `zkapi` app-layer CLI covering wallet funding flows plus protocol `server` and `indexer` process management.
 - Protocol-side fixes for stale-root retry semantics, signer serialization, persisted `response_payload` recovery, indexer HTTP service, JSON-RPC log polling, and server root synchronization.
 - CI coverage for outer crates, protocol Rust crates, integration tests, Foundry, and Scarb.

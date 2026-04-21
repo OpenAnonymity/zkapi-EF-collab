@@ -34,6 +34,10 @@ pub struct AuthConfig {
     pub listen_addr: String,
     pub state_dir: PathBuf,
     pub models: Vec<ModelDescriptor>,
+    pub demo_rpc_url: Option<String>,
+    pub demo_billing_token_address: Option<String>,
+    pub demo_private_key: Option<String>,
+    pub demo_note_ttl_seconds: Option<u64>,
 }
 
 impl Default for AuthConfig {
@@ -50,6 +54,10 @@ impl Default for AuthConfig {
             listen_addr: "127.0.0.1:11434".to_string(),
             state_dir: PathBuf::from(".zkapi"),
             models: vec![ModelDescriptor::new("zkapi-echo")],
+            demo_rpc_url: None,
+            demo_billing_token_address: None,
+            demo_private_key: None,
+            demo_note_ttl_seconds: None,
         }
     }
 }

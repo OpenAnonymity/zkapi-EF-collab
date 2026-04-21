@@ -1,5 +1,5 @@
 services:
-  zkapi-authd:
+  zkapi-clientd:
     image: zkapi/ef-collaboration:dev
     build:
       context: ..
@@ -10,9 +10,9 @@ services:
       - --state-dir
       - /data/.zkapi
       - --protocol-server-url
-      - ${PROTOCOL_SERVER_URL:-http://protocol-server:3000}
+      - ${PROTOCOL_SERVER_URL:-http://zkapi-serverd:3000}
       - --indexer-url
-      - ${INDEXER_URL:-http://protocol-indexer:3001}
+      - ${INDEXER_URL:-http://zkapi-indexerd:3001}
       - --protocol-version
       - ${PROTOCOL_VERSION:-1}
       - --chain-id

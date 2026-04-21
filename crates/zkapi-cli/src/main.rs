@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
-use zkapi_auth::{
+use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
     WithdrawalMode,
 };
@@ -35,6 +35,14 @@ struct Cli {
     policy_enabled: bool,
     #[arg(long = "model", default_values_t = vec!["zkapi-echo".to_string()])]
     models: Vec<String>,
+    #[arg(long)]
+    demo_rpc_url: Option<String>,
+    #[arg(long)]
+    demo_billing_token_address: Option<String>,
+    #[arg(long)]
+    demo_private_key: Option<String>,
+    #[arg(long)]
+    demo_note_ttl_seconds: Option<u64>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -42,12 +50,13 @@ struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
     Keygen,
-    #[command(name = "auth", alias = "serve-auth")]
-    ServeAuth {
+    #[command(name = "clientd", alias = "auth", alias = "serve-auth")]
+    Clientd {
         #[arg(long, default_value = "127.0.0.1:11434")]
         listen: String,
     },
-    Server {
+    #[command(name = "serverd", alias = "server")]
+    Serverd {
         #[arg(long, default_value = "127.0.0.1:3000")]
         listen: String,
         #[arg(long, value_enum, default_value_t = ProviderArg::Echo)]
@@ -155,11 +164,11 @@ async fn main() -> anyhow::Result<()> {
                 "commitment": commitment,
             }))?;
         }
-        Commands::ServeAuth { listen } => {
+        Commands::Clientd { listen } => {
             let service = build_auth_service(&cli)?;
             run(service, &listen).await?
         }
-        Commands::Server {
+        Commands::Serverd {
             listen,
             provider,
             flat_charge,
@@ -299,6 +308,10 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
             .cloned()
             .map(ModelDescriptor::new)
             .collect(),
+        demo_rpc_url: cli.demo_rpc_url.clone(),
+        demo_billing_token_address: cli.demo_billing_token_address.clone(),
+        demo_private_key: cli.demo_private_key.clone(),
+        demo_note_ttl_seconds: cli.demo_note_ttl_seconds,
     })
     .map_err(Into::into)
 }
@@ -374,7 +387,7 @@ mod tests {
             "0x1234",
             "--model",
             "gpt-proxy",
-            "auth",
+            "clientd",
             "--listen",
             "127.0.0.1:11435",
         ])
@@ -386,8 +399,8 @@ mod tests {
         assert_eq!(cli.models, vec!["gpt-proxy".to_string()]);
 
         match cli.command {
-            Commands::ServeAuth { listen } => assert_eq!(listen, "127.0.0.1:11435"),
-            other => panic!("expected auth command, got {other:?}"),
+            Commands::Clientd { listen } => assert_eq!(listen, "127.0.0.1:11435"),
+            other => panic!("expected clientd command, got {other:?}"),
         }
     }
 
@@ -397,7 +410,7 @@ mod tests {
             "zkapi",
             "--contract-address",
             "0xdeadbeef",
-            "server",
+            "serverd",
             "--provider",
             "http-proxy",
             "--upstream-url",
@@ -409,7 +422,7 @@ mod tests {
         ])
         .expect("server parse");
         match server.command {
-            Commands::Server {
+            Commands::Serverd {
                 provider,
                 upstream_url,
                 indexer_url,

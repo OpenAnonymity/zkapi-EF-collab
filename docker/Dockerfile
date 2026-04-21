@@ -7,7 +7,7 @@ COPY crates ./crates
 COPY funding-page ./funding-page
 COPY protocol ./protocol
 
-RUN cargo build --release -p zkapi-cli -p zkapi-auth
+RUN cargo build --release -p zkapi-cli -p zkapi-clientd
 
 FROM debian:bookworm-slim
 
@@ -19,12 +19,12 @@ RUN apt-get update \
 WORKDIR /srv/zkapi
 
 COPY --from=builder /app/target/release/zkapi /usr/local/bin/zkapi
-COPY --from=builder /app/target/release/zkapi-authd /usr/local/bin/zkapi-authd
+COPY --from=builder /app/target/release/zkapi-clientd /usr/local/bin/zkapi-clientd
 
 USER zkapi
 
 ENV RUST_LOG=info
 VOLUME ["/data"]
 
-ENTRYPOINT ["zkapi-authd"]
-CMD ["--listen", "0.0.0.0:11434", "--state-dir", "/data/.zkapi", "--protocol-server-url", "http://protocol-server:3000", "--indexer-url", "http://protocol-indexer:3001"]
+ENTRYPOINT ["zkapi-clientd"]
+CMD ["--listen", "0.0.0.0:11434", "--state-dir", "/data/.zkapi", "--protocol-server-url", "http://zkapi-serverd:3000", "--indexer-url", "http://zkapi-indexerd:3001"]

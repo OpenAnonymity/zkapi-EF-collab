@@ -175,13 +175,13 @@ echo "Starting protocol indexer..."
 INDEXER_PID=$!
 wait_status_ok "${INDEXER_URL}/health" "indexer"
 
-echo "Starting protocol server..."
+echo "Starting zkapi-serverd..."
 "$ROOT_DIR/target/debug/zkapi" \
   --chain-id "$CHAIN_ID" \
   --contract-address "$VAULT_ADDRESS" \
   --request-charge-cap "$REQUEST_CHARGE_CAP" \
   --policy-charge-cap "$POLICY_CHARGE_CAP" \
-  server \
+  serverd \
   --listen "$SERVER_ADDR" \
   --provider echo \
   --flat-charge 1 \
@@ -190,7 +190,7 @@ echo "Starting protocol server..."
   --indexer-url "$INDEXER_URL" \
   --root-poll-interval-ms 250 >"$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-wait_status_ok "${SERVER_URL}/health" "protocol server"
+wait_status_ok "${SERVER_URL}/health" "zkapi-serverd"
 
 echo "Publishing attested server roots on-chain..."
 attestation_payload="$(curl -fsSL "${SERVER_URL}/v1/attestation")"
@@ -204,8 +204,8 @@ cast send "$VAULT_ADDRESS" \
   --rpc-url "$RPC_URL" \
   --private-key "$PRIVATE_KEY" >"$LOG_DIR/rotate-roots.log" 2>&1
 
-echo "Starting auth daemon..."
-"$ROOT_DIR/target/debug/zkapi-authd" \
+echo "Starting client daemon..."
+"$ROOT_DIR/target/debug/zkapi-clientd" \
   --listen "$AUTH_ADDR" \
   --state-dir "$STATE_DIR" \
   --protocol-server-url "$SERVER_URL" \
@@ -215,6 +215,10 @@ echo "Starting auth daemon..."
   --contract-address "$VAULT_ADDRESS" \
   --request-charge-cap "$REQUEST_CHARGE_CAP" \
   --policy-charge-cap "$POLICY_CHARGE_CAP" \
+  --demo-rpc-url "$RPC_URL" \
+  --demo-billing-token-address "$TOKEN_ADDRESS" \
+  --demo-private-key "$PRIVATE_KEY" \
+  --demo-note-ttl-seconds "$NOTE_TTL" \
   --model "$MODEL_ID" >"$LOG_DIR/auth.log" 2>&1 &
 AUTH_PID=$!
 wait_status_ok "${AUTH_URL}/health" "auth daemon"

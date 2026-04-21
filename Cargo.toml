@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "crates/zkapi-cli",
-    "crates/zkapi-auth",
+    "crates/zkapi-clientd",
     "crates/zkapi-integration-tests",
 ]
-default-members = ["crates/zkapi-cli", "crates/zkapi-auth"]
+default-members = ["crates/zkapi-cli", "crates/zkapi-clientd"]
 exclude = ["protocol", "protocol/rust", "funding-page"]
 
 [workspace.package]

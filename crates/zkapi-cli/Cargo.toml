@@ -10,7 +10,7 @@ name = "zkapi"
 path = "src/main.rs"
 
 [dependencies]
-zkapi-auth = { path = "../zkapi-auth" }
+zkapi-clientd = { path = "../zkapi-clientd" }
 zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-indexer = { path = "../../protocol/rust/crates/zkapi-indexer" }
