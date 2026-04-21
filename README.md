@@ -8,7 +8,9 @@ OpenAnonymity.
 The protocol implementation lives in the [`protocol/`](./protocol) submodule. This outer repo adds the app-facing pieces that were missing from the protocol-only repository:
 
 - `zkapi-cli`: operator and local-user CLI
-- `zkapi-clientd`: local auth daemon with `/request`, OpenAI-compatible, OpenResponses-compatible, and Ollama-compatible endpoints
+- `zkapi-clientd`: local client daemon with `/request`, OpenAI-compatible, OpenResponses-compatible, and Ollama-compatible endpoints
+- `zkapi-serverd`: server daemon — proof verification, nullifier storage, API execution, state signing
+- `zkapi-indexerd`: indexer daemon — mirrors on-chain events into a local Merkle tree view
 - `funding-page/`: static local deposit UI
 - `zkapi-integration-tests`: end-to-end Rust test harness
 - CI, deployment docs, Docker packaging, and demo scripts
@@ -17,10 +19,12 @@ The protocol implementation lives in the [`protocol/`](./protocol) submodule. Th
 
 ```text
 ef-collaboration/
-├── protocol/                     # git submodule: curryrasul/zkAPI
+├── protocol/                     # git submodule: curryrasul/zkAPI (libraries + on-chain)
 ├── crates/
 │   ├── zkapi-cli/
 │   ├── zkapi-clientd/
+│   ├── zkapi-serverd/
+│   ├── zkapi-indexerd/
 │   └── zkapi-integration-tests/
 ├── funding-page/
 ├── docs/

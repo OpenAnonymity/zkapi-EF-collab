@@ -100,7 +100,7 @@ State: `<state_dir>/note_state.json` and `<state_dir>/pending_journal.json`.
 
 ### 2.2 `zkapi-serverd` — operator daemon
 
-Lives in `protocol/rust/crates/zkapi-server`. Built on Axum. Default port
+Lives in `crates/zkapi-serverd`. Built on Axum. Default port
 `:3000`. Holds two XMSS keypairs (state-signing and clearance-signing).
 SQLite-backed nullifier store. Calls a pluggable `ApiProvider` to execute
 upstream API requests. Background task polls the indexer for fresh Merkle
@@ -114,7 +114,7 @@ State: SQLite DB (nullifiers + transcripts), XMSS signer indices.
 
 ### 2.3 `zkapi-indexerd` — chain watcher
 
-Lives in `protocol/rust/crates/zkapi-indexer`. Built on Axum. Default port
+Lives in `crates/zkapi-indexerd`. Built on Axum. Default port
 `:3001`. Polls the Ethereum chain via JSON-RPC `eth_getLogs`, parses
 `NoteDeposited` / `MutualClose` / `EscapeWithdrawalInitiated` / ... events,
 and mirrors the active-note Merkle tree in memory. Serves tree root, next

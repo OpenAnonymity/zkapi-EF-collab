@@ -158,8 +158,8 @@ In `Wallet::request_flow` after receiving `RequestResponse`:
 - `protocol/rust/crates/zkapi-proof/src/request.rs`
 - `protocol/cairo/src/request/program.cairo`
 - `protocol/rust/crates/zkapi-client/src/wallet.rs::request_flow`
-- `protocol/rust/crates/zkapi-server/src/processor.rs::process_request`
-- `protocol/rust/crates/zkapi-server/src/signer.rs`
+- `crates/zkapi-serverd/src/processor.rs::process_request`
+- `crates/zkapi-serverd/src/signer.rs`
 
 ## 4. Refunds (Variable Charge → Net Settlement)
 
@@ -226,10 +226,10 @@ ultimately paid out at withdrawal:
 
 ### 4.4 Code References
 
-- `protocol/rust/crates/zkapi-server/src/provider.rs` — `ApiProvider` trait
+- `crates/zkapi-serverd/src/provider.rs` — `ApiProvider` trait
   + `ProviderResponse::charge_applied`
 - `protocol/rust/crates/zkapi-crypto/src/pedersen.rs::server_update`
-- `protocol/rust/crates/zkapi-server/src/processor.rs` — cap enforcement
+- `crates/zkapi-serverd/src/processor.rs` — cap enforcement
 - `protocol/rust/crates/zkapi-client/src/wallet.rs::withdrawal_mutual_close`
 - `protocol/rust/crates/zkapi-client/src/wallet.rs::withdrawal_escape_hatch`
 - `protocol/contracts/src/ZkApiVault.sol::{mutualClose, initiateEscapeWithdrawal, finalizeEscapeWithdrawal}`
@@ -270,7 +270,7 @@ the user, and every deduction is externally reconstructible from the
 transcript.
 
 **Implementation:**
-- `protocol/rust/crates/zkapi-server/src/config.rs::{policy_enabled, policy_charge_cap}`
+- `crates/zkapi-serverd/src/config.rs::{policy_enabled, policy_charge_cap}`
 - `ProviderResponse::{policy_reason_code, policy_evidence_hash}`
 
 ### 5.3 Future Slashing Hooks (Open Design)
@@ -312,8 +312,8 @@ layer on top.
 ### 5.4 Code References
 
 - `protocol/contracts/src/ZkApiVault.sol::challengeEscapeWithdrawal`
-- `protocol/rust/crates/zkapi-server/src/nullifier_store.rs::TranscriptRecord`
-- `protocol/rust/crates/zkapi-server/src/provider.rs::ProviderResponse`
+- `crates/zkapi-serverd/src/nullifier_store.rs::TranscriptRecord`
+- `crates/zkapi-serverd/src/provider.rs::ProviderResponse`
 - `ef-collaboration/docs/roadmap.md` — future slashing directions
 
 ## 6. Security Properties Summary
