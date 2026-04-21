@@ -11,10 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 zkapi-clientd = { path = "../zkapi-clientd" }
+zkapi-serverd = { path = "../zkapi-serverd" }
+zkapi-indexerd = { path = "../zkapi-indexerd" }
 zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
-zkapi-indexer = { path = "../../protocol/rust/crates/zkapi-indexer" }
-zkapi-server = { path = "../../protocol/rust/crates/zkapi-server" }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 anyhow = { workspace = true }
 clap = { workspace = true }

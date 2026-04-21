@@ -8,13 +8,20 @@ use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha3::{Digest, Sha3_256};
 use zkapi_client::config::ClientConfig;
 use zkapi_client::wallet::Wallet;
-use zkapi_core::compute_payload_hash;
 use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
 use zkapi_core::nullifier::compute_nullifier;
 use zkapi_types::wire::RequestResponse;
 use zkapi_types::{Felt252, WithdrawalPublicInputs};
+
+fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
+    let digest = Sha3_256::digest(payload.as_ref());
+    let mut bytes = [0u8; 32];
+    bytes[1..].copy_from_slice(&digest[..31]);
+    Felt252(bytes)
+}
 
 use crate::config::{AuthConfig, ModelDescriptor};
 use crate::error::AuthError;
@@ -395,7 +402,9 @@ impl AuthService {
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
             let wallet = load_wallet(&config)?;
             let runtime = current_thread_runtime()?;
-            runtime.block_on(async move { build_request_preview(&config, &indexer, &wallet, request).await })
+            runtime.block_on(async move {
+                build_request_preview(&config, &indexer, &wallet, request).await
+            })
         })
         .await
     }
@@ -425,7 +434,8 @@ impl AuthService {
 
                 let note_id = wallet.state().ok_or(AuthError::NoActiveNote)?.note_id;
                 for attempt in 0..2 {
-                    let preview = build_request_preview(&config, &indexer, &wallet, request.clone()).await?;
+                    let preview =
+                        build_request_preview(&config, &indexer, &wallet, request.clone()).await?;
                     match wallet
                         .request_flow(
                             &payload,
@@ -450,7 +460,7 @@ impl AuthService {
                         }
                         Err(zkapi_client::error::ClientError::StaleRoot) if attempt == 0 => {
                             let _ = note_id;
-                            continue
+                            continue;
                         }
                         Err(err) => return Err(err.into()),
                     }
@@ -535,7 +545,10 @@ impl AuthService {
     }
 
     async fn fetch_server_snapshot(&self) -> ServerSnapshot {
-        let health_url = format!("{}/health", self.config.protocol_server_url.trim_end_matches('/'));
+        let health_url = format!(
+            "{}/health",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
         let attestation_url = format!(
             "{}/v1/attestation",
             self.config.protocol_server_url.trim_end_matches('/')
@@ -630,8 +643,8 @@ async fn build_request_preview(
     wallet: &Wallet,
     request: CoreRequest,
 ) -> Result<RequestPreview, AuthError> {
-    let payload = serde_json::to_string(&request)
-        .map_err(|err| AuthError::Serialization(err.to_string()))?;
+    let payload =
+        serde_json::to_string(&request).map_err(|err| AuthError::Serialization(err.to_string()))?;
     let payload_hash = hash_payload(&payload);
     let state = wallet.state().ok_or(AuthError::NoActiveNote)?;
     let active_root = indexer.root().await?;
@@ -766,11 +779,11 @@ mod tests {
     use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
     use zkapi_core::merkle::MerkleTree;
     use zkapi_core::poseidon::felt_to_field;
-    use zkapi_server::nullifier_store::NullifierStore;
-    use zkapi_server::processor::RequestProcessor;
-    use zkapi_server::provider::EchoProvider;
-    use zkapi_server::routes::create_router;
-    use zkapi_server::signer::ServerSigner;
+    use zkapi_serverd::nullifier_store::NullifierStore;
+    use zkapi_serverd::processor::RequestProcessor;
+    use zkapi_serverd::provider::EchoProvider;
+    use zkapi_serverd::routes::create_router;
+    use zkapi_serverd::signer::ServerSigner;
 
     use super::*;
 
@@ -853,7 +866,7 @@ mod tests {
             8,
         ));
         let processor = Arc::new(RequestProcessor::new(
-            zkapi_server::config::ServerConfig {
+            zkapi_serverd::config::ServerConfig {
                 contract_address: Felt252::from_u64(0xdeadbeef),
                 chain_id: 1,
                 protocol_version: 1,

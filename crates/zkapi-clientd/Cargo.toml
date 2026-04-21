@@ -30,5 +30,5 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
-zkapi-server = { path = "../../protocol/rust/crates/zkapi-server" }
+zkapi-serverd = { path = "../zkapi-serverd" }
 http-body-util = "0.1"

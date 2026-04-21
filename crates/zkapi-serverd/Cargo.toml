@@ -1,0 +1,30 @@
+[package]
+name = "zkapi-serverd"
+description = "zkAPI server daemon: proof verification, nullifier storage, API execution, and state signing"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
+zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
+zkapi-crypto = { path = "../../protocol/rust/crates/zkapi-crypto" }
+zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof" }
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }
+starknet-crypto = { workspace = true }
+starknet-curve = { workspace = true }
+starknet-types-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

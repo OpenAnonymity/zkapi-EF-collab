@@ -2695,8 +2695,8 @@ dependencies = [
  "zkapi-client",
  "zkapi-clientd",
  "zkapi-core",
- "zkapi-indexer",
- "zkapi-server",
+ "zkapi-indexerd",
+ "zkapi-serverd",
  "zkapi-types",
 ]
 
@@ -2743,7 +2743,7 @@ dependencies = [
  "tracing-subscriber",
  "zkapi-client",
  "zkapi-core",
- "zkapi-server",
+ "zkapi-serverd",
  "zkapi-types",
 ]
 
@@ -2779,7 +2779,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zkapi-indexer"
+name = "zkapi-indexerd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2834,7 +2834,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zkapi-server"
+name = "zkapi-serverd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2846,6 +2846,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha3",
  "starknet-crypto",
  "starknet-curve",
  "starknet-types-core",

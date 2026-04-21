@@ -3,7 +3,10 @@ use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor};
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
-#[command(name = "zkapi-clientd", about = "Local client daemon for zkAPI wallets")]
+#[command(
+    name = "zkapi-clientd",
+    about = "Local client daemon for zkAPI wallets"
+)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:11434")]
     listen: String,

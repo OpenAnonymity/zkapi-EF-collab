@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
+use zkapi_client::config::ClientConfig;
+use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
     WithdrawalMode,
 };
-use zkapi_client::config::ClientConfig;
-use zkapi_client::wallet::Wallet;
-use zkapi_server::config::{ProviderKind, ServerConfig};
+use zkapi_serverd::config::{ProviderKind, ServerConfig};
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
@@ -209,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
                 root_poll_interval_ms,
                 ..Default::default()
             };
-            zkapi_server::routes::run_server(config).await?;
+            zkapi_serverd::routes::run_server(config).await?;
         }
         Commands::Indexer {
             listen,
@@ -219,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
             poll_interval_ms,
             cursor_path,
         } => {
-            let config = zkapi_indexer::IndexerConfig {
+            let config = zkapi_indexerd::IndexerConfig {
                 listen_addr: listen,
                 rpc_url,
                 contract_address,
@@ -227,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
                 poll_interval_ms,
                 cursor_path,
             };
-            zkapi_indexer::run_indexer(config).await?;
+            zkapi_indexerd::run_indexer(config).await?;
         }
         Commands::Status => {
             let service = build_auth_service(&cli)?;
