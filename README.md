@@ -1,6 +1,9 @@
-# zkAPI EF Collaboration
+# zkAPI — Ethereum Foundation Collaboration
 
-`ef-collaboration` is the grant-delivery workspace for the zkAPI stack.
+This repository is the **Ethereum Foundation grant collaboration** for the
+zkAPI project. `ef-collaboration` is the grant-delivery workspace for the
+zkAPI stack, developed under an Ethereum Foundation grant awarded to
+OpenAnonymity.
 
 The protocol implementation lives in the [`protocol/`](./protocol) submodule. This outer repo adds the app-facing pieces that were missing from the protocol-only repository:
 
