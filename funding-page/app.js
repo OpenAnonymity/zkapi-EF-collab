@@ -1,75 +1,438 @@
-const statusNode = document.getElementById("wallet-state");
-const balanceNode = document.getElementById("wallet-balance");
-const prepareOutput = document.getElementById("prepare-output");
-const confirmOutput = document.getElementById("confirm-output");
+const state = {
+  overview: null,
+  prepare: null,
+  preview: null,
+  execution: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+const els = {
+  // health
+  hAuth: $("h-auth"),
+  hIndexer: $("h-indexer"),
+  hServer: $("h-server"),
+  // balance card
+  balance: $("balance"),
+  balanceAmount: $("balance-amount"),
+  balanceUnit: $("balance-unit"),
+  balanceMeta: $("balance-meta"),
+  balanceNoteId: $("balance-note-id"),
+  balanceDeposit: $("balance-deposit"),
+  balanceExpiry: $("balance-expiry"),
+  // steps
+  stepFund: $("step-fund"),
+  stepRequest: $("step-request"),
+  // prepare
+  prepareResult: $("prepare-result"),
+  prepSecret: $("prep-secret"),
+  prepCommitment: $("prep-commitment"),
+  prepNoteId: $("prep-note-id"),
+  prepRoot: $("prep-root"),
+  castCommands: $("cast-commands"),
+  // confirm
+  secret: $("secret"),
+  noteId: $("note-id"),
+  confirmAmount: $("confirm-amount"),
+  expiryTs: $("expiry-ts"),
+  confirmError: $("confirm-error"),
+  // chain helpers
+  rpcUrl: $("rpc-url"),
+  tokenAddress: $("token-address"),
+  privateKey: $("private-key"),
+  noteTtl: $("note-ttl"),
+  // request
+  endpointKind: $("endpoint-kind"),
+  modelInput: $("model-input"),
+  promptInput: $("prompt-input"),
+  rawFields: $("raw-fields"),
+  rawMethod: $("raw-method"),
+  rawPath: $("raw-path"),
+  rawBody: $("raw-body"),
+  requestResult: $("request-result"),
+  // trace
+  tracePayloadHash: $("trace-payload-hash"),
+  traceNullifier: $("trace-nullifier"),
+  traceLeaf: $("trace-leaf"),
+  traceSolvency: $("trace-solvency"),
+  traceRoot: $("trace-root"),
+  traceNextAnchor: $("trace-next-anchor"),
+  traceCharge: $("trace-charge"),
+  traceXmss: $("trace-xmss"),
+  protocolOutput: $("protocol-output"),
+  // service details
+  svcAuth: $("svc-auth"),
+  svcIndexer: $("svc-indexer"),
+  svcServer: $("svc-server"),
+  svcProof: $("svc-proof"),
+  attestationOutput: $("attestation-output"),
+};
+
+function pretty(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function truncate(value, size = 10) {
+  if (value == null) return "-";
+  if (typeof value !== "string") value = String(value);
+  if (value.length <= size * 2 + 3) return value;
+  return `${value.slice(0, size)}…${value.slice(-size)}`;
+}
+
+function formatExpiry(ts) {
+  if (!ts) return "-";
+  const d = new Date(Number(ts) * 1000);
+  if (isNaN(d.getTime())) return String(ts);
+  const now = Date.now();
+  const diffDays = Math.floor((d.getTime() - now) / (1000 * 60 * 60 * 24));
+  if (diffDays < 0) return "expired";
+  if (diffDays < 1) return "today";
+  if (diffDays < 30) return `${diffDays}d`;
+  return `${Math.floor(diffDays / 30)}mo`;
+}
+
+function setHealth(el, online, label) {
+  el.classList.remove("online", "offline");
+  el.classList.add(online ? "online" : "offline");
+  el.textContent = ` ${label || el.textContent.trim()}`;
+  // Preserve the dot element order (dot::before is injected by CSS)
+  el.title = online ? "online" : "offline";
+}
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
     headers: { "content-type": "application/json" },
     ...options,
   });
-  const payload = await response.json().catch(() => ({}));
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
     throw new Error(payload.error?.message || response.statusText);
   }
   return payload;
 }
 
-function renderJson(node, payload) {
-  node.textContent = JSON.stringify(payload, null, 2);
+function hydrateHelpers() {
+  els.rpcUrl.value = localStorage.getItem("zkapi_rpc_url") || "";
+  els.tokenAddress.value = localStorage.getItem("zkapi_token_address") || "";
+  els.privateKey.value = localStorage.getItem("zkapi_private_key") || "";
+  els.noteTtl.value = localStorage.getItem("zkapi_note_ttl") || "2592000";
 }
 
-async function refreshStatus() {
-  try {
-    const payload = await requestJson("/funding/api/status");
-    statusNode.textContent = payload.has_note ? "Funded" : "Needs funding";
-    balanceNode.textContent = payload.note
-      ? `${payload.note.current_balance} credits`
-      : "No active note";
-  } catch (error) {
-    statusNode.textContent = "Unavailable";
-    balanceNode.textContent = error.message;
+function rememberHelpers() {
+  localStorage.setItem("zkapi_rpc_url", els.rpcUrl.value.trim());
+  localStorage.setItem("zkapi_token_address", els.tokenAddress.value.trim());
+  localStorage.setItem("zkapi_private_key", els.privateKey.value.trim());
+  localStorage.setItem("zkapi_note_ttl", els.noteTtl.value.trim());
+}
+
+function applyDemoDefaults(funding) {
+  if (!funding) return;
+  if (!els.rpcUrl.value.trim() && funding.demo_rpc_url) els.rpcUrl.value = funding.demo_rpc_url;
+  if (!els.tokenAddress.value.trim() && funding.demo_billing_token_address) els.tokenAddress.value = funding.demo_billing_token_address;
+  if (!els.privateKey.value.trim() && funding.demo_private_key) els.privateKey.value = funding.demo_private_key;
+  if ((!els.noteTtl.value.trim() || els.noteTtl.value.trim() === "2592000") && funding.demo_note_ttl_seconds) {
+    els.noteTtl.value = String(funding.demo_note_ttl_seconds);
   }
 }
 
-document.getElementById("refresh-status").addEventListener("click", refreshStatus);
+function renderCommands() {
+  if (!state.prepare || !state.overview) {
+    els.castCommands.textContent = "—";
+    return;
+  }
+  const rpcUrl = els.rpcUrl.value.trim() || "<rpc-url>";
+  const token = els.tokenAddress.value.trim() || "<billing-token>";
+  const privateKey = els.privateKey.value.trim() || "<private-key>";
+  const noteTtl = els.noteTtl.value.trim() || "<note-ttl-seconds>";
+  const vault = state.overview.funding.contract_address;
+  const amount = state.prepare.amount;
+  const zeroPath = `[${state.prepare.zero_path.join(",")}]`;
+  const commitmentBytes32 = `$(printf '0x%064s\\n' "${state.prepare.commitment.slice(2)}" | tr ' ' '0')`;
 
-document.getElementById("prepare-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const amount = Number(document.getElementById("deposit-amount").value);
+  els.castCommands.textContent = [
+    `# 1. Approve the vault`,
+    `cast send ${token} "approve(address,uint256)" \\`,
+    `  ${vault} ${amount} \\`,
+    `  --rpc-url ${rpcUrl} --private-key ${privateKey}`,
+    ``,
+    `# 2. Deposit (returns tx hash; read NoteDeposited event for expiry)`,
+    `cast send ${vault} "deposit(bytes32,uint128,uint256[32])" \\`,
+    `  ${commitmentBytes32} ${amount} '${zeroPath}' \\`,
+    `  --rpc-url ${rpcUrl} --private-key ${privateKey}`,
+    ``,
+    `# 3. Read the expiry timestamp`,
+    `cast block latest --field timestamp --rpc-url ${rpcUrl} \\`,
+    `  | awk -v ttl=${noteTtl} '{print $1 + ttl}'`,
+  ].join("\n");
+}
+
+function renderBalance() {
+  const note = state.overview?.wallet?.note;
+  if (!note) {
+    els.balance.classList.add("empty");
+    els.balanceAmount.textContent = "No active note";
+    els.balanceUnit.classList.add("hidden");
+    els.balanceMeta.classList.add("hidden");
+    els.stepFund.classList.remove("hidden");
+    els.stepRequest.classList.add("hidden");
+    return;
+  }
+  els.balance.classList.remove("empty");
+  els.balanceAmount.textContent = note.current_balance.toLocaleString();
+  els.balanceUnit.classList.remove("hidden");
+  els.balanceMeta.classList.remove("hidden");
+  els.balanceNoteId.textContent = `#${note.note_id}`;
+  els.balanceDeposit.textContent = note.deposit_amount.toLocaleString();
+  els.balanceExpiry.textContent = formatExpiry(note.expiry_ts);
+  els.stepFund.classList.add("hidden");
+  els.stepRequest.classList.remove("hidden");
+}
+
+function renderHealth() {
+  const o = state.overview;
+  if (!o) return;
+  setHealth(els.hAuth, true, "auth");
+  setHealth(els.hIndexer, Boolean(o.indexer?.available), "indexer");
+  setHealth(els.hServer, Boolean(o.server?.available && o.server?.health), "server");
+
+  els.svcAuth.textContent = `${window.location.origin}/funding`;
+  els.svcIndexer.textContent = o.funding?.indexer_url || "-";
+  els.svcServer.textContent = o.funding?.protocol_server_url || "-";
+  els.svcProof.textContent = o.runtime_proof_backend || "-";
+  els.attestationOutput.textContent = o.server?.attestation ? pretty(o.server.attestation) : pretty(o.server || {});
+}
+
+function renderPrepare() {
+  if (!state.prepare) return;
+  els.prepareResult.classList.remove("hidden");
+  els.prepSecret.textContent = truncate(state.prepare.secret);
+  els.prepCommitment.textContent = truncate(state.prepare.commitment);
+  els.prepNoteId.textContent = String(state.prepare.next_note_id);
+  els.prepRoot.textContent = truncate(state.prepare.active_root);
+
+  // Populate hidden confirm fields
+  els.secret.value = state.prepare.secret;
+  els.noteId.value = state.prepare.next_note_id;
+  els.confirmAmount.value = state.prepare.amount;
+
+  renderCommands();
+}
+
+function renderPreview() {
+  if (!state.preview) return;
+  const p = state.preview;
+  els.tracePayloadHash.textContent = truncate(p.payload_hash);
+  els.traceNullifier.textContent = truncate(p.request_nullifier);
+  els.traceLeaf.textContent = truncate(p.note_leaf);
+  els.traceSolvency.textContent = String(p.solvency_bound);
+  els.traceRoot.textContent = truncate(p.active_root);
+  els.protocolOutput.textContent = pretty(p);
+  // Open the trace drawer so the user sees the result of their preview click
+  $("request-trace-details").open = true;
+}
+
+function renderExecution() {
+  if (!state.execution) return;
+  const e = state.execution;
+  const resp = e.response;
+
+  // Extract the human text for the response card
+  let content = "";
+  if (resp) {
+    if (resp.choices?.[0]?.message?.content) content = resp.choices[0].message.content;
+    else if (resp.output?.[0]?.content?.[0]?.text) content = resp.output[0].content[0].text;
+    else if (resp.message?.content) content = resp.message.content;
+    else content = pretty(resp);
+  }
+
+  const charge = e.protocol_response?.charge_applied;
+  const nextAnchor = e.protocol_response?.next_anchor;
+  const xmssEpoch = e.protocol_response?.next_state_sig_epoch;
+
+  els.requestResult.classList.remove("empty");
+  els.requestResult.innerHTML = `
+    <div style="white-space: pre-wrap; word-break: break-word;">${escapeHtml(content)}</div>
+    <div class="response-meta">
+      <span>charge <strong>${charge ?? "—"}</strong></span>
+      <span>next anchor <strong>${truncate(nextAnchor, 6)}</strong></span>
+      <span>xmss epoch <strong>${xmssEpoch ?? "—"}</strong></span>
+    </div>
+  `;
+
+  els.traceCharge.textContent = charge != null ? String(charge) : "-";
+  els.traceNextAnchor.textContent = truncate(nextAnchor);
+  els.traceXmss.textContent = xmssEpoch != null ? String(xmssEpoch) : "-";
+  if (e.protocol_response) {
+    els.protocolOutput.textContent = pretty(e.protocol_response);
+  }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildRequestDraft() {
+  const kind = els.endpointKind.value;
+  const model = els.modelInput.value.trim() || "zkapi-echo";
+  const prompt = els.promptInput.value.trim();
+
+  if (kind === "chat") {
+    return {
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {},
+      body: { model, messages: [{ role: "user", content: prompt }] },
+    };
+  }
+  if (kind === "responses") {
+    return {
+      method: "POST",
+      path: "/v1/responses",
+      headers: {},
+      body: { model, input: prompt },
+    };
+  }
+  if (kind === "ollama") {
+    return {
+      method: "POST",
+      path: "/api/chat",
+      headers: {},
+      body: { model, messages: [{ role: "user", content: prompt }] },
+    };
+  }
+  let rawBody = {};
   try {
-    const payload = await requestJson("/funding/api/deposit/prepare", {
+    rawBody = JSON.parse(els.rawBody.value);
+  } catch (error) {
+    throw new Error(`raw body is not valid JSON: ${error.message}`);
+  }
+  return {
+    method: els.rawMethod.value.trim() || "POST",
+    path: els.rawPath.value.trim() || "/v1/chat/completions",
+    headers: {},
+    body: rawBody,
+  };
+}
+
+async function refreshOverview() {
+  try {
+    state.overview = await requestJson("/funding/api/demo");
+    applyDemoDefaults(state.overview.funding);
+    renderHealth();
+    renderBalance();
+    renderCommands();
+  } catch (error) {
+    setHealth(els.hAuth, false, "auth");
+  }
+}
+
+async function handlePrepare(event) {
+  event.preventDefault();
+  rememberHelpers();
+  const amount = Number($("deposit-amount").value);
+  try {
+    state.prepare = await requestJson("/funding/api/deposit/prepare", {
       method: "POST",
       body: JSON.stringify({ amount }),
     });
-    document.getElementById("secret").value = payload.secret;
-    document.getElementById("note-id").value = payload.next_note_id;
-    document.getElementById("confirm-amount").value = payload.amount;
-    renderJson(prepareOutput, payload);
+    renderPrepare();
   } catch (error) {
-    prepareOutput.textContent = error.message;
+    alert(`Prepare failed: ${error.message}`);
   }
-});
+}
 
-document.getElementById("confirm-form").addEventListener("submit", async (event) => {
+async function handleConfirm(event) {
   event.preventDefault();
+  els.confirmError.classList.add("hidden");
   const body = {
-    secret: document.getElementById("secret").value.trim(),
-    note_id: Number(document.getElementById("note-id").value),
-    amount: Number(document.getElementById("confirm-amount").value),
-    expiry_ts: Number(document.getElementById("expiry-ts").value),
+    secret: els.secret.value.trim(),
+    note_id: Number(els.noteId.value),
+    amount: Number(els.confirmAmount.value),
+    expiry_ts: Number(els.expiryTs.value),
   };
-
   try {
-    const payload = await requestJson("/funding/api/deposit/confirm", {
+    await requestJson("/funding/api/deposit/confirm", {
       method: "POST",
       body: JSON.stringify(body),
     });
-    renderJson(confirmOutput, payload);
-    refreshStatus();
+    await refreshOverview();
   } catch (error) {
-    confirmOutput.textContent = error.message;
+    els.confirmError.textContent = error.message;
+    els.confirmError.classList.remove("hidden");
   }
-});
+}
 
-refreshStatus();
+async function handlePreview() {
+  try {
+    const draft = buildRequestDraft();
+    state.preview = await requestJson("/funding/api/request/preview", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    renderPreview();
+  } catch (error) {
+    els.requestResult.classList.remove("empty");
+    els.requestResult.textContent = `Preview failed: ${error.message}`;
+  }
+}
+
+async function handleSubmit(event) {
+  event.preventDefault();
+  try {
+    const draft = buildRequestDraft();
+    state.execution = await requestJson("/funding/api/request/submit", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    state.preview = state.execution.preview;
+    renderPreview();
+    renderExecution();
+    await refreshOverview();
+  } catch (error) {
+    els.requestResult.classList.remove("empty");
+    els.requestResult.textContent = `Request failed: ${error.message}`;
+  }
+}
+
+async function handleRecover() {
+  try {
+    const payload = await requestJson("/funding/api/recover", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    els.requestResult.classList.remove("empty");
+    els.requestResult.textContent = payload.recovered
+      ? `Recovered pending request ${payload.request?.client_request_id ?? ""}`
+      : "No pending request to recover.";
+    await refreshOverview();
+  } catch (error) {
+    els.requestResult.classList.remove("empty");
+    els.requestResult.textContent = `Recover failed: ${error.message}`;
+  }
+}
+
+function handleEndpointKindChange() {
+  const rawMode = els.endpointKind.value === "raw";
+  els.rawFields.classList.toggle("hidden", !rawMode);
+}
+
+// Wire up
+$("prepare-form").addEventListener("submit", handlePrepare);
+$("confirm-form").addEventListener("submit", handleConfirm);
+$("request-form").addEventListener("submit", handleSubmit);
+$("preview-request").addEventListener("click", handlePreview);
+$("recover-request").addEventListener("click", handleRecover);
+$("refresh-all").addEventListener("click", (e) => { e.preventDefault(); refreshOverview(); });
+els.endpointKind.addEventListener("change", handleEndpointKindChange);
+
+for (const el of [els.rpcUrl, els.tokenAddress, els.privateKey, els.noteTtl]) {
+  el.addEventListener("input", renderCommands);
+}
+
+hydrateHelpers();
+handleEndpointKindChange();
+refreshOverview();

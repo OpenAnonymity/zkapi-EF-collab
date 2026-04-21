@@ -3,84 +3,212 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>zkAPI Funding</title>
+  <title>zkAPI — anonymous API credits</title>
   <link rel="stylesheet" href="/funding/styles.css">
 </head>
 <body>
-  <main class="shell">
-    <section class="hero">
-      <p class="eyebrow">zkAPI wallet funding</p>
-      <h1>Turn a deposit into private request credits.</h1>
-      <p class="lede">
-        This page talks directly to the local auth daemon. Generate a deposit commitment,
-        send it on-chain, then confirm the resulting note here so compatible clients can
-        spend credits through the proxy endpoints.
-      </p>
-      <div class="status-card">
-        <div>
-          <p class="label">Wallet</p>
-          <strong id="wallet-balance">Loading...</strong>
+  <main>
+    <header class="site-header">
+      <div class="site-title">zk<span class="lo">API</span></div>
+      <div class="health">
+        <span class="health-dot" id="h-auth">auth</span>
+        <span class="health-dot" id="h-indexer">indexer</span>
+        <span class="health-dot" id="h-server">server</span>
+      </div>
+    </header>
+
+    <div>
+      <h1>Anonymous API credits.</h1>
+      <p class="tagline">Deposit once on chain. Send unlinkable authenticated requests. Withdraw the rest.</p>
+    </div>
+
+    <!-- Balance card — always visible -->
+    <div id="balance" class="balance-card empty">
+      <div class="kicker">BALANCE</div>
+      <div class="balance-amount">
+        <span id="balance-amount">No active note</span>
+        <span class="unit hidden" id="balance-unit">credits</span>
+      </div>
+      <div class="balance-meta hidden" id="balance-meta">
+        <span>note <strong id="balance-note-id">-</strong></span>
+        <span>deposit <strong id="balance-deposit">-</strong></span>
+        <span>expires <strong id="balance-expiry">-</strong></span>
+      </div>
+    </div>
+
+    <!-- STEP 1: Fund (visible when no note) -->
+    <section class="step" id="step-fund">
+      <span class="step-num">01 — Fund</span>
+      <h2>Deposit to open a note</h2>
+      <p>Pick an amount, run two chain commands, confirm locally. Your secret never leaves this machine.</p>
+
+      <form id="prepare-form" class="form-stack">
+        <label>
+          Deposit amount
+          <input id="deposit-amount" name="amount" type="number" min="1" step="1" value="1000" required>
+        </label>
+        <div class="button-row">
+          <button type="submit" class="primary">Generate commitment</button>
         </div>
-        <div>
-          <p class="label">State</p>
-          <strong id="wallet-state">Checking...</strong>
+      </form>
+
+      <div id="prepare-result" class="hidden" style="margin-top: 1rem;">
+        <div class="response-card">
+          <div style="margin-bottom: 0.5rem;">
+            <strong>Commitment ready.</strong> Run the commands below, then confirm.
+          </div>
+          <div class="dev-fields">
+            <span class="f-label">secret</span><span class="f-value" id="prep-secret">-</span>
+            <span class="f-label">commitment</span><span class="f-value" id="prep-commitment">-</span>
+            <span class="f-label">note id</span><span class="f-value" id="prep-note-id">-</span>
+            <span class="f-label">active root</span><span class="f-value" id="prep-root">-</span>
+          </div>
         </div>
-        <button id="refresh-status" class="ghost">Refresh</button>
+
+        <details class="dev" open>
+          <summary>chain commands</summary>
+          <pre id="cast-commands">—</pre>
+        </details>
+
+        <details class="dev">
+          <summary>advanced chain config</summary>
+          <div class="form-stack" style="margin-top: 0.75rem;">
+            <div class="form-row">
+              <label>
+                RPC URL
+                <input id="rpc-url" type="text" placeholder="http://127.0.0.1:8545">
+              </label>
+              <label>
+                Billing token
+                <input id="token-address" type="text" placeholder="0x…">
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                Private key
+                <input id="private-key" type="password" placeholder="0x…">
+              </label>
+              <label>
+                Note TTL (seconds)
+                <input id="note-ttl" type="number" min="1" step="1" value="2592000">
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <form id="confirm-form" class="form-stack" style="margin-top: 1rem;">
+          <label>
+            Expiry timestamp (unix seconds — copy from cast output)
+            <input id="expiry-ts" name="expiry_ts" type="number" min="1" step="1" placeholder="e.g. 1795000000" required>
+          </label>
+          <!-- hidden fields populated by prepare -->
+          <input id="secret" name="secret" type="hidden">
+          <input id="note-id" name="note_id" type="hidden">
+          <input id="confirm-amount" name="amount" type="hidden">
+          <div class="button-row">
+            <button type="submit" class="primary">Confirm note locally</button>
+          </div>
+          <div id="confirm-error" class="error hidden"></div>
+        </form>
       </div>
     </section>
 
-    <section class="grid">
-      <article class="panel">
-        <p class="panel-kicker">1. Prepare deposit</p>
-        <h2>Generate the commitment and Merkle inputs</h2>
-        <form id="prepare-form" class="stack">
-          <label>
-            Deposit amount
-            <input id="deposit-amount" name="amount" type="number" min="1" step="1" value="100">
-          </label>
-          <button type="submit">Prepare funding</button>
-        </form>
-        <pre id="prepare-output" class="output">No deposit prepared yet.</pre>
-      </article>
+    <!-- STEP 2: Send requests (visible when funded) -->
+    <section class="step hidden" id="step-request">
+      <span class="step-num">02 — Send</span>
+      <h2>Send an authenticated request</h2>
+      <p>The daemon attaches a zero-knowledge proof, verifies the server's signed next state, and updates your balance.</p>
 
-      <article class="panel">
-        <p class="panel-kicker">2. Confirm deposit</p>
-        <h2>Install the funded note into the local wallet</h2>
-        <form id="confirm-form" class="stack">
+      <form id="request-form" class="form-stack">
+        <div class="form-row">
           <label>
-            Secret
-            <input id="secret" name="secret" type="text" placeholder="0x...">
+            API shape
+            <select id="endpoint-kind">
+              <option value="chat">OpenAI chat</option>
+              <option value="responses">OpenAI responses</option>
+              <option value="ollama">Ollama chat</option>
+              <option value="raw">Raw</option>
+            </select>
           </label>
           <label>
-            Note ID
-            <input id="note-id" name="note_id" type="number" min="0" step="1">
+            Model
+            <input id="model-input" type="text" value="zkapi-echo">
           </label>
+        </div>
+
+        <label>
+          Prompt
+          <textarea id="prompt-input" rows="3">hello from the zkAPI demo</textarea>
+        </label>
+
+        <div id="raw-fields" class="form-stack hidden">
+          <div class="form-row">
+            <label>
+              Method
+              <input id="raw-method" type="text" value="POST">
+            </label>
+            <label>
+              Path
+              <input id="raw-path" type="text" value="/v1/chat/completions">
+            </label>
+          </div>
           <label>
-            Amount
-            <input id="confirm-amount" name="amount" type="number" min="1" step="1">
+            Raw JSON body
+            <textarea id="raw-body" rows="6">{
+  "model": "zkapi-echo",
+  "messages": [{ "role": "user", "content": "hello" }]
+}</textarea>
           </label>
-          <label>
-            Expiry timestamp
-            <input id="expiry-ts" name="expiry_ts" type="number" min="1" step="1" placeholder="unix seconds">
-          </label>
-          <button type="submit">Confirm funding</button>
-        </form>
-        <pre id="confirm-output" class="output">Waiting for a confirmed on-chain deposit.</pre>
-      </article>
+        </div>
+
+        <div class="button-row">
+          <button type="submit" class="primary">Send request</button>
+          <button type="button" id="preview-request">Preview proof</button>
+          <button type="button" id="recover-request">Recover pending</button>
+        </div>
+      </form>
+
+      <div id="request-result" class="response-card empty">No request sent yet.</div>
+
+      <details class="dev" id="request-trace-details">
+        <summary>proof trace &amp; server verification</summary>
+        <div class="dev-fields" style="margin-top: 0.75rem;">
+          <span class="f-label">payload hash</span><span class="f-value" id="trace-payload-hash">-</span>
+          <span class="f-label">nullifier</span><span class="f-value" id="trace-nullifier">-</span>
+          <span class="f-label">note leaf</span><span class="f-value" id="trace-leaf">-</span>
+          <span class="f-label">solvency bound</span><span class="f-value" id="trace-solvency">-</span>
+          <span class="f-label">active root</span><span class="f-value" id="trace-root">-</span>
+          <span class="f-label">next anchor</span><span class="f-value" id="trace-next-anchor">-</span>
+          <span class="f-label">charge applied</span><span class="f-value" id="trace-charge">-</span>
+          <span class="f-label">xmss epoch</span><span class="f-value" id="trace-xmss">-</span>
+        </div>
+        <pre id="protocol-output" style="margin-top: 0.75rem;">Submit a request to capture the server transcript.</pre>
+      </details>
     </section>
 
-    <section class="panel wide">
-      <p class="panel-kicker">Compatibility endpoints</p>
-      <h2>Use the auth daemon as an app-facing proxy</h2>
-      <div class="endpoint-list">
-        <code>POST /request</code>
-        <code>POST /v1/chat/completions</code>
-        <code>POST /v1/responses</code>
-        <code>POST /api/chat</code>
-        <code>GET /v1/models</code>
-        <code>GET /api/tags</code>
+    <!-- Transcript / service details (always at bottom, collapsed by default) -->
+    <details class="dev">
+      <summary>service endpoints &amp; runtime</summary>
+      <div class="dev-fields" style="margin-top: 0.75rem;">
+        <span class="f-label">auth daemon</span><span class="f-value" id="svc-auth">-</span>
+        <span class="f-label">indexer</span><span class="f-value" id="svc-indexer">-</span>
+        <span class="f-label">server</span><span class="f-value" id="svc-server">-</span>
+        <span class="f-label">proof backend</span><span class="f-value" id="svc-proof">-</span>
       </div>
-    </section>
+      <pre id="attestation-output" style="margin-top: 0.75rem;">Loading attestation…</pre>
+    </details>
+
+    <div class="notice">
+      The request path uses a mock proof envelope. Nullifiers, roots, commitments, and XMSS signatures are real.
+    </div>
+
+    <footer>
+      <span>zkAPI local demo</span>
+      <span>
+        <a href="https://github.com/OpenAnonymity/ef-collaboration" target="_blank" rel="noopener">github</a>
+        · <button id="refresh-all" style="padding: 0.15rem 0.5rem; font-size: 11px;">refresh</button>
+      </span>
+    </footer>
   </main>
 
   <script src="/funding/app.js"></script>
