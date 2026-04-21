@@ -352,7 +352,7 @@ fn split_words(data: &str) -> anyhow::Result<Vec<[u8; 32]>> {
     if raw.is_empty() {
         return Ok(Vec::new());
     }
-    if raw.len() % 64 != 0 {
+    if !raw.len().is_multiple_of(64) {
         return Err(anyhow!("log data is not a whole number of 32-byte words"));
     }
     let mut words = Vec::with_capacity(raw.len() / 64);
