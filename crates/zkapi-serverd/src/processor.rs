@@ -9,6 +9,13 @@
 //! 6. Sign the next state
 //! 7. Finalize transcript
 //! 8. Return response
+//!
+//! Registration is implicit and handled here: a genesis note (carrying
+//! `state_sig_epoch == 0`) is accepted on its first request without requiring
+//! a prior server state signature; the server then signs and returns the first
+//! real state, which every subsequent request must build on. The matching
+//! client side that constructs the genesis request lives in Rasul's
+//! `zkapi-client` wallet.
 
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -1,3 +1,12 @@
+//! Upstream API compatibility shims.
+//!
+//! Translates incoming requests from common LLM API formats (OpenAI Chat
+//! Completions, OpenAI Responses API, and Ollama chat) into the protocol's
+//! internal [`CoreRequest`] shape, and reshapes the resulting [`CoreResponse`]
+//! back into the format the caller expects. Each response also carries a
+//! `zkapi` metadata block (charge applied, remaining balance, next anchor).
+//! Also renders the model-listing endpoints (`/v1/models`, `/api/tags`).
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
