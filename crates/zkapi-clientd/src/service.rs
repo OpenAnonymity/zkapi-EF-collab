@@ -1,3 +1,17 @@
+//! Core client daemon service.
+//!
+//! [`AuthService`] is the central handle behind every clientd HTTP route. It
+//! owns the wallet lifecycle — deposit preparation/confirmation, request
+//! execution, status reporting, crash recovery, and withdrawal-proof
+//! generation — and talks to the indexer for tree state and to serverd for
+//! request processing.
+//!
+//! All wallet access is serialized by an in-process mutex and guarded by an
+//! exclusive on-disk lock file (`.wallet.lock`), so concurrent requests and a
+//! second daemon instance pointed at the same state directory cannot corrupt
+//! the persisted note state. Blocking wallet/proof work runs on a blocking
+//! task so the async runtime stays responsive.
+
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};

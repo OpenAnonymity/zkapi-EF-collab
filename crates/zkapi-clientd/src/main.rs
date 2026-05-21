@@ -1,3 +1,9 @@
+//! Entry point for `zkapi-clientd`, the local client daemon for zkAPI wallets.
+//!
+//! Parses CLI flags (listen address, state directory, serverd/indexer URLs,
+//! protocol parameters, advertised models, and demo settings), builds an
+//! [`AuthService`], and serves the HTTP API on the configured address.
+
 use clap::Parser;
 use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor};
 use zkapi_types::Felt252;

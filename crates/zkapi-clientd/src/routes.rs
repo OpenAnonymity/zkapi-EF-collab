@@ -1,3 +1,18 @@
+//! HTTP routing layer for `zkapi-clientd`.
+//!
+//! Wires every endpoint the daemon exposes onto an [`AuthService`]:
+//! - upstream-compatible request endpoints (`/v1/chat/completions`,
+//!   `/v1/responses`, `/api/chat`) and model listings;
+//! - the deposit endpoints (`/deposit/prepare`, `/deposit/confirm`);
+//! - local credit management at `/status` (and `/wallet/status`), reporting
+//!   whether a note is active, the current balance, expiry timestamp, and a
+//!   link to the funding page;
+//! - crash recovery (`/wallet/recover`) and the funding-page UI assets and
+//!   demo endpoints under `/funding`.
+//!
+//! Errors are rendered in either a generic or OpenAI-style envelope, with a
+//! funding-page hint attached on `402 Payment Required`.
+
 use std::sync::Arc;
 
 use axum::extract::State;
