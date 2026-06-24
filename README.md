@@ -121,6 +121,14 @@ deposit → the note activates automatically once the `NoteDeposited` event land
 Your secret never leaves the machine — only the public commitment and on-chain
 values cross. The page also shows a live balance/expiry panel and request log.
 
+The deposit step is shown only while there is **no active note** (the wallet
+holds one note at a time), so after a deposit the page switches to the request
+view. To demo the MetaMask deposit itself, start the stack **unfunded**:
+
+```bash
+KEEP_UP=1 SKIP_DEPOSIT=1 ./scripts/e2e-demo.sh
+```
+
 ### Swap the authentication method
 
 Both daemons accept `--auth-scheme {state-anchor,blind-signature}` (client and
