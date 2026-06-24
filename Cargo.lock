@@ -2814,6 +2814,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "clap",
  "hex",
  "reqwest",
  "serde",
@@ -2822,6 +2823,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zkapi-core",
  "zkapi-types",
 ]
