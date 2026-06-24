@@ -267,16 +267,36 @@ printf '%s\n' "$confirm_payload" >"$RUN_DIR/confirm-deposit.json"
 # Interactive mode: leave the funded stack running and let the operator drive
 # each client function by hand (KEEP_UP=1 ./scripts/e2e-demo.sh).
 if [ -n "${KEEP_UP:-}" ]; then
+  DEPLOYER_ADDR="$(cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null || echo '<address of your --private-key>')"
   cat <<EOF
 
 ============================================================================
   Stack is UP and a note is funded (balance ${DEPOSIT_AMOUNT}).
   Drive each client function by hand. Responses come from the 'echo' provider.
 
-  Funding UI (deposit via MetaMask, send requests, recover, live status):
-    open ${AUTH_URL}/funding
+  ----------------------------------------------------------------------------
+  MetaMask setup (one time)
+  ----------------------------------------------------------------------------
+  1. Add a custom network:  RPC ${RPC_URL}   Chain ID ${CHAIN_ID}   Symbol ETH
+  2. Import the funded test account (it holds ETH + the billing tokens):
+       private key: ${PRIVATE_KEY}
+       address:     ${DEPLOYER_ADDR}
+     WARNING: this is a publicly-known dev key — local anvil only, never mainnet.
 
-  Or by curl against the client daemon at ${AUTH_URL}:
+  ----------------------------------------------------------------------------
+  Deposit through the funding UI  ->  open ${AUTH_URL}/funding
+  ----------------------------------------------------------------------------
+  - With MetaMask unlocked on the network above: enter an amount, click
+    "Generate commitment", then "Deposit with MetaMask".
+  - Approve (tx 1) then Deposit (tx 2) in MetaMask; the note then activates
+    automatically. The billing-token address and RPC are pre-filled from the
+    demo config. Your secret stays local — only the commitment goes on chain.
+  - If MetaMask says "unrecognized chain", you skipped step 1. If approve/deposit
+    reverts, you are on the wrong account (use the imported one above).
+
+  ----------------------------------------------------------------------------
+  Or drive every function by curl against the client daemon (${AUTH_URL}):
+  ----------------------------------------------------------------------------
 
   # status — balance / expiry / pending request
   curl -s ${AUTH_URL}/wallet/status | jq
