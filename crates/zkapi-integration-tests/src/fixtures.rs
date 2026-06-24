@@ -12,7 +12,7 @@ use starknet_types_core::curve::ProjectivePoint;
 use tempfile::TempDir;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
-use zkapi_client::config::ClientConfig;
+use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::journal::PendingRequestJournal;
 use zkapi_client::note_state::NoteState;
 use zkapi_core::commitment::{
@@ -27,9 +27,11 @@ use zkapi_proof::{verify_request_proof, RequestProofBuilder};
 use zkapi_types::domain::{DOMAIN_ANCHOR, DOMAIN_BLIND};
 use zkapi_types::wire::{
     ApiRequest, ClearanceRequest, ClearanceResponse, CurvePointWire, ErrorResponse,
-    RecoveryResponse, RequestResponse,
+    ProofArtifactWire, ProofBackendWire, RecoveryResponse, RequestResponse,
 };
-use zkapi_types::{Felt252, RequestPublicInputs, MERKLE_DEPTH};
+use zkapi_types::{
+    canonical_response_hash, EpochRoots, Felt252, RequestPublicInputs, MERKLE_DEPTH,
+};
 
 pub const TEST_PROTOCOL_VERSION: u16 = 1;
 pub const TEST_CHAIN_ID: u64 = 31337;
@@ -146,7 +148,7 @@ impl MockApiState {
         }
 
         let proof_bytes = base64::engine::general_purpose::STANDARD
-            .decode(api_request.proof_envelope.as_bytes())
+            .decode(api_request.proof.proof.as_bytes())
             .map_err(|err| {
                 error_body(
                     &api_request.client_request_id,
@@ -241,7 +243,7 @@ impl MockApiState {
             request_nullifier: public_inputs.request_nullifier,
             response_code: 200,
             response_payload: api_request.payload.clone(),
-            response_hash: api_request.payload_hash,
+            response_hash: canonical_response_hash(api_request.payload.as_bytes()),
             charge_applied: TEST_RESPONSE_CHARGE,
             next_commitment: CurvePointWire {
                 x: next_cx,
@@ -337,7 +339,26 @@ pub fn wallet_config(server_url: &str, state_dir: &Path) -> ClientConfig {
         policy_enabled: false,
         server_url: server_url.to_string(),
         state_dir: state_dir.display().to_string(),
+        proof_mode: ClientProofMode::DevWitnessEnvelope,
+        trusted_epoch_roots: test_epoch_roots(),
     }
+}
+
+/// Trusted signing roots published by the mock server.
+///
+/// The mock server's XMSS signers are seeded deterministically (see
+/// [`MockApiState::new`]), so their roots are reproducible and can be wired
+/// into the client's trusted epoch registry without round-tripping the server.
+pub fn test_epoch_roots() -> Vec<EpochRoots> {
+    let state_signer =
+        XmssKeypair::generate_with_height(&FieldElement::from(101u64), TEST_SIGNER_HEIGHT);
+    let clear_signer =
+        XmssKeypair::generate_with_height(&FieldElement::from(202u64), TEST_SIGNER_HEIGHT);
+    vec![EpochRoots {
+        epoch: TEST_SERVER_EPOCH,
+        state_root: state_signer.root_felt(),
+        clear_root: clear_signer.root_felt(),
+    }]
 }
 
 pub fn journal_path(state_dir: &Path) -> PathBuf {
@@ -454,7 +475,11 @@ pub fn build_request_artifacts(
             payload: payload.to_string(),
             payload_hash,
             public_inputs: public_inputs.clone(),
-            proof_envelope: base64::engine::general_purpose::STANDARD.encode(proof_bytes),
+            proof: ProofArtifactWire {
+                backend: ProofBackendWire::StwoCairo,
+                public_output_hash: public_inputs.public_output_hash(),
+                proof: base64::engine::general_purpose::STANDARD.encode(proof_bytes),
+            },
         },
         journal: PendingRequestJournal {
             exists: true,

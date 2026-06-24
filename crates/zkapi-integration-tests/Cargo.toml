@@ -19,10 +19,10 @@ starknet-types-core.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tower.workspace = true
-zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
+zkapi-client = { path = "../../protocol/rust/crates/zkapi-client", features = ["dev-witness-envelope"] }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-crypto = { path = "../../protocol/rust/crates/zkapi-crypto" }
-zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof" }
+zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof", features = ["dev-witness-envelope"] }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 
 [[test]]

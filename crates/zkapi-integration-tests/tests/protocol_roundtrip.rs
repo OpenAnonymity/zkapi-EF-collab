@@ -243,7 +243,7 @@ fn request_artifacts_round_trip_through_merkle_and_proof_verification() {
         FieldElement::from(3u64),
     );
     let proof_bytes = base64::engine::general_purpose::STANDARD
-        .decode(request.api_request.proof_envelope.as_bytes())
+        .decode(request.api_request.proof.proof.as_bytes())
         .expect("proof bytes");
     let leaf = compute_note_leaf_for_fixture();
 
