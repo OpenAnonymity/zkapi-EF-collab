@@ -335,9 +335,23 @@ echo "Policy slash reuses the same homomorphic charge with a higher cap"
 echo "(serverd --policy-enabled --policy-charge-cap N). Triggering one requires an"
 echo "upstream returning x-zkapi-policy-* headers via --provider http-proxy."
 
+# Pretty-print every JSON artifact so they are easy to read afterwards.
+echo
+echo "Formatting JSON artifacts in $RUN_DIR ..."
+for f in "$RUN_DIR"/*.json; do
+  [ -f "$f" ] || continue
+  if formatted="$(jq . "$f" 2>/dev/null)"; then
+    printf '%s\n' "$formatted" >"$f"
+  fi
+done
+
+echo
+echo "Final wallet state:"
+jq . "$RUN_DIR/wallet-status.json"
+
 echo
 echo "Demo complete."
-echo "Vault:        $VAULT_ADDRESS"
-echo "Billing token:$TOKEN_ADDRESS"
-echo "Artifacts:    $RUN_DIR"
-echo "Logs:         $LOG_DIR"
+echo "Vault:         $VAULT_ADDRESS"
+echo "Billing token: $TOKEN_ADDRESS"
+echo "Artifacts:     $RUN_DIR  (formatted JSON)"
+echo "Logs:          $LOG_DIR"
