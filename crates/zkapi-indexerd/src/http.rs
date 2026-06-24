@@ -9,7 +9,9 @@ use axum::{Json, Router};
 use zkapi_types::Felt252;
 
 use crate::poller::{spawn_json_rpc_log_poller, PollerConfig};
-use crate::service::{IndexerService, NextNoteIdResponse, TreePathResponse, TreeRootResponse};
+use crate::service::{
+    IndexerService, NextNoteIdResponse, TreePathResponse, TreeRootResponse, TreeSnapshotResponse,
+};
 use crate::tree_mirror::TreeMirror;
 
 /// Runtime configuration for the indexer HTTP server.
@@ -68,6 +70,7 @@ pub fn create_router(service: Arc<IndexerService>) -> Router {
         .route("/health", get(handle_health))
         .route("/v1/tree/root", get(handle_root))
         .route("/v1/tree/next-note-id", get(handle_next_note_id))
+        .route("/v1/tree/snapshot", get(handle_snapshot))
         .route("/v1/tree/notes/{note_id}/path", get(handle_note_path))
         .route("/v1/tree/notes/{note_id}/zero-path", get(handle_zero_path))
         .with_state(service)
@@ -81,6 +84,12 @@ async fn handle_root(State(service): State<AppState>) -> Json<TreeRootResponse> 
     Json(TreeRootResponse {
         root: service.get_root(),
     })
+}
+
+/// Privacy-safe whole-tree snapshot. The same payload is returned regardless of
+/// which note the caller cares about, so the untrusted indexer never learns it.
+async fn handle_snapshot(State(service): State<AppState>) -> Json<TreeSnapshotResponse> {
+    Json(service.get_snapshot())
 }
 
 async fn handle_next_note_id(State(service): State<AppState>) -> Json<NextNoteIdResponse> {
@@ -148,5 +157,52 @@ mod tests {
 
         assert_eq!(response.note_id, 0);
         assert_eq!(response.leaf, Felt252::ZERO);
+    }
+
+    #[tokio::test]
+    async fn snapshot_lets_a_client_rebuild_paths_locally() {
+        use zkapi_core::merkle::MerkleTree;
+
+        let service = Arc::new(IndexerService::new(Arc::new(RwLock::new(TreeMirror::new()))));
+        for nid in 0..3u32 {
+            service.process_event(&VaultEvent::NoteDeposited {
+                note_id: nid,
+                commitment: Felt252::from_u64(100 + nid as u64),
+                amount: 100,
+                expiry_ts: 1_700_000_000,
+                new_root: Felt252::from_u64(1),
+            });
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = create_router(service.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let snapshot = reqwest::get(format!("http://{addr}/v1/tree/snapshot"))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<TreeSnapshotResponse>()
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.leaves.len() as u32, snapshot.next_note_id);
+
+        // A client rebuilds the whole tree from the snapshot alone — no per-slot
+        // request — and recovers the root plus any sibling path locally.
+        let mut local = MerkleTree::new();
+        for leaf in &snapshot.leaves {
+            local.insert(*leaf);
+        }
+        assert_eq!(local.root(), snapshot.root);
+        assert_eq!(
+            local.get_siblings(1).to_vec(),
+            service.get_note_path(1).to_vec(),
+            "locally derived path must match the indexer's per-slot path"
+        );
+
+        server.abort();
     }
 }

@@ -14,5 +14,7 @@ pub mod tree_mirror;
 
 pub use http::{create_router, run_indexer, IndexerConfig};
 pub use poller::{JsonRpcLogPoller, PollerConfig};
-pub use service::{IndexerService, NextNoteIdResponse, TreePathResponse, TreeRootResponse};
+pub use service::{
+    IndexerService, NextNoteIdResponse, TreePathResponse, TreeRootResponse, TreeSnapshotResponse,
+};
 pub use tree_mirror::TreeMirror;

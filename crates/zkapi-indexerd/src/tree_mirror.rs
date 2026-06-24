@@ -33,6 +33,18 @@ impl TreeMirror {
         self.next_note_id
     }
 
+    /// All current leaves, indexed 0..next_note_id.
+    ///
+    /// This backs the privacy-safe snapshot endpoint: a client fetches the same
+    /// full leaf vector regardless of which note it cares about, rebuilds the
+    /// tree locally, and derives any sibling path without revealing its note_id
+    /// to the (untrusted) indexer.
+    pub fn current_leaves(&self) -> Vec<Felt252> {
+        (0..self.next_note_id)
+            .map(|i| self.tree.get_leaf(i))
+            .collect()
+    }
+
     /// Get the sibling path for a note's current leaf.
     pub fn get_path(&self, note_id: u32) -> [Felt252; MERKLE_DEPTH] {
         self.tree.get_siblings(note_id)
