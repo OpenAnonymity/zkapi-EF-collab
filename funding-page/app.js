@@ -36,6 +36,8 @@ const els = {
   confirmAmount: $("confirm-amount"),
   expiryTs: $("expiry-ts"),
   confirmError: $("confirm-error"),
+  metamaskDeposit: $("metamask-deposit"),
+  depositStatus: $("deposit-status"),
   // chain helpers
   rpcUrl: $("rpc-url"),
   tokenAddress: $("token-address"),
@@ -420,9 +422,119 @@ function handleEndpointKindChange() {
   els.rawFields.classList.toggle("hidden", !rawMode);
 }
 
+// ---- Browser-wallet (MetaMask) deposit ------------------------------------
+
+const VAULT_ABI = [
+  "function deposit(bytes32 commitment, uint128 amount, uint256[32] siblings)",
+  "event NoteDeposited(uint32 indexed noteId, bytes32 indexed commitment, uint128 amount, uint64 expiryTs, uint256 newRoot)",
+];
+const ERC20_ABI = ["function approve(address spender, uint256 amount) returns (bool)"];
+
+function setDepositStatus(message, isError = false) {
+  els.depositStatus.textContent = message;
+  els.depositStatus.classList.remove("hidden");
+  els.depositStatus.classList.toggle("error", isError);
+}
+
+// Pad a 0x felt to a 32-byte bytes32 (the contract's commitment type).
+function toBytes32(felt) {
+  return "0x" + felt.replace(/^0x/, "").padStart(64, "0");
+}
+
+async function depositWithMetaMask() {
+  if (typeof ethers === "undefined") {
+    setDepositStatus("ethers.js failed to load; use the manual chain commands below.", true);
+    return;
+  }
+  if (!window.ethereum) {
+    setDepositStatus("No browser wallet detected. Install MetaMask or use the manual commands.", true);
+    return;
+  }
+  if (!state.prepare || !state.overview) {
+    setDepositStatus('Click "Generate commitment" first.', true);
+    return;
+  }
+  const token = els.tokenAddress.value.trim();
+  if (!token) {
+    setDepositStatus("Set the billing token address (advanced chain config).", true);
+    return;
+  }
+  const vault = state.overview.funding.contract_address;
+  const wantChain = Number(state.overview.funding.chain_id);
+  const amount = BigInt(state.prepare.amount);
+  const commitment = toBytes32(state.prepare.commitment);
+  const siblings = state.prepare.zero_path.map((s) => BigInt(s));
+
+  try {
+    setDepositStatus("Connecting wallet…");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== wantChain) {
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + wantChain.toString(16) }],
+        });
+      } catch (switchErr) {
+        setDepositStatus(`Switch your wallet to chain ${wantChain} and retry. (${switchErr.message || switchErr})`, true);
+        return;
+      }
+    }
+
+    const signer = await provider.getSigner();
+    const erc20 = new ethers.Contract(token, ERC20_ABI, signer);
+    setDepositStatus("Approving the vault to pull your deposit… confirm in MetaMask.");
+    await (await erc20.approve(vault, amount)).wait();
+
+    const vaultContract = new ethers.Contract(vault, VAULT_ABI, signer);
+    setDepositStatus("Submitting deposit… confirm in MetaMask.");
+    const receipt = await (await vaultContract.deposit(commitment, amount, siblings)).wait();
+
+    // Read the on-chain NoteDeposited event for the canonical note id + expiry.
+    let noteId;
+    let expiryTs;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = vaultContract.interface.parseLog(log);
+        if (parsed && parsed.name === "NoteDeposited") {
+          noteId = Number(parsed.args.noteId);
+          expiryTs = Number(parsed.args.expiryTs);
+          break;
+        }
+      } catch (_) {
+        // not our event
+      }
+    }
+    if (noteId === undefined) {
+      setDepositStatus("Deposit landed, but no NoteDeposited event was found in the receipt.", true);
+      return;
+    }
+
+    setDepositStatus(`Deposited note #${noteId}. Activating locally…`);
+    // Activate the note in clientd. The secret stays on this machine — only the
+    // commitment and on-chain values crossed to the wallet/chain.
+    await requestJson("/funding/api/deposit/confirm", {
+      method: "POST",
+      body: JSON.stringify({
+        secret: state.prepare.secret,
+        note_id: noteId,
+        amount: Number(amount),
+        expiry_ts: expiryTs,
+      }),
+    });
+    setDepositStatus(`Note #${noteId} is active. Balance updated.`);
+    await refreshOverview();
+  } catch (error) {
+    setDepositStatus(`Deposit failed: ${error.shortMessage || error.message || error}`, true);
+  }
+}
+
 // Wire up
 $("prepare-form").addEventListener("submit", handlePrepare);
 $("confirm-form").addEventListener("submit", handleConfirm);
+els.metamaskDeposit.addEventListener("click", depositWithMetaMask);
 $("request-form").addEventListener("submit", handleSubmit);
 $("preview-request").addEventListener("click", handlePreview);
 $("recover-request").addEventListener("click", handleRecover);
