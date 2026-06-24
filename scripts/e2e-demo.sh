@@ -223,6 +223,10 @@ echo "Starting client daemon..."
 AUTH_PID=$!
 wait_status_ok "${AUTH_URL}/health" "auth daemon"
 
+# With KEEP_UP + SKIP_DEPOSIT, leave the account UNFUNDED so the funding UI
+# shows the "01 - Fund" deposit step (Deposit with MetaMask). Otherwise fund a
+# note as usual. (The UI hides the deposit step whenever a note is active.)
+if [ -z "${KEEP_UP:-}" ] || [ -z "${SKIP_DEPOSIT:-}" ]; then
 echo "Preparing deposit..."
 prepare_payload="$(curl -fsSL \
   -X POST "${AUTH_URL}/funding/api/deposit/prepare" \
@@ -263,15 +267,21 @@ confirm_payload="$(curl -fsSL \
   -H "content-type: application/json" \
   -d "{\"secret\":\"${SECRET}\",\"note_id\":${NOTE_ID},\"amount\":${DEPOSIT_AMOUNT},\"expiry_ts\":${expiry_ts}}")"
 printf '%s\n' "$confirm_payload" >"$RUN_DIR/confirm-deposit.json"
+fi
 
 # Interactive mode: leave the funded stack running and let the operator drive
 # each client function by hand (KEEP_UP=1 ./scripts/e2e-demo.sh).
 if [ -n "${KEEP_UP:-}" ]; then
   DEPLOYER_ADDR="$(cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null || echo '<address of your --private-key>')"
+  if [ -n "${SKIP_DEPOSIT:-}" ]; then
+    fund_status="No note funded yet — open the funding UI and deposit via MetaMask (the '01 - Fund' step is shown only while there is no active note)."
+  else
+    fund_status="A note is funded (balance ${DEPOSIT_AMOUNT}). NOTE: the UI's deposit step is hidden because one note is already active — re-run with SKIP_DEPOSIT=1 to demo a fresh MetaMask deposit."
+  fi
   cat <<EOF
 
 ============================================================================
-  Stack is UP and a note is funded (balance ${DEPOSIT_AMOUNT}).
+  Stack is UP. ${fund_status}
   Drive each client function by hand. Responses come from the 'echo' provider.
 
   ----------------------------------------------------------------------------
