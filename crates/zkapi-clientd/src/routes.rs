@@ -16,12 +16,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::compat;
 use crate::error::AuthError;
@@ -60,7 +61,25 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/request/preview", post(request_preview))
         .route("/funding/api/request/submit", post(request_submit))
         .route("/funding/api/recover", post(wallet_recover))
+        .layer(local_cors_layer())
         .with_state(service)
+}
+
+/// A deliberately narrow CORS policy.
+///
+/// The funding UI is served by this same daemon, so it is same-origin and does
+/// not depend on CORS at all. Cross-origin access is restricted to loopback
+/// origins (any port) for local browser tooling, and credentials are never
+/// enabled — so this is never the unsafe wildcard-origin-with-credentials
+/// combination.
+fn local_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE])
+        .allow_origin(AllowOrigin::predicate(|origin, _request| {
+            let origin = origin.as_bytes();
+            origin.starts_with(b"http://localhost") || origin.starts_with(b"http://127.0.0.1")
+        }))
 }
 
 pub async fn run(service: Arc<AuthService>, listen_addr: &str) -> anyhow::Result<()> {
