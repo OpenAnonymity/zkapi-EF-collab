@@ -24,6 +24,8 @@ pub struct ServerConfig {
     pub policy_charge_cap: u128,
     /// Whether policy enforcement is enabled.
     pub policy_enabled: bool,
+    /// Authentication method this server runs; clients must match.
+    pub auth_scheme: zkapi_auth::AuthSchemeKind,
     /// HTTP listen address (e.g. "0.0.0.0:3000").
     pub listen_addr: String,
     /// Provider backend used for request execution.
@@ -65,6 +67,7 @@ impl Default for ServerConfig {
             request_charge_cap: 1_000_000,
             policy_charge_cap: 10_000_000,
             policy_enabled: false,
+            auth_scheme: zkapi_auth::AuthSchemeKind::StateAnchor,
             listen_addr: "0.0.0.0:3000".to_string(),
             provider_kind: ProviderKind::Echo,
             echo_fixed_charge: 1,

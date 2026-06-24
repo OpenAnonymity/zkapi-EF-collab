@@ -33,6 +33,9 @@ struct Cli {
     policy_charge_cap: u128,
     #[arg(long, default_value_t = false)]
     policy_enabled: bool,
+    /// Authentication method: `state-anchor` (default) or `blind-signature`.
+    #[arg(long, default_value = "state-anchor")]
+    auth_scheme: String,
     #[arg(long = "model", default_values_t = vec!["zkapi-echo".to_string()])]
     models: Vec<String>,
     #[arg(long)]
@@ -190,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                 request_charge_cap: cli.request_charge_cap,
                 policy_charge_cap: cli.policy_charge_cap,
                 policy_enabled: cli.policy_enabled,
+                auth_scheme: parse_auth_scheme(&cli.auth_scheme)?,
                 listen_addr: listen,
                 provider_kind: match provider {
                     ProviderArg::Echo => ProviderKind::Echo,
@@ -298,6 +302,7 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
         request_charge_cap: cli.request_charge_cap,
         policy_charge_cap: cli.policy_charge_cap,
         policy_enabled: cli.policy_enabled,
+        auth_scheme: parse_auth_scheme(&cli.auth_scheme)?,
         protocol_server_url: cli.protocol_server_url.clone(),
         indexer_url: cli.indexer_url.clone(),
         listen_addr: "127.0.0.1:11434".to_string(),
@@ -345,6 +350,10 @@ fn request_body(json: Option<String>, body_file: Option<PathBuf>) -> anyhow::Res
 
 fn parse_felt(label: &str, value: &str) -> anyhow::Result<Felt252> {
     Felt252::from_hex(value).map_err(|err| anyhow::anyhow!("invalid {label}: {err}"))
+}
+
+fn parse_auth_scheme(value: &str) -> anyhow::Result<zkapi_auth::AuthSchemeKind> {
+    value.parse().map_err(|err: String| anyhow::anyhow!(err))
 }
 
 fn parse_destination(value: &str) -> anyhow::Result<[u8; 20]> {

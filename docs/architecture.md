@@ -238,9 +238,16 @@ Existing:
 | Upstream API backend           | `zkapi-serverdd::ApiProvider` trait (`provider.rs`)     |
 | Proof verifier                 | `contracts/src/interfaces/IZkApiProofAdapter.sol`     |
 | API compatibility shim         | `zkapi-clientd::compat` (OpenAI, OpenResponses, Ollama)  |
+| Authentication method          | `zkapi-auth::CredentialScheme` (`state-anchor`, `blind-signature`) |
+
+The authentication method is swappable: `zkapi-auth` defines `CredentialScheme`
+and ships two implementations — `StateAnchorScheme` (the reference, delegating
+to the protocol's Pedersen/nullifier/XMSS primitives) and `BlindSignatureScheme`
+(blind Schnorr credentials). Both daemons select it with `--auth-scheme` and
+negotiate it over `/v1/attestation`. See [`auth-schemes.md`](./auth-schemes.md).
 
 Absent but desirable (see [`roadmap.md`](./roadmap.md)):
 
-- Credential scheme abstraction (for alternate backends like RLN, ARC)
+- Additional credential backends behind `CredentialScheme` (RLN, ARC)
 - TEE attestation backends (Nitro, TDX, SGX, SEV-SNP)
 - Real Cairo prover runtime bridge in the Rust stack

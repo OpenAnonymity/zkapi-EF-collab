@@ -5,6 +5,7 @@ members = [
     "crates/zkapi-clientd",
     "crates/zkapi-serverd",
     "crates/zkapi-indexerd",
+    "crates/zkapi-auth",
     "crates/zkapi-integration-tests",
 ]
 default-members = ["crates/zkapi-cli", "crates/zkapi-clientd"]

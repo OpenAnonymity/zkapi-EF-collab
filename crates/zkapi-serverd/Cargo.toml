@@ -10,6 +10,7 @@ zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-crypto = { path = "../../protocol/rust/crates/zkapi-crypto" }
 zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof", features = ["dev-witness-envelope"] }
+zkapi-auth = { path = "../zkapi-auth" }
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }

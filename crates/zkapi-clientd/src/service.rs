@@ -143,6 +143,8 @@ pub struct ServerHealthSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexer_url: Option<String>,
     pub policy_enabled: bool,
+    #[serde(default)]
+    pub auth_scheme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -158,6 +160,8 @@ pub struct ServerAttestationSnapshot {
     pub clear_sig_root: Felt252,
     pub state_signatures_remaining: u32,
     pub clear_signatures_remaining: u32,
+    #[serde(default)]
+    pub auth_scheme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -426,6 +430,7 @@ impl AuthService {
         &self,
         request: CoreRequest,
     ) -> Result<RequestDemoResult, AuthError> {
+        self.ensure_scheme_agreement().await?;
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
@@ -605,6 +610,26 @@ impl AuthService {
             Ok(att) => epoch_roots_from_attestation(&att),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Fail fast if the server runs a different authentication method than this
+    /// client is configured for (the swappable-auth handshake). Servers that
+    /// predate scheme reporting return an empty value and are not rejected.
+    async fn ensure_scheme_agreement(&self) -> Result<(), AuthError> {
+        let attestation_url = format!(
+            "{}/v1/attestation",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
+        if let Ok(att) = fetch_json::<ServerAttestationSnapshot>(&attestation_url).await {
+            let want = self.config.auth_scheme.as_str();
+            if !att.auth_scheme.is_empty() && att.auth_scheme != want {
+                return Err(AuthError::Wallet(format!(
+                    "auth scheme mismatch: client is '{}', server is '{}'",
+                    want, att.auth_scheme
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

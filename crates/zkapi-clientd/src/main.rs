@@ -34,6 +34,9 @@ struct Args {
     policy_charge_cap: u128,
     #[arg(long, default_value_t = false)]
     policy_enabled: bool,
+    /// Authentication method: `state-anchor` (default) or `blind-signature`.
+    #[arg(long, default_value = "state-anchor")]
+    auth_scheme: String,
     #[arg(long = "model", default_values_t = vec!["zkapi-echo".to_string()])]
     models: Vec<String>,
     #[arg(long)]
@@ -63,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
         request_charge_cap: args.request_charge_cap,
         policy_charge_cap: args.policy_charge_cap,
         policy_enabled: args.policy_enabled,
+        auth_scheme: args
+            .auth_scheme
+            .parse()
+            .map_err(|err: String| anyhow::anyhow!(err))?,
         protocol_server_url: args.protocol_server_url,
         indexer_url: args.indexer_url,
         listen_addr: args.listen.clone(),

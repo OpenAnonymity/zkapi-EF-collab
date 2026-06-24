@@ -13,6 +13,7 @@ path = "src/main.rs"
 zkapi-clientd = { path = "../zkapi-clientd" }
 zkapi-serverd = { path = "../zkapi-serverd" }
 zkapi-indexerd = { path = "../zkapi-indexerd" }
+zkapi-auth = { path = "../zkapi-auth" }
 zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
