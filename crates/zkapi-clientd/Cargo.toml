@@ -10,7 +10,7 @@ name = "zkapi-clientd"
 path = "src/main.rs"
 
 [dependencies]
-zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
+zkapi-client = { path = "../../protocol/rust/crates/zkapi-client", features = ["dev-witness-envelope"] }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 anyhow = { workspace = true }

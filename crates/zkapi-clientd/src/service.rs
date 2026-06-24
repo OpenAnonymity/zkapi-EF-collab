@@ -17,24 +17,22 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha3::{Digest, Sha3_256};
-use zkapi_client::config::ClientConfig;
+use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
 use zkapi_core::nullifier::compute_nullifier;
 use zkapi_types::wire::RequestResponse;
-use zkapi_types::{Felt252, WithdrawalPublicInputs};
+use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputs};
 
 fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
-    let digest = Sha3_256::digest(payload.as_ref());
-    let mut bytes = [0u8; 32];
-    bytes[1..].copy_from_slice(&digest[..31]);
-    Felt252(bytes)
+    // Must match the protocol's canonical request-payload binding; the wallet
+    // re-derives and rejects on mismatch (`request_flow`), and the value feeds
+    // the request public inputs.
+    zkapi_types::canonical_payload_hash(payload.as_ref())
 }
 
 use crate::config::{AuthConfig, ModelDescriptor};
@@ -284,7 +282,7 @@ impl AuthService {
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let wallet = load_wallet(&config)?;
+            let wallet = load_wallet(&config, Vec::new())?;
             Ok(wallet_status(&wallet))
         })
         .await
@@ -299,7 +297,7 @@ impl AuthService {
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let wallet = load_wallet(&config)?;
+            let wallet = load_wallet(&config, Vec::new())?;
             if wallet.state().is_some() {
                 return Err(AuthError::InvalidInput(
                     "wallet already has an active note".to_string(),
@@ -337,7 +335,7 @@ impl AuthService {
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let mut wallet = load_wallet(&config)?;
+            let mut wallet = load_wallet(&config, Vec::new())?;
             wallet.confirm_deposit(
                 request.secret,
                 request.note_id,
@@ -352,12 +350,13 @@ impl AuthService {
     pub async fn recover(&self) -> Result<RecoverResult, AuthError> {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
+        let trusted_roots = self.fetch_trusted_roots().await;
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let mut wallet = load_wallet(&config)?;
+            let mut wallet = load_wallet(&config, trusted_roots)?;
             let runtime = current_thread_runtime()?;
             let recovered = runtime.block_on(wallet.recover())?;
             let request = recovered.as_ref().map(|response| {
@@ -414,7 +413,7 @@ impl AuthService {
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let wallet = load_wallet(&config)?;
+            let wallet = load_wallet(&config, Vec::new())?;
             let runtime = current_thread_runtime()?;
             runtime.block_on(async move {
                 build_request_preview(&config, &indexer, &wallet, request).await
@@ -430,12 +429,13 @@ impl AuthService {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
+        let trusted_roots = self.fetch_trusted_roots().await;
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let mut wallet = load_wallet(&config)?;
+            let mut wallet = load_wallet(&config, trusted_roots)?;
             let payload = serde_json::to_string(&request)
                 .map_err(|err| AuthError::Serialization(err.to_string()))?;
             let payload_hash = hash_payload(&payload);
@@ -496,12 +496,13 @@ impl AuthService {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
+        let trusted_roots = self.fetch_trusted_roots().await;
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let mut wallet = load_wallet(&config)?;
+            let mut wallet = load_wallet(&config, trusted_roots)?;
             let runtime = current_thread_runtime()?;
 
             runtime.block_on(async move {
@@ -522,7 +523,9 @@ impl AuthService {
                 Ok(WithdrawalPlan {
                     mode,
                     public_inputs,
-                    proof_base64: base64::engine::general_purpose::STANDARD.encode(proof),
+                    // `proof.proof` already carries the base64-encoded opaque
+                    // proof blob that the on-chain proof adapter consumes.
+                    proof_base64: proof.proof,
                 })
             })
         })
@@ -584,6 +587,23 @@ impl AuthService {
                 attestation: None,
                 error: Some(err),
             },
+        }
+    }
+
+    /// Fetch the server's published signing roots so the wallet can validate
+    /// state/clearance signatures against a trusted epoch registry.
+    ///
+    /// On failure we return an empty registry; genesis (registration) requests
+    /// do not need it, and any later verification then fails closed with a
+    /// clear "epoch is not trusted" error rather than trusting a forged root.
+    async fn fetch_trusted_roots(&self) -> Vec<EpochRoots> {
+        let attestation_url = format!(
+            "{}/v1/attestation",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
+        match fetch_json::<ServerAttestationSnapshot>(&attestation_url).await {
+            Ok(att) => epoch_roots_from_attestation(&att),
+            Err(_) => Vec::new(),
         }
     }
 }
@@ -708,7 +728,7 @@ fn wallet_lock_path(state_dir: &Path) -> PathBuf {
     state_dir.join(".wallet.lock")
 }
 
-fn client_config(config: &AuthConfig) -> ClientConfig {
+fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> ClientConfig {
     ClientConfig {
         protocol_version: config.protocol_version,
         chain_id: config.chain_id,
@@ -718,11 +738,40 @@ fn client_config(config: &AuthConfig) -> ClientConfig {
         policy_enabled: config.policy_enabled,
         server_url: config.protocol_server_url.clone(),
         state_dir: config.state_dir.to_string_lossy().to_string(),
+        // The runtime daemon path uses the development witness envelope; real
+        // Stwo-Cairo proving is the production proof mode (see roadmap).
+        proof_mode: ClientProofMode::DevWitnessEnvelope,
+        trusted_epoch_roots,
     }
 }
 
-fn load_wallet(config: &AuthConfig) -> Result<Wallet, AuthError> {
-    Wallet::new(client_config(config)).map_err(Into::into)
+fn load_wallet(
+    config: &AuthConfig,
+    trusted_epoch_roots: Vec<EpochRoots>,
+) -> Result<Wallet, AuthError> {
+    Wallet::new(client_config(config, trusted_epoch_roots)).map_err(Into::into)
+}
+
+/// Build the trusted server signing roots from a server attestation snapshot.
+///
+/// The client now validates every server-returned state/clearance signature
+/// root against this registry (the server cannot make the client trust an
+/// arbitrary root). A single epoch entry carries both the state and clearance
+/// roots; we add a second entry only if the two epochs diverge.
+fn epoch_roots_from_attestation(att: &ServerAttestationSnapshot) -> Vec<EpochRoots> {
+    let mut roots = vec![EpochRoots {
+        epoch: att.state_sig_epoch,
+        state_root: att.state_sig_root,
+        clear_root: att.clear_sig_root,
+    }];
+    if att.clear_sig_epoch != att.state_sig_epoch {
+        roots.push(EpochRoots {
+            epoch: att.clear_sig_epoch,
+            state_root: att.state_sig_root,
+            clear_root: att.clear_sig_root,
+        });
+    }
+    roots
 }
 
 fn acquire_wallet_lock(state_dir: &Path) -> Result<std::fs::File, AuthError> {
@@ -933,6 +982,8 @@ mod tests {
             policy_enabled: false,
             server_url: "http://127.0.0.1:1".to_string(),
             state_dir: state_dir.to_string_lossy().to_string(),
+            proof_mode: ClientProofMode::DevWitnessEnvelope,
+            trusted_epoch_roots: Vec::new(),
         })
         .unwrap();
         let (secret, commitment) = seed_wallet.generate_deposit_params();
@@ -993,6 +1044,8 @@ mod tests {
             policy_enabled: false,
             server_url: "http://127.0.0.1:1".to_string(),
             state_dir: state_dir.to_string_lossy().to_string(),
+            proof_mode: ClientProofMode::DevWitnessEnvelope,
+            trusted_epoch_roots: Vec::new(),
         })
         .unwrap();
         let (secret, commitment) = seed_wallet.generate_deposit_params();

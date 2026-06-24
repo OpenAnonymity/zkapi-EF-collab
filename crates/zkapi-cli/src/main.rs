@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
-use zkapi_client::config::ClientConfig;
+use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
@@ -326,6 +326,10 @@ fn client_config(cli: &Cli) -> anyhow::Result<ClientConfig> {
         policy_enabled: cli.policy_enabled,
         server_url: cli.protocol_server_url.clone(),
         state_dir: cli.state_dir.display().to_string(),
+        // CLI `client_config` only backs the local-only `keygen` command; the
+        // daemon path (build_auth_service) populates trusted roots per request.
+        proof_mode: ClientProofMode::DevWitnessEnvelope,
+        trusted_epoch_roots: Vec::new(),
     })
 }
 

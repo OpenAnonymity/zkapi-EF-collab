@@ -11,17 +11,15 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use reqwest::header::{HeaderMap, HeaderValue};
-use sha3::{Digest, Sha3_256};
 use zkapi_types::Felt252;
 
 use crate::config::{ProviderKind, ServerConfig};
 use crate::error::ServerError;
 
-fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
-    let digest = Sha3_256::digest(payload.as_ref());
-    let mut bytes = [0u8; 32];
-    bytes[1..].copy_from_slice(&digest[..31]);
-    Felt252(bytes)
+/// Canonical hash binding an upstream response payload, matching what the
+/// client wallet re-derives in `verify_request_response`.
+fn compute_response_hash(payload: impl AsRef<[u8]>) -> Felt252 {
+    zkapi_types::canonical_response_hash(payload.as_ref())
 }
 
 /// Result of executing the upstream API call.
@@ -77,7 +75,7 @@ impl ApiProvider for EchoProvider {
             Ok(ProviderResponse {
                 status_code: 200,
                 payload: payload.to_string(),
-                response_hash: compute_payload_hash(payload.as_bytes()),
+                response_hash: compute_response_hash(payload.as_bytes()),
                 charge_applied: self.fixed_charge,
                 policy_reason_code: None,
                 policy_evidence_hash: None,
@@ -139,7 +137,7 @@ impl ApiProvider for HttpProxyProvider {
 
             Ok(ProviderResponse {
                 status_code,
-                response_hash: compute_payload_hash(payload.as_bytes()),
+                response_hash: compute_response_hash(payload.as_bytes()),
                 payload,
                 charge_applied: parse_header_u128(&headers, "x-zkapi-charge-applied")?
                     .unwrap_or(self.default_charge),
@@ -256,7 +254,7 @@ mod tests {
         assert_eq!(response.payload, "proxy:{\"hello\":\"world\"}");
         assert_eq!(
             response.response_hash,
-            compute_payload_hash(response.payload.as_bytes())
+            compute_response_hash(response.payload.as_bytes())
         );
         assert_eq!(response.charge_applied, 7);
     }

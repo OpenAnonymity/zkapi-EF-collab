@@ -26,8 +26,8 @@ use zkapi_core::poseidon::{felt_to_field, field_to_felt};
 use zkapi_crypto::pedersen::PedersenCommitment;
 use zkapi_proof::verify_request_proof;
 use zkapi_types::wire::{
-    ApiRequest, ClearanceRequest, ClearanceResponse, CurvePointWire, RecoveryResponse,
-    RequestResponse,
+    ApiRequest, ClearanceRequest, ClearanceResponse, CurvePointWire, ProofBackendWire,
+    RecoveryResponse, RequestResponse,
 };
 use zkapi_types::{Felt252, NullifierStatus, STATEMENT_TYPE_REQUEST};
 
@@ -194,9 +194,27 @@ impl RequestProcessor {
             ));
         }
 
-        // Step 9: Verify the proof envelope against the stated public inputs.
+        // Step 9: Verify the opaque proof artifact against the stated public inputs.
+        //
+        // The wire now carries a structured `ProofArtifactWire` (backend tag,
+        // canonical public-output hash, base64 proof blob) rather than an
+        // inlined witness envelope. We bind the artifact to the public inputs
+        // by checking the public-output hash, then replay the dev witness
+        // envelope (this daemon is the local/demo verifier; real Stwo-Cairo
+        // verification is the production path documented in the roadmap).
+        let artifact = &api_request.proof;
+        if artifact.backend != ProofBackendWire::StwoCairo {
+            return Err(ServerError::InvalidProof(
+                "unsupported proof backend".to_string(),
+            ));
+        }
+        if artifact.public_output_hash != pi.public_output_hash() {
+            return Err(ServerError::InvalidProof(
+                "proof public_output_hash does not match request public inputs".to_string(),
+            ));
+        }
         let proof_bytes = base64::engine::general_purpose::STANDARD
-            .decode(api_request.proof_envelope.as_bytes())
+            .decode(artifact.proof.as_bytes())
             .map_err(|e| ServerError::InvalidProof(format!("invalid base64 proof: {}", e)))?;
         verify_request_proof(&proof_bytes, pi)
             .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
