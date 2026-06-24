@@ -26,11 +26,19 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::compat;
 use crate::error::AuthError;
-use crate::service::{AuthService, ConfirmDepositRequest, CoreRequest};
+use crate::service::{AuthService, ConfirmDepositRequest, CoreRequest, WithdrawalMode};
 
 #[derive(Debug, Deserialize)]
 struct PrepareDepositBody {
     amount: u128,
+}
+
+#[derive(Debug, Deserialize)]
+struct WithdrawBody {
+    /// "mutual" (server clearance) or "escape" (unilateral escape hatch).
+    mode: String,
+    /// 20-byte payout address (0x-prefixed or bare hex).
+    destination: String,
 }
 
 pub fn build_router(service: Arc<AuthService>) -> Router {
@@ -61,6 +69,8 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/request/preview", post(request_preview))
         .route("/funding/api/request/submit", post(request_submit))
         .route("/funding/api/recover", post(wallet_recover))
+        .route("/wallet/withdraw", post(wallet_withdraw))
+        .route("/funding/api/withdraw", post(wallet_withdraw))
         .layer(local_cors_layer())
         .with_state(service)
 }
@@ -163,6 +173,42 @@ async fn wallet_recover(State(service): State<Arc<AuthService>>) -> Response {
         Ok(status) => Json(status).into_response(),
         Err(err) => generic_error(err),
     }
+}
+
+async fn wallet_withdraw(
+    State(service): State<Arc<AuthService>>,
+    Json(body): Json<WithdrawBody>,
+) -> Response {
+    let mode = match body.mode.trim().to_ascii_lowercase().as_str() {
+        "mutual" | "mutual-close" | "mutualclose" => WithdrawalMode::Mutual,
+        "escape" | "escape-hatch" | "escapehatch" => WithdrawalMode::Escape,
+        other => {
+            return generic_error(AuthError::InvalidInput(format!(
+                "unknown withdrawal mode '{other}' (expected 'mutual' or 'escape')"
+            )))
+        }
+    };
+    let destination = match parse_destination(&body.destination) {
+        Ok(dest) => dest,
+        Err(msg) => return generic_error(AuthError::InvalidInput(msg)),
+    };
+    match service.create_withdrawal(mode, destination).await {
+        Ok(plan) => Json(plan).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
+fn parse_destination(value: &str) -> Result<[u8; 20], String> {
+    let hex = value.strip_prefix("0x").unwrap_or(value);
+    if hex.len() != 40 {
+        return Err("destination must be a 20-byte hex address".to_string());
+    }
+    let mut bytes = [0u8; 20];
+    for (idx, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let part = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
+        bytes[idx] = u8::from_str_radix(part, 16).map_err(|e| e.to_string())?;
+    }
+    Ok(bytes)
 }
 
 async fn demo_overview(State(service): State<Arc<AuthService>>) -> Response {

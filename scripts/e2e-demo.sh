@@ -271,6 +271,17 @@ core_response="$(curl -fsSL \
   -d "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"body\":{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"hello from e2e demo\"}]}}")"
 printf '%s\n' "$core_response" >"$RUN_DIR/core-request.json"
 
+echo "Running a burst of authenticated requests (multi-request state chain)..."
+for i in $(seq 2 7); do
+  curl -fsSL \
+    -X POST "${AUTH_URL}/request" \
+    -H "content-type: application/json" \
+    -d "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"body\":{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"request ${i}\"}]}}" \
+    >/dev/null
+  balance="$(curl -fsSL "${AUTH_URL}/wallet/status" | jq -r '[.. | .current_balance? // empty] | first // "?"')"
+  echo "  request ${i}: ok, balance now ${balance}"
+done
+
 echo "Exercising compatibility shims..."
 curl -fsSL \
   -X POST "${AUTH_URL}/v1/chat/completions" \
@@ -293,6 +304,36 @@ curl -fsSL \
 curl -fsSL "${AUTH_URL}/wallet/status" >"$RUN_DIR/wallet-status.json"
 curl -fsSL "${AUTH_URL}/v1/models" >"$RUN_DIR/models.json"
 curl -fsSL "${AUTH_URL}/api/tags" >"$RUN_DIR/tags.json"
+
+# ---- Withdrawal proofs (both paths) -----------------------------------------
+WITHDRAW_DEST="0x1111111111111111111111111111111111111111"
+
+echo "Building mutual-close withdrawal proof (asks serverd for a clearance signature)..."
+mutual_plan="$(curl -fsSL \
+  -X POST "${AUTH_URL}/wallet/withdraw" \
+  -H "content-type: application/json" \
+  -d "{\"mode\":\"mutual\",\"destination\":\"${WITHDRAW_DEST}\"}")"
+printf '%s\n' "$mutual_plan" >"$RUN_DIR/withdraw-mutual.json"
+echo "  mutual-close proof ready (has_clearance=$(jq -r '.public_inputs.has_clearance' <<<"$mutual_plan"))"
+
+echo "Building escape-hatch withdrawal proof (unilateral, no server clearance)..."
+escape_plan="$(curl -fsSL \
+  -X POST "${AUTH_URL}/wallet/withdraw" \
+  -H "content-type: application/json" \
+  -d "{\"mode\":\"escape\",\"destination\":\"${WITHDRAW_DEST}\"}")"
+printf '%s\n' "$escape_plan" >"$RUN_DIR/withdraw-escape.json"
+echo "  escape-hatch proof ready (has_clearance=$(jq -r '.public_inputs.has_clearance' <<<"$escape_plan"))"
+
+echo
+echo "Both withdrawal proofs generated off-chain (proof + public inputs in"
+echo "$RUN_DIR/withdraw-*.json). On-chain settlement of both paths —"
+echo "mutualClose, and initiateEscapeWithdrawal -> challengeEscapeWithdrawal /"
+echo "finalizeEscapeWithdrawal — is verified end-to-end by the contract suite:"
+echo "    (cd protocol/contracts && forge test)"
+echo
+echo "Policy slash reuses the same homomorphic charge with a higher cap"
+echo "(serverd --policy-enabled --policy-charge-cap N). Triggering one requires an"
+echo "upstream returning x-zkapi-policy-* headers via --provider http-proxy."
 
 echo
 echo "Demo complete."
