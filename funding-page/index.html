@@ -40,7 +40,7 @@
     <section class="step" id="step-fund">
       <span class="step-num">01 — Fund</span>
       <h2>Deposit to open a note</h2>
-      <p>Pick an amount, run two chain commands, confirm locally. Your secret never leaves this machine.</p>
+      <p>Pick an amount, deposit through your browser wallet, and the note activates automatically. Your secret never leaves this machine — only the public commitment goes on chain.</p>
 
       <form id="prepare-form" class="form-stack">
         <label>
@@ -65,8 +65,13 @@
           </div>
         </div>
 
-        <details class="dev" open>
-          <summary>chain commands</summary>
+        <div class="button-row" style="margin-top: 0.75rem;">
+          <button type="button" id="metamask-deposit" class="primary">Deposit with MetaMask</button>
+        </div>
+        <div id="deposit-status" class="hint hidden" style="margin-top: 0.5rem;"></div>
+
+        <details class="dev">
+          <summary>manual chain commands (no wallet)</summary>
           <pre id="cast-commands">—</pre>
         </details>
 
@@ -211,6 +216,7 @@
     </footer>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
   <script src="/funding/app.js"></script>
 </body>
 </html>
