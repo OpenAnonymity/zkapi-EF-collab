@@ -104,6 +104,7 @@ struct HealthResponse {
     provider: &'static str,
     indexer_url: Option<String>,
     policy_enabled: bool,
+    auth_scheme: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +120,7 @@ struct AttestationResponse {
     clear_sig_root: Felt252,
     state_signatures_remaining: u32,
     clear_signatures_remaining: u32,
+    auth_scheme: &'static str,
 }
 
 async fn handle_health(State(processor): State<AppState>) -> Json<HealthResponse> {
@@ -132,6 +134,7 @@ async fn handle_health(State(processor): State<AppState>) -> Json<HealthResponse
         provider: provider_name(config.provider_kind),
         indexer_url: config.indexer_url.clone(),
         policy_enabled: config.policy_enabled,
+        auth_scheme: config.auth_scheme.as_str(),
     })
 }
 
@@ -149,6 +152,7 @@ async fn handle_attestation(State(processor): State<AppState>) -> Json<Attestati
         clear_sig_root: processor.clear_sig_root(),
         state_signatures_remaining: processor.state_signatures_remaining(),
         clear_signatures_remaining: processor.clear_signatures_remaining(),
+        auth_scheme: config.auth_scheme.as_str(),
     })
 }
 

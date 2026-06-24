@@ -29,6 +29,8 @@ pub struct AuthConfig {
     pub request_charge_cap: u128,
     pub policy_charge_cap: u128,
     pub policy_enabled: bool,
+    /// Authentication method this client uses; must match the server's.
+    pub auth_scheme: zkapi_auth::AuthSchemeKind,
     pub protocol_server_url: String,
     pub indexer_url: String,
     pub listen_addr: String,
@@ -49,6 +51,7 @@ impl Default for AuthConfig {
             request_charge_cap: 1_000_000,
             policy_charge_cap: 10_000_000,
             policy_enabled: false,
+            auth_scheme: zkapi_auth::AuthSchemeKind::StateAnchor,
             protocol_server_url: "http://127.0.0.1:3000".to_string(),
             indexer_url: "http://127.0.0.1:3001".to_string(),
             listen_addr: "127.0.0.1:11434".to_string(),

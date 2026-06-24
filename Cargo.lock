@@ -2693,6 +2693,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zkapi-auth"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "num-bigint",
+ "rand 0.8.5",
+ "serde",
+ "sha3",
+ "starknet-types-core",
+ "thiserror",
+ "zkapi-core",
+ "zkapi-crypto",
+ "zkapi-types",
+]
+
+[[package]]
 name = "zkapi-cli"
 version = "0.1.0"
 dependencies = [
@@ -2702,6 +2718,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing-subscriber",
+ "zkapi-auth",
  "zkapi-client",
  "zkapi-clientd",
  "zkapi-core",
@@ -2751,6 +2768,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "zkapi-auth",
  "zkapi-client",
  "zkapi-core",
  "zkapi-serverd",
@@ -2867,6 +2885,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zkapi-auth",
  "zkapi-core",
  "zkapi-crypto",
  "zkapi-proof",
