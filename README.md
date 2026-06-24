@@ -88,6 +88,31 @@ Per-daemon logs and artifacts (deposit/request/withdrawal payloads) land under
   `initiateEscapeWithdrawal` → `challenge`/`finalize`) is covered by the
   contract test suite (`cd protocol/contracts && forge test`).
 
+### Drive each function by hand
+
+To demo the client functions interactively instead of running the scripted
+flow, bring the stack up with a funded account and leave it running:
+
+```bash
+KEEP_UP=1 ./scripts/e2e-demo.sh
+```
+
+It deploys the stack, funds a note, then prints a per-function cheat sheet and
+waits (Ctrl-C tears down). From there you drive each function yourself — via the
+funding UI at <http://127.0.0.1:11434/funding>, or by curl against the client
+daemon:
+
+```bash
+curl -s    $AUTH/wallet/status | jq                       # status: balance / expiry
+curl -s    $AUTH/v1/chat/completions -d '{"model":"zkapi-echo","messages":[{"role":"user","content":"hi"}]}' | jq  # send a request (echo response)
+curl -s -X POST $AUTH/wallet/recover  | jq                # crash recovery
+curl -s -X POST $AUTH/wallet/withdraw -d '{"mode":"mutual","destination":"0x1111111111111111111111111111111111111111"}' | jq   # refund: mutual close
+curl -s -X POST $AUTH/wallet/withdraw -d '{"mode":"escape","destination":"0x1111111111111111111111111111111111111111"}' | jq   # refund: escape hatch
+```
+
+(`$AUTH` is the client daemon URL the script prints; responses use the echo
+provider, so they don't require a real LLM.)
+
 ### Deposit from the browser (MetaMask)
 
 With the stack running, open <http://127.0.0.1:11434/funding>. The funding UI

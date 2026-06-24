@@ -264,6 +264,54 @@ confirm_payload="$(curl -fsSL \
   -d "{\"secret\":\"${SECRET}\",\"note_id\":${NOTE_ID},\"amount\":${DEPOSIT_AMOUNT},\"expiry_ts\":${expiry_ts}}")"
 printf '%s\n' "$confirm_payload" >"$RUN_DIR/confirm-deposit.json"
 
+# Interactive mode: leave the funded stack running and let the operator drive
+# each client function by hand (KEEP_UP=1 ./scripts/e2e-demo.sh).
+if [ -n "${KEEP_UP:-}" ]; then
+  cat <<EOF
+
+============================================================================
+  Stack is UP and a note is funded (balance ${DEPOSIT_AMOUNT}).
+  Drive each client function by hand. Responses come from the 'echo' provider.
+
+  Funding UI (deposit via MetaMask, send requests, recover, live status):
+    open ${AUTH_URL}/funding
+
+  Or by curl against the client daemon at ${AUTH_URL}:
+
+  # status — balance / expiry / pending request
+  curl -s ${AUTH_URL}/wallet/status | jq
+
+  # send an authenticated LLM request (OpenAI / OpenResponses / Ollama dialects)
+  curl -s ${AUTH_URL}/v1/chat/completions -H 'content-type: application/json' \\
+    -d '{"model":"${MODEL_ID}","messages":[{"role":"user","content":"hello"}]}' | jq
+  curl -s ${AUTH_URL}/v1/responses -H 'content-type: application/json' \\
+    -d '{"model":"${MODEL_ID}","input":"hello"}' | jq
+  curl -s ${AUTH_URL}/api/chat -H 'content-type: application/json' \\
+    -d '{"model":"${MODEL_ID}","messages":[{"role":"user","content":"hi"}]}' | jq
+
+  # crash recovery — reconcile local wallet state with serverd
+  curl -s -X POST ${AUTH_URL}/wallet/recover | jq
+
+  # refund path 1 — mutual close (clientd asks serverd for a clearance signature)
+  curl -s -X POST ${AUTH_URL}/wallet/withdraw -H 'content-type: application/json' \\
+    -d '{"mode":"mutual","destination":"0x1111111111111111111111111111111111111111"}' | jq
+
+  # refund path 2 — escape hatch (unilateral, no server clearance)
+  curl -s -X POST ${AUTH_URL}/wallet/withdraw -H 'content-type: application/json' \\
+    -d '{"mode":"escape","destination":"0x1111111111111111111111111111111111111111"}' | jq
+
+  client ${AUTH_URL}   server ${SERVER_URL}   indexer ${INDEXER_URL}
+  anvil  ${RPC_URL}   vault ${VAULT_ADDRESS}   token ${TOKEN_ADDRESS}
+
+  (withdraw returns the proof + public inputs; on-chain settlement of either
+   path is a separate cast/forge step, covered by 'forge test'.)
+
+  Press Ctrl-C to tear everything down.
+============================================================================
+EOF
+  wait
+fi
+
 echo "Executing authenticated request..."
 core_response="$(curl -fsSL \
   -X POST "${AUTH_URL}/request" \
