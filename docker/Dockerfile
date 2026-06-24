@@ -7,7 +7,7 @@ COPY crates ./crates
 COPY funding-page ./funding-page
 COPY protocol ./protocol
 
-RUN cargo build --release -p zkapi-cli -p zkapi-clientd
+RUN cargo build --release -p zkapi-cli -p zkapi-clientd -p zkapi-indexerd
 
 FROM debian:bookworm-slim
 
@@ -20,6 +20,7 @@ WORKDIR /srv/zkapi
 
 COPY --from=builder /app/target/release/zkapi /usr/local/bin/zkapi
 COPY --from=builder /app/target/release/zkapi-clientd /usr/local/bin/zkapi-clientd
+COPY --from=builder /app/target/release/zkapi-indexerd /usr/local/bin/zkapi-indexerd
 
 USER zkapi
 
