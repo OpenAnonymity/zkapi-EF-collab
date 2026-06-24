@@ -257,7 +257,15 @@ impl RequestProcessor {
         let charge = provider_response.charge_applied;
 
         // Step 12: Enforce the charge cap before signing a next state.
-        let max_charge = if self.config.policy_enabled {
+        //
+        // The higher policy cap applies only when the upstream actually flags
+        // the response (a policy_reason_code is present) on a policy-enabled
+        // deployment; an ordinary response is always bounded by the normal
+        // per-request cap, so enabling policy does not let the server slash
+        // every request.
+        let policy_charged =
+            self.config.policy_enabled && provider_response.policy_reason_code.is_some();
+        let max_charge = if policy_charged {
             self.config.policy_charge_cap
         } else {
             self.config.request_charge_cap

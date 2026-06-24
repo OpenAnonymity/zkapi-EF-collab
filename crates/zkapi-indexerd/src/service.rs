@@ -42,6 +42,16 @@ impl IndexerService {
         self.mirror.read().unwrap().get_leaf(note_id)
     }
 
+    /// Whole-tree snapshot: root, next free index, and every current leaf.
+    pub fn get_snapshot(&self) -> TreeSnapshotResponse {
+        let mirror = self.mirror.read().unwrap();
+        TreeSnapshotResponse {
+            root: mirror.root(),
+            next_note_id: mirror.next_note_id(),
+            leaves: mirror.current_leaves(),
+        }
+    }
+
     /// Apply a decoded contract event to the mirrored tree.
     pub fn process_event(&self, event: &VaultEvent) {
         self.mirror.write().unwrap().process_event(event);
@@ -64,4 +74,13 @@ pub struct TreePathResponse {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NextNoteIdResponse {
     pub next_note_id: u32,
+}
+
+/// Whole-tree snapshot: clients rebuild the tree and derive any sibling path
+/// locally, so the untrusted indexer never learns which note a client queries.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TreeSnapshotResponse {
+    pub root: Felt252,
+    pub next_note_id: u32,
+    pub leaves: Vec<Felt252>,
 }

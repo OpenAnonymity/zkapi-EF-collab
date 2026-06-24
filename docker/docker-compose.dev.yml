@@ -64,6 +64,11 @@ services:
       - zkapi-state:/data
 
   zkapi-clientd:
+    image: zkapi/ef-collaboration:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["zkapi-clientd"]
     depends_on:
       - zkapi-indexerd
       - zkapi-serverd

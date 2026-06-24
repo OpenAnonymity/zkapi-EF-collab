@@ -36,6 +36,10 @@ The current app-layer daemon sends a structured `CoreRequest` payload through th
 
 `zkapi-auth` implements and tests the blind-signature credential scheme, and both daemons accept `--auth-scheme blind-signature`, but the HTTP request path is currently wired for `state-anchor`. Completing the alternate backend means adding the blind-issuance and presentation endpoints to `zkapi-serverd` and the corresponding client state to `zkapi-clientd`.
 
+### Indexer Snapshot Client Routing
+
+The indexer exposes a privacy-safe `/v1/tree/snapshot` endpoint (the whole leaf vector), from which a client can rebuild the tree and derive any sibling path locally without revealing which note it cares about. The bundled `zkapi-clientd` still fetches per-slot paths (`/v1/tree/notes/{id}/path`), which leaks the `note_id` to the untrusted indexer. Routing clientd through the snapshot endpoint (and removing the per-slot paths, or keeping them only for power users running their own indexer) closes that deanonymization vector.
+
 ### Production Hardening
 
 - Publish server-root rotation through an automated operator workflow instead of manual `cast send`.
