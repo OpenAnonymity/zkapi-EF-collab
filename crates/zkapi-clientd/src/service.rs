@@ -245,6 +245,9 @@ pub enum WithdrawalMode {
 pub struct WithdrawalPlan {
     pub mode: WithdrawalMode,
     pub public_inputs: WithdrawalPublicInputs,
+    /// The note's Merkle sibling path, so the on-chain submitter (cast or the
+    /// browser wallet) can call `mutualClose`/escape without a per-slot lookup.
+    pub siblings: Vec<Felt252>,
     pub proof_base64: String,
 }
 
@@ -514,6 +517,7 @@ impl AuthService {
                 let note_id = wallet.state().ok_or(AuthError::NoActiveNote)?.note_id;
                 let root = indexer.root().await?;
                 let siblings = indexer.note_path(note_id).await?;
+                let plan_siblings = siblings.clone();
                 let (public_inputs, proof) = match mode {
                     WithdrawalMode::Mutual => {
                         wallet
@@ -528,6 +532,7 @@ impl AuthService {
                 Ok(WithdrawalPlan {
                     mode,
                     public_inputs,
+                    siblings: plan_siblings,
                     // `proof.proof` already carries the base64-encoded opaque
                     // proof blob that the on-chain proof adapter consumes.
                     proof_base64: proof.proof,
