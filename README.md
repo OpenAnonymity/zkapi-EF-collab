@@ -129,6 +129,12 @@ view. To demo the MetaMask deposit itself, start the stack **unfunded**:
 KEEP_UP=1 SKIP_DEPOSIT=1 ./scripts/e2e-demo.sh
 ```
 
+Once a note is active, the request view also shows **"Withdraw (mutual close) via
+MetaMask"** — clientd builds the proof and fetches a server clearance signature,
+then MetaMask submits `vault.mutualClose`, which pays the remaining balance to
+your account and the consumed amount to the operator, and closes the note. The
+scripted `e2e-demo.sh` settles the same mutual-close path on chain via `cast`.
+
 ### Swap the authentication method
 
 Both daemons accept `--auth-scheme {state-anchor,blind-signature}` (client and

@@ -38,6 +38,8 @@ const els = {
   confirmError: $("confirm-error"),
   metamaskDeposit: $("metamask-deposit"),
   depositStatus: $("deposit-status"),
+  metamaskWithdraw: $("metamask-withdraw"),
+  withdrawStatus: $("withdraw-status"),
   // chain helpers
   rpcUrl: $("rpc-url"),
   tokenAddress: $("token-address"),
@@ -429,6 +431,87 @@ const VAULT_ABI = [
   "event NoteDeposited(uint32 indexed noteId, bytes32 indexed commitment, uint128 amount, uint64 expiryTs, uint256 newRoot)",
 ];
 const ERC20_ABI = ["function approve(address spender, uint256 amount) returns (bool)"];
+const WITHDRAW_ABI = [
+  "function currentRoot() view returns (uint256)",
+  "function mutualClose((uint8,uint16,uint64,address,uint256,uint32,uint128,address,uint256,bool,bool,uint32,uint256,uint32,uint256) inputs, bytes proof, uint256[32] siblings)",
+];
+
+function setWithdrawStatus(message, isError = false) {
+  if (!els.withdrawStatus) return;
+  els.withdrawStatus.textContent = message;
+  els.withdrawStatus.classList.remove("hidden");
+  els.withdrawStatus.classList.toggle("error", isError);
+}
+
+// Mutual-close withdrawal through the browser wallet. clientd builds the proof
+// (and gets a server clearance signature); MetaMask submits vault.mutualClose,
+// which pays the remaining balance to the connected account and the consumed
+// amount to the operator.
+async function withdrawWithMetaMask() {
+  if (typeof ethers === "undefined" || !window.ethereum) {
+    setWithdrawStatus("No browser wallet / ethers unavailable.", true);
+    return;
+  }
+  const note = state.overview && state.overview.wallet && state.overview.wallet.note;
+  if (!note) {
+    setWithdrawStatus("No active note to withdraw.", true);
+    return;
+  }
+  const vault = state.overview.funding.contract_address;
+  const wantChain = Number(state.overview.funding.chain_id);
+  try {
+    setWithdrawStatus("Connecting wallet…");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== wantChain) {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x" + wantChain.toString(16) }],
+      });
+    }
+    const signer = await provider.getSigner();
+    const destination = await signer.getAddress();
+
+    setWithdrawStatus("Requesting clearance + building withdrawal proof…");
+    const plan = await requestJson("/funding/api/withdraw", {
+      method: "POST",
+      body: JSON.stringify({ mode: "mutual", destination }),
+    });
+    const pi = plan.public_inputs;
+
+    const vaultContract = new ethers.Contract(vault, WITHDRAW_ABI, signer);
+    const currentRoot = await vaultContract.currentRoot();
+    // Field order matches Types.WithdrawalPublicInputs. The proof blob is empty:
+    // the on-chain MockProofAdapter accepts it, while the vault still enforces
+    // the signature roots, balance bound, nullifier, and Merkle path.
+    const inputs = [
+      pi.statement_type,
+      pi.protocol_version,
+      BigInt(pi.chain_id),
+      vault,
+      currentRoot,
+      pi.note_id,
+      BigInt(pi.final_balance),
+      destination,
+      BigInt(pi.withdrawal_nullifier),
+      pi.is_genesis,
+      pi.has_clearance,
+      pi.state_sig_epoch,
+      BigInt(pi.state_sig_root),
+      pi.clear_sig_epoch,
+      BigInt(pi.clear_sig_root),
+    ];
+    const siblings = plan.siblings.map((s) => BigInt(s));
+
+    setWithdrawStatus("Submitting mutualClose… confirm in MetaMask.");
+    await (await vaultContract.mutualClose(inputs, "0x", siblings)).wait();
+    setWithdrawStatus(`Withdrawn: ${pi.final_balance} paid to ${destination}. Note closed.`);
+    await refreshOverview();
+  } catch (error) {
+    setWithdrawStatus(`Withdraw failed: ${error.shortMessage || error.message || error}`, true);
+  }
+}
 
 function setDepositStatus(message, isError = false) {
   els.depositStatus.textContent = message;
@@ -535,6 +618,7 @@ async function depositWithMetaMask() {
 $("prepare-form").addEventListener("submit", handlePrepare);
 $("confirm-form").addEventListener("submit", handleConfirm);
 els.metamaskDeposit.addEventListener("click", depositWithMetaMask);
+if (els.metamaskWithdraw) els.metamaskWithdraw.addEventListener("click", withdrawWithMetaMask);
 $("request-form").addEventListener("submit", handleSubmit);
 $("preview-request").addEventListener("click", handlePreview);
 $("recover-request").addEventListener("click", handleRecover);
