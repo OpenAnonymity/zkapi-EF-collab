@@ -403,11 +403,26 @@ printf '%s\n' "$escape_plan" >"$RUN_DIR/withdraw-escape.json"
 echo "  escape-hatch proof ready (has_clearance=$(jq -r '.public_inputs.has_clearance' <<<"$escape_plan"))"
 
 echo
-echo "Both withdrawal proofs generated off-chain (proof + public inputs in"
-echo "$RUN_DIR/withdraw-*.json). On-chain settlement of both paths —"
-echo "mutualClose, and initiateEscapeWithdrawal -> challengeEscapeWithdrawal /"
-echo "finalizeEscapeWithdrawal — is verified end-to-end by the contract suite:"
-echo "    (cd protocol/contracts && forge test)"
+echo "Settling the mutual-close withdrawal ON CHAIN (contract pays user + operator)..."
+mpi() { jq -r ".public_inputs.$1" <<<"$mutual_plan"; }
+# Use the vault's live root so the freshness check passes; fetch the note's
+# sibling path from the indexer. MockProofAdapter accepts any proof, so the
+# proof blob is empty here — the contract still enforces the signature roots,
+# the balance bound, the nullifier, and the Merkle path.
+CUR_ROOT="$(cast call "$VAULT_ADDRESS" "currentRoot()(uint256)" --rpc-url "$RPC_URL" | awk '{print $1}')"
+SIBLINGS="$(curl -fsSL "${INDEXER_URL}/v1/tree/notes/${NOTE_ID}/path" | jq -r '.siblings | join(",")')"
+FINAL_BALANCE="$(mpi final_balance)"
+WD_TUPLE="($(mpi statement_type),$(mpi protocol_version),$(mpi chain_id),${VAULT_ADDRESS},${CUR_ROOT},$(mpi note_id),${FINAL_BALANCE},${WITHDRAW_DEST},$(mpi withdrawal_nullifier),$(mpi is_genesis),$(mpi has_clearance),$(mpi state_sig_epoch),$(mpi state_sig_root),$(mpi clear_sig_epoch),$(mpi clear_sig_root))"
+cast send "$VAULT_ADDRESS" \
+  "mutualClose((uint8,uint16,uint64,address,uint256,uint32,uint128,address,uint256,bool,bool,uint32,uint256,uint32,uint256),bytes,uint256[32])" \
+  "$WD_TUPLE" "0x" "[${SIBLINGS}]" \
+  --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >"$LOG_DIR/withdraw-settle.log" 2>&1
+DEST_BAL="$(cast call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$WITHDRAW_DEST" --rpc-url "$RPC_URL" | awk '{print $1}')"
+echo "  mutualClose mined: destination ${WITHDRAW_DEST} now holds ${DEST_BAL} tokens (final_balance ${FINAL_BALANCE})"
+echo
+echo "The escape-hatch proof was also generated ($RUN_DIR/withdraw-escape.json); its"
+echo "on-chain path (initiate -> 24h challenge window -> finalize) is exercised by the"
+echo "contract suite (cd protocol/contracts && forge test). The mutual-close path ran live above."
 echo
 echo "Policy slash reuses the same homomorphic charge with a higher cap"
 echo "(serverd --policy-enabled --policy-charge-cap N). Triggering one requires an"
