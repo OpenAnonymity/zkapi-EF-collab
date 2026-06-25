@@ -163,7 +163,9 @@ mod tests {
     async fn snapshot_lets_a_client_rebuild_paths_locally() {
         use zkapi_core::merkle::MerkleTree;
 
-        let service = Arc::new(IndexerService::new(Arc::new(RwLock::new(TreeMirror::new()))));
+        let service = Arc::new(IndexerService::new(Arc::new(
+            RwLock::new(TreeMirror::new()),
+        )));
         for nid in 0..3u32 {
             service.process_event(&VaultEvent::NoteDeposited {
                 note_id: nid,
