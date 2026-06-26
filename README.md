@@ -113,6 +113,10 @@ curl -s -X POST $AUTH/wallet/withdraw -d '{"mode":"escape","destination":"0x1111
 (`$AUTH` is the client daemon URL the script prints; responses use the echo
 provider, so they don't require a real LLM.)
 
+While the stack is up, `./scripts/balances.sh` prints the authoritative on-chain
+billing-token balances for every party (depositor, operator treasury, vault
+escrow) — the ground truth that wallets only cache a view of.
+
 ### Deposit from the browser (MetaMask)
 
 With the stack running, open <http://127.0.0.1:11434/funding>. The funding UI
