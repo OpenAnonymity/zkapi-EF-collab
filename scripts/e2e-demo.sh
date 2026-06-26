@@ -405,7 +405,10 @@ curl -fsSL "${AUTH_URL}/v1/models" >"$RUN_DIR/models.json"
 curl -fsSL "${AUTH_URL}/api/tags" >"$RUN_DIR/tags.json"
 
 # ---- Withdrawal proofs (both paths) -----------------------------------------
-WITHDRAW_DEST="0x1111111111111111111111111111111111111111"
+# Withdrawal destination. Defaults to a throwaway address (distinct from the
+# depositor, so the split is obvious). Set WITHDRAW_DEST=<your address> to mirror
+# the funding-UI flow, where you withdraw back to the depositing account.
+WITHDRAW_DEST="${WITHDRAW_DEST:-0x1111111111111111111111111111111111111111}"
 
 echo "Building mutual-close withdrawal proof (asks serverd for a clearance signature)..."
 mutual_plan="$(curl -fsSL \
