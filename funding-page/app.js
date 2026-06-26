@@ -370,20 +370,6 @@ async function handleConfirm(event) {
   }
 }
 
-async function handlePreview() {
-  try {
-    const draft = buildRequestDraft();
-    state.preview = await requestJson("/funding/api/request/preview", {
-      method: "POST",
-      body: JSON.stringify(draft),
-    });
-    renderPreview();
-  } catch (error) {
-    els.requestResult.classList.remove("empty");
-    els.requestResult.textContent = `Preview failed: ${error.message}`;
-  }
-}
-
 async function handleSubmit(event) {
   event.preventDefault();
   try {
@@ -399,23 +385,6 @@ async function handleSubmit(event) {
   } catch (error) {
     els.requestResult.classList.remove("empty");
     els.requestResult.textContent = `Request failed: ${error.message}`;
-  }
-}
-
-async function handleRecover() {
-  try {
-    const payload = await requestJson("/funding/api/recover", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    els.requestResult.classList.remove("empty");
-    els.requestResult.textContent = payload.recovered
-      ? `Recovered pending request ${payload.request?.client_request_id ?? ""}`
-      : "No pending request to recover.";
-    await refreshOverview();
-  } catch (error) {
-    els.requestResult.classList.remove("empty");
-    els.requestResult.textContent = `Recover failed: ${error.message}`;
   }
 }
 
@@ -620,8 +589,6 @@ $("confirm-form").addEventListener("submit", handleConfirm);
 els.metamaskDeposit.addEventListener("click", depositWithMetaMask);
 if (els.metamaskWithdraw) els.metamaskWithdraw.addEventListener("click", withdrawWithMetaMask);
 $("request-form").addEventListener("submit", handleSubmit);
-$("preview-request").addEventListener("click", handlePreview);
-$("recover-request").addEventListener("click", handleRecover);
 $("refresh-all").addEventListener("click", (e) => { e.preventDefault(); refreshOverview(); });
 els.endpointKind.addEventListener("change", handleEndpointKindChange);
 
