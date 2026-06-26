@@ -339,7 +339,13 @@ if [ -n "${KEEP_UP:-}" ]; then
   Press Ctrl-C to tear everything down.
 ============================================================================
 EOF
-  wait
+  # Keep the stack up until the operator interrupts (Ctrl-C tears down via the
+  # EXIT trap). Block on an explicit child in a loop rather than bare `wait`:
+  # on some shells `wait` (no args) returns immediately even with live
+  # background daemons, which would drop through to the scripted funded-request
+  # flow below and 402. This loop can only be left via the INT trap.
+  trap 'exit 130' INT
+  while :; do sleep 30 & wait "$!" || true; done
 fi
 
 echo "Executing authenticated request..."
