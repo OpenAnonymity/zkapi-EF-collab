@@ -11,6 +11,9 @@ RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
 CHAIN_ID="${CHAIN_ID:-31337}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 DEPOSIT_AMOUNT="${DEPOSIT_AMOUNT:-2000}"
+# Operator treasury — kept separate from the depositor so the consumed amount
+# visibly leaves the depositor's wallet on settlement (anvil account #1).
+TREASURY_ADDR="${TREASURY_ADDR:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}"
 MODEL_ID="${MODEL_ID:-zkapi-echo}"
 XMSS_HEIGHT="${XMSS_HEIGHT:-4}"
 REQUEST_CHARGE_CAP="${REQUEST_CHARGE_CAP:-100}"
@@ -158,6 +161,7 @@ echo "Deploying demo contracts..."
   cd "$ROOT_DIR/protocol/contracts"
   OUTPUT_PATH="$DEPLOYMENT_JSON" \
   PRIVATE_KEY="$PRIVATE_KEY" \
+  TREASURY="$TREASURY_ADDR" \
   MINT_AMOUNT="$((DEPOSIT_AMOUNT * 100))" \
   forge script script/Deploy.s.sol:DeployScript \
     --rpc-url "$RPC_URL" \
@@ -166,6 +170,7 @@ echo "Deploying demo contracts..."
 
 VAULT_ADDRESS="$(jq -r '.vault' "$DEPLOYMENT_JSON")"
 TOKEN_ADDRESS="$(jq -r '.billingToken' "$DEPLOYMENT_JSON")"
+TREASURY_ADDRESS="$(jq -r '.treasury' "$DEPLOYMENT_JSON")"
 NOTE_TTL="$(jq -r '.noteTtl' "$DEPLOYMENT_JSON")"
 
 if [[ -z "$VAULT_ADDRESS" || "$VAULT_ADDRESS" == "null" ]]; then
@@ -341,6 +346,7 @@ if [ -n "${KEEP_UP:-}" ]; then
 
   client ${AUTH_URL}   server ${SERVER_URL}   indexer ${INDEXER_URL}
   anvil  ${RPC_URL}   vault ${VAULT_ADDRESS}   token ${TOKEN_ADDRESS}
+  operator treasury ${TREASURY_ADDRESS} (gets the consumed amount on withdraw)
 
   (withdraw returns the proof + public inputs; on-chain settlement of either
    path is a separate cast/forge step, covered by 'forge test'.)
@@ -433,7 +439,9 @@ cast send "$VAULT_ADDRESS" \
   "$WD_TUPLE" "0x" "[${SIBLINGS}]" \
   --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" >"$LOG_DIR/withdraw-settle.log" 2>&1
 DEST_BAL="$(cast call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$WITHDRAW_DEST" --rpc-url "$RPC_URL" | awk '{print $1}')"
+TREASURY_BAL="$(cast call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$TREASURY_ADDRESS" --rpc-url "$RPC_URL" | awk '{print $1}')"
 echo "  mutualClose mined: destination ${WITHDRAW_DEST} now holds ${DEST_BAL} tokens (final_balance ${FINAL_BALANCE})"
+echo "  operator treasury ${TREASURY_ADDRESS} now holds ${TREASURY_BAL} tokens (consumed amount)"
 echo
 echo "The escape-hatch proof was also generated ($RUN_DIR/withdraw-escape.json); its"
 echo "on-chain path (initiate -> 24h challenge window -> finalize) is exercised by the"
