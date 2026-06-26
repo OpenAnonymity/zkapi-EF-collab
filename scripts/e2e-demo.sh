@@ -127,8 +127,17 @@ require_cmd forge
 require_cmd cast
 
 mkdir -p "$RUN_DIR" "$STATE_DIR" "$LOG_DIR"
+# Fail early with a clear message if the run dir is not writable (serverd's
+# SQLite store lives here; a non-writable dir surfaces as a confusing
+# "attempt to write a readonly database" only later, on the first request).
+if [ ! -w "$RUN_DIR" ]; then
+  echo "ERROR: run dir '$RUN_DIR' is not writable. Fix its permissions or set RUN_DIR=..." >&2
+  exit 1
+fi
 rm -rf "$STATE_DIR"
-rm -f "$RUN_DIR/indexer.cursor" "$RUN_DIR/zkapi-server.db" "$RUN_DIR/attestation.json" \
+# Wipe serverd's SQLite db AND its -wal/-shm/-journal sidecars (glob), so a
+# stale or half-written store from a prior/interrupted run never carries over.
+rm -f "$RUN_DIR/indexer.cursor" "$RUN_DIR"/zkapi-server.db* "$RUN_DIR/attestation.json" \
   "$RUN_DIR/prepare-deposit.json" "$RUN_DIR/confirm-deposit.json" "$RUN_DIR/core-request.json" \
   "$RUN_DIR/chat-completions.json" "$RUN_DIR/responses.json" "$RUN_DIR/ollama-chat.json" \
   "$RUN_DIR/wallet-status.json" "$RUN_DIR/models.json" "$RUN_DIR/tags.json" \
