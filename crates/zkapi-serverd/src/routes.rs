@@ -259,14 +259,20 @@ struct DashboardSummary {
 async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<DashboardSummary> {
     let config = processor.config();
     let (upstream_kind, upstream_api_base, ephemeral_enabled) = match &config.metered {
-        Some(m) => (
-            Some(m.upstream_kind.as_str().to_string()),
-            Some(m.upstream_api_base.clone()),
-            m.openrouter_provisioning_key
-                .as_ref()
-                .map(|k| !k.is_empty())
-                .unwrap_or(false),
-        ),
+        Some(m) => {
+            let mut bases = Vec::new();
+            if m.openai_api_key.is_some() {
+                bases.push(format!("openai={}", m.openai_api_base));
+            }
+            if m.openrouter_key.is_some() {
+                bases.push(format!("openrouter={}", m.openrouter_api_base));
+            }
+            (
+                Some(m.upstreams_label()),
+                Some(bases.join(", ")),
+                m.openrouter_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+            )
+        }
         None => (None, None, false),
     };
     let server = ServerIdentity {

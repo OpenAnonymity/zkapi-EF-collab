@@ -9,7 +9,7 @@ use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
     WithdrawalMode,
 };
-use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig, UpstreamKind};
+use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
@@ -70,24 +70,29 @@ enum Commands {
         upstream_url: Option<String>,
         #[arg(long, default_value_t = 30_000)]
         proxy_timeout_ms: u64,
-        /// Metered provider: upstream flavor (openai | openrouter).
-        #[arg(long, value_enum, default_value_t = UpstreamKindArg::Openrouter)]
-        upstream_kind: UpstreamKindArg,
-        /// Metered provider: upstream base URL (defaults per upstream-kind).
+        /// Metered provider: OpenAI API key (pass-through for bare model ids).
         #[arg(long)]
-        upstream_api_base: Option<String>,
-        /// Metered provider: API key for pass-through inference.
+        openai_api_key: Option<String>,
+        /// Metered provider: OpenAI base URL.
+        #[arg(long, default_value = "https://api.openai.com")]
+        openai_api_base: String,
+        /// Metered provider: OpenRouter management/provisioning key (mints
+        /// ephemeral keys + a pass-through inference key for vendor/model ids).
         #[arg(long)]
-        upstream_api_key: Option<String>,
-        /// Metered provider: OpenRouter base for ephemeral-key provisioning.
+        openrouter_key: Option<String>,
+        /// Metered provider: optional dedicated OpenRouter runtime key for
+        /// pass-through (else one is minted from --openrouter-key).
+        #[arg(long)]
+        openrouter_inference_key: Option<String>,
+        /// Metered provider: OpenRouter base URL.
         #[arg(long, default_value = "https://openrouter.ai/api")]
         openrouter_api_base: String,
-        /// Metered provider: OpenRouter provisioning/management key (Mode 2).
-        #[arg(long)]
-        openrouter_provisioning_key: Option<String>,
         /// Metered provider: default ephemeral-key credit limit (USD).
         #[arg(long, default_value_t = 1.0)]
         ephemeral_limit_usd: f64,
+        /// Metered provider: ephemeral-key lifetime in seconds (default 60).
+        #[arg(long, default_value_t = 60)]
+        ephemeral_ttl_seconds: u64,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
         #[arg(long, default_value = "0x1")]
@@ -167,12 +172,6 @@ enum ProviderArg {
     Metered,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
-enum UpstreamKindArg {
-    Openai,
-    Openrouter,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -203,12 +202,13 @@ async fn main() -> anyhow::Result<()> {
             flat_charge,
             upstream_url,
             proxy_timeout_ms,
-            upstream_kind,
-            upstream_api_base,
-            upstream_api_key,
+            openai_api_key,
+            openai_api_base,
+            openrouter_key,
+            openrouter_inference_key,
             openrouter_api_base,
-            openrouter_provisioning_key,
             ephemeral_limit_usd,
+            ephemeral_ttl_seconds,
             db_path,
             state_seed,
             clear_seed,
@@ -218,22 +218,15 @@ async fn main() -> anyhow::Result<()> {
             indexer_url,
             root_poll_interval_ms,
         } => {
-            let upstream_kind = match upstream_kind {
-                UpstreamKindArg::Openai => UpstreamKind::OpenAi,
-                UpstreamKindArg::Openrouter => UpstreamKind::OpenRouter,
-            };
             let metered = if matches!(provider, ProviderArg::Metered) {
-                let upstream_api_base = upstream_api_base.unwrap_or_else(|| match upstream_kind {
-                    UpstreamKind::OpenAi => "https://api.openai.com".to_string(),
-                    UpstreamKind::OpenRouter => "https://openrouter.ai/api".to_string(),
-                });
                 Some(MeteredConfig {
-                    upstream_kind,
-                    upstream_api_base,
-                    upstream_api_key: upstream_api_key.unwrap_or_default(),
+                    openai_api_base,
+                    openai_api_key: openai_api_key.filter(|k| !k.is_empty()),
                     openrouter_api_base,
-                    openrouter_provisioning_key,
+                    openrouter_key: openrouter_key.filter(|k| !k.is_empty()),
+                    openrouter_inference_key: openrouter_inference_key.filter(|k| !k.is_empty()),
                     ephemeral_default_limit_usd: ephemeral_limit_usd,
+                    ephemeral_ttl_seconds,
                 })
             } else {
                 None

@@ -27,15 +27,16 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 use zkapi_types::Felt252;
 
-use crate::config::{MeteredConfig, UpstreamKind};
+use crate::config::MeteredConfig;
 use crate::error::ServerError;
-use crate::openrouter::OpenRouterProvisioner;
+use crate::openrouter::{unix_to_iso8601, OpenRouterProvisioner};
 use crate::pricing;
 use crate::provider::{compute_response_hash, ApiProvider, ProviderResponse, UsageInfo};
 
@@ -43,11 +44,36 @@ use crate::provider::{compute_response_hash, ApiProvider, ProviderResponse, Usag
 pub const PATH_EPHEMERAL_ISSUE: &str = "/zkapi/v1/ephemeral_key";
 pub const PATH_EPHEMERAL_SETTLE: &str = "/zkapi/v1/ephemeral_settle";
 
-/// A token-usage-metered provider.
+/// Generous limit (USD) for the lazily-minted server-owned OpenRouter
+/// inference key used for pass-through; the operator's account balance is the
+/// real cap.
+const SERVER_INFERENCE_KEY_LIMIT_USD: f64 = 1000.0;
+
+/// Which upstream a pass-through request routes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Upstream {
+    OpenAi,
+    OpenRouter,
+}
+
+/// Route a pass-through request by its model id: a vendor-prefixed id
+/// (`openai/…`, `anthropic/…`, `google/…`) is an OpenRouter model; a bare id
+/// (`gpt-4o-mini`) is OpenAI.
+fn route_upstream(model: Option<&str>) -> Upstream {
+    match model {
+        Some(m) if m.contains('/') => Upstream::OpenRouter,
+        _ => Upstream::OpenAi,
+    }
+}
+
+/// A token-usage-metered provider supporting both OpenAI and OpenRouter at once.
 pub struct MeteredProvider {
     http: reqwest::Client,
     config: MeteredConfig,
+    /// OpenRouter management/provisioning client (mints ephemeral + inference keys).
     provisioner: Option<Arc<OpenRouterProvisioner>>,
+    /// Lazily-minted server-owned OpenRouter inference key for pass-through.
+    or_inference_key: AsyncMutex<Option<String>>,
     /// Per-ephemeral-key cumulative (reported_usd, charged_credits), so each
     /// settle can bill at least the provider-authoritative aggregate delta.
     settled: Mutex<HashMap<String, (f64, u128)>>,
@@ -76,7 +102,7 @@ impl MeteredProvider {
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| ServerError::Internal(format!("failed to build metered client: {e}")))?;
-        let provisioner = match &config.openrouter_provisioning_key {
+        let provisioner = match &config.openrouter_key {
             Some(key) if !key.is_empty() => Some(Arc::new(OpenRouterProvisioner::new(
                 key.clone(),
                 config.openrouter_api_base.clone(),
@@ -88,9 +114,40 @@ impl MeteredProvider {
             http,
             config,
             provisioner,
+            or_inference_key: AsyncMutex::new(None),
             settled: Mutex::new(HashMap::new()),
             charge_cap_credits,
         })
+    }
+
+    /// Get (or lazily mint) an OpenRouter runtime key usable for pass-through
+    /// inference. Prefers a configured dedicated key; otherwise mints one from
+    /// the management key and caches it for the process lifetime.
+    async fn openrouter_inference_key(&self) -> Result<String, ServerError> {
+        if let Some(k) = &self.config.openrouter_inference_key {
+            if !k.is_empty() {
+                return Ok(k.clone());
+            }
+        }
+        let mut guard = self.or_inference_key.lock().await;
+        if let Some(k) = &*guard {
+            return Ok(k.clone());
+        }
+        let provisioner = self.provisioner.as_ref().ok_or_else(|| {
+            ServerError::InvalidRequest(
+                "OpenRouter is not configured on this server (no OpenRouter key)".to_string(),
+            )
+        })?;
+        let created = provisioner
+            .create_key(
+                "zkapi-oa-server-inference",
+                SERVER_INFERENCE_KEY_LIMIT_USD,
+                None,
+            )
+            .await?;
+        tracing::info!("minted server-owned OpenRouter inference key for pass-through");
+        *guard = Some(created.key.clone());
+        Ok(created.key)
     }
 
     fn clamp_charge(&self, credits: u128) -> u128 {
@@ -106,47 +163,58 @@ impl MeteredProvider {
         }
     }
 
-    /// Mode 1: pass-through inference with usage-based billing.
+    /// Mode 1: pass-through inference, routed per request to the upstream that
+    /// matches the model id, billed at that upstream's real cost.
     async fn execute_passthrough(
         &self,
         path: &str,
         body: Value,
     ) -> Result<ProviderResponse, ServerError> {
-        let base = self.config.upstream_api_base.trim_end_matches('/');
         // Normalize any chat-style shim path (OpenAI /v1/chat/completions, Ollama
-        // /api/chat, OpenAI Responses /v1/responses) to the upstream's OpenAI
-        // chat endpoint, coercing the body so third-party Ollama/Responses
-        // clients work against an OpenAI/OpenRouter upstream.
+        // /api/chat, OpenAI Responses /v1/responses) to the upstream chat
+        // endpoint + an OpenAI-shaped body.
         let (upstream_path, mut body) = normalize_chat_request(path, body);
-        let url = format!("{base}{upstream_path}");
-
-        // For OpenRouter, force cost accounting so `usage.cost` is returned.
-        // Override unconditionally — a client must not be able to suppress it
-        // (e.g. `usage:{include:false}`) and get mispriced off the OpenAI table.
-        if self.config.upstream_kind == UpstreamKind::OpenRouter {
-            if let Value::Object(map) = &mut body {
-                map.insert("usage".to_string(), json!({ "include": true }));
-            }
-        }
-        // For OpenAI, persist the completion on the platform (`store: true`) so
-        // it's retrievable for evals/distillation in the OpenAI dashboard. Only
-        // default it — honour an explicit client value.
-        if self.config.upstream_kind == UpstreamKind::OpenAi {
-            if let Value::Object(map) = &mut body {
-                map.entry("store").or_insert(Value::Bool(true));
-            }
-        }
         let request_model = body
             .get("model")
             .and_then(|m| m.as_str())
             .map(|s| s.to_string());
 
+        // Route by model id and resolve the base URL + key for that upstream.
+        let upstream = route_upstream(request_model.as_deref());
+        let (base, api_key) = match upstream {
+            Upstream::OpenRouter => {
+                let base = self.config.openrouter_api_base.trim_end_matches('/').to_string();
+                let key = self.openrouter_inference_key().await?;
+                // Force cost accounting so `usage.cost` is returned (and can't be
+                // suppressed by the client to get mispriced).
+                if let Value::Object(map) = &mut body {
+                    map.insert("usage".to_string(), json!({ "include": true }));
+                }
+                (base, key)
+            }
+            Upstream::OpenAi => {
+                let base = self.config.openai_api_base.trim_end_matches('/').to_string();
+                let key = self.config.openai_api_key.clone().ok_or_else(|| {
+                    ServerError::InvalidRequest(
+                        "OpenAI is not configured on this server (no OpenAI key)".to_string(),
+                    )
+                })?;
+                // Persist the completion on the OpenAI platform (default; honour
+                // an explicit client value).
+                if let Value::Object(map) = &mut body {
+                    map.entry("store").or_insert(Value::Bool(true));
+                }
+                (base, key)
+            }
+        };
+        let url = format!("{base}{upstream_path}");
+
         let mut req = self
             .http
             .post(&url)
-            .bearer_auth(&self.config.upstream_api_key)
+            .bearer_auth(&api_key)
             .header("content-type", "application/json");
-        if self.config.upstream_kind == UpstreamKind::OpenRouter {
+        if upstream == Upstream::OpenRouter {
             req = req
                 .header("HTTP-Referer", "https://openanonymity.ai")
                 .header("X-Title", "zkAPI x OpenAnonymity");
@@ -174,7 +242,8 @@ impl MeteredProvider {
             .and_then(|u| serde_json::from_value(u.clone()).ok())
             .unwrap_or_default();
 
-        let (cost_usd, cost_source) = self.derive_cost(&usage_raw, response_model.as_deref());
+        let (cost_usd, cost_source) =
+            self.derive_cost(&usage_raw, response_model.as_deref(), upstream);
         let credits = self.clamp_charge(pricing::usd_to_credits(cost_usd));
 
         let usage = UsageInfo {
@@ -189,6 +258,10 @@ impl MeteredProvider {
             cost_source,
         };
 
+        let upstream_label = match upstream {
+            Upstream::OpenAi => "openai",
+            Upstream::OpenRouter => "openrouter",
+        };
         Ok(ProviderResponse {
             status_code,
             response_hash: compute_response_hash(text.as_bytes()),
@@ -198,19 +271,26 @@ impl MeteredProvider {
             policy_evidence_hash: None,
             usage: Some(usage),
             upstream_model: response_model,
-            billing_label: format!("passthrough:{}", self.config.upstream_kind.as_str()),
+            billing_label: format!("passthrough:{upstream_label}"),
         })
     }
 
-    /// Derive (cost_usd, source) from upstream usage. OpenRouter reports cost
-    /// directly; OpenAI is priced from the built-in table.
-    fn derive_cost(&self, usage: &UpstreamUsage, model: Option<&str>) -> (f64, String) {
-        // Trust the provider-reported cost whenever it is present — including an
-        // authoritative 0.0 for genuinely-free/promo models (re-pricing those
-        // off the table would over-charge). Only fall back to the table when the
-        // upstream reports no cost at all (e.g. OpenAI).
-        if let Some(cost) = usage.cost {
-            return (cost.max(0.0), "openrouter_reported".to_string());
+    /// Derive (cost_usd, source) from upstream usage for the routed upstream.
+    /// OpenRouter reports its exact cost; OpenAI is priced from the built-in
+    /// per-model table.
+    fn derive_cost(
+        &self,
+        usage: &UpstreamUsage,
+        model: Option<&str>,
+        upstream: Upstream,
+    ) -> (f64, String) {
+        if upstream == Upstream::OpenRouter {
+            // We forced `usage.include`, so OpenRouter reports the authoritative
+            // cost (including 0.0 for free models — don't re-price those).
+            return (
+                usage.cost.unwrap_or(0.0).max(0.0),
+                "openrouter_reported".to_string(),
+            );
         }
         match model {
             Some(model) => {
@@ -250,17 +330,32 @@ impl MeteredProvider {
             .and_then(|m| m.as_str())
             .map(|s| s.to_string());
 
+        // The key auto-expires after the configured TTL (default 60s). Follow-up
+        // prompts reuse it until then; the browser settles the accumulated usage
+        // when it expires.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let expires_secs = now + self.config.ephemeral_ttl_seconds;
+        let expires_at_iso = unix_to_iso8601(expires_secs);
+
         let name = format!("zkapi-oa-{}", &client_request_id[..client_request_id.len().min(16)]);
-        let created = provisioner.create_key(&name, limit_usd).await?;
+        let created = provisioner
+            .create_key(&name, limit_usd, Some(&expires_at_iso))
+            .await?;
 
         let payload = json!({
             "mode": "ephemeral_issue",
             "ephemeral_key": created.key,
             "key_hash": created.hash,
             "limit_usd": created.limit_usd.unwrap_or(limit_usd),
+            "expires_at": created.expires_at.clone().unwrap_or(expires_at_iso),
+            "expires_at_unix": expires_secs,
+            "ttl_seconds": self.config.ephemeral_ttl_seconds,
             "model": model,
             "base_url": format!("{}/v1", self.config.openrouter_api_base.trim_end_matches('/')),
-            "note": "Use this key to call OpenRouter directly; settle usage via /zkapi/v1/ephemeral_settle.",
+            "note": "Use this key to call OpenRouter directly; it expires soon. Settle accumulated usage via /zkapi/v1/ephemeral_settle.",
         });
         let payload = serde_json::to_string(&payload).unwrap_or_default();
 
@@ -550,32 +645,41 @@ mod tests {
     }
 
     #[test]
-    fn derive_cost_prefers_openrouter_reported() {
-        let cfg = MeteredConfig::default();
-        let provider = MeteredProvider::new(cfg, 1_000_000).unwrap();
+    fn route_by_model_id() {
+        assert_eq!(route_upstream(Some("gpt-4o-mini")), Upstream::OpenAi);
+        assert_eq!(route_upstream(Some("gpt-4o")), Upstream::OpenAi);
+        assert_eq!(route_upstream(Some("openai/gpt-4o-mini")), Upstream::OpenRouter);
+        assert_eq!(
+            route_upstream(Some("anthropic/claude-3.5-sonnet")),
+            Upstream::OpenRouter
+        );
+        assert_eq!(route_upstream(None), Upstream::OpenAi);
+    }
+
+    #[test]
+    fn derive_cost_openrouter_uses_reported() {
+        let provider = MeteredProvider::new(MeteredConfig::default(), 1_000_000).unwrap();
         let usage = UpstreamUsage {
             prompt_tokens: 14,
             completion_tokens: 5,
             total_tokens: 19,
             cost: Some(0.0000051),
         };
-        let (cost, source) = provider.derive_cost(&usage, Some("openai/gpt-4o-mini"));
+        let (cost, source) = provider.derive_cost(&usage, Some("openai/gpt-4o-mini"), Upstream::OpenRouter);
         assert_eq!(source, "openrouter_reported");
         assert!((cost - 0.0000051).abs() < 1e-12);
     }
 
     #[test]
-    fn derive_cost_falls_back_to_openai_table() {
-        let mut cfg = MeteredConfig::default();
-        cfg.upstream_kind = UpstreamKind::OpenAi;
-        let provider = MeteredProvider::new(cfg, 1_000_000).unwrap();
+    fn derive_cost_openai_uses_table() {
+        let provider = MeteredProvider::new(MeteredConfig::default(), 1_000_000).unwrap();
         let usage = UpstreamUsage {
             prompt_tokens: 14,
             completion_tokens: 5,
             total_tokens: 19,
             cost: None,
         };
-        let (cost, source) = provider.derive_cost(&usage, Some("gpt-4o-mini-2024-07-18"));
+        let (cost, source) = provider.derive_cost(&usage, Some("gpt-4o-mini-2024-07-18"), Upstream::OpenAi);
         assert_eq!(source, "openai_table");
         assert!((cost - 0.0000051).abs() < 1e-12);
     }

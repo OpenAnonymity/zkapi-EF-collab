@@ -30,33 +30,62 @@ impl UpstreamKind {
 }
 
 /// Configuration for the token-usage-metered provider.
+///
+/// Both upstreams can be configured at once — there is no single "upstream
+/// kind". A pass-through request is routed by its model id: a vendor-prefixed id
+/// (`openai/…`, `anthropic/…`) goes to OpenRouter (billed at the provider's
+/// exact reported cost), a bare id (`gpt-4o-mini`) goes to OpenAI (billed from
+/// the built-in price table). Ephemeral keys (Mode 2) are always OpenRouter.
 #[derive(Debug, Clone)]
 pub struct MeteredConfig {
-    /// Upstream flavor for pass-through (Mode 1) inference.
-    pub upstream_kind: UpstreamKind,
-    /// Base URL for pass-through inference (e.g. `https://api.openai.com` or
-    /// `https://openrouter.ai/api`). The request `path` is appended.
-    pub upstream_api_base: String,
-    /// API key used for pass-through inference (server-held).
-    pub upstream_api_key: String,
-    /// OpenRouter base used for ephemeral-key provisioning (Mode 2).
+    /// Base URL for OpenAI pass-through (`https://api.openai.com`).
+    pub openai_api_base: String,
+    /// OpenAI API key for pass-through inference. Absent => OpenAI models error.
+    pub openai_api_key: Option<String>,
+    /// OpenRouter base for pass-through + provisioning (`https://openrouter.ai/api`).
     pub openrouter_api_base: String,
-    /// OpenRouter provisioning/management key for minting ephemeral keys.
-    /// Required for Mode 2; absent disables ephemeral issuance.
-    pub openrouter_provisioning_key: Option<String>,
+    /// OpenRouter management/provisioning key: mints Mode-2 ephemeral keys and,
+    /// if no dedicated inference key is set, a server-owned OpenRouter inference
+    /// key for pass-through. Absent => OpenRouter + ephemeral disabled.
+    pub openrouter_key: Option<String>,
+    /// Optional dedicated OpenRouter runtime key for pass-through inference. If
+    /// unset, one is lazily minted from `openrouter_key`.
+    pub openrouter_inference_key: Option<String>,
     /// Default credit limit (USD) applied to a freshly-minted ephemeral key.
     pub ephemeral_default_limit_usd: f64,
+    /// Lifetime (seconds) of a minted ephemeral key before it expires and its
+    /// accumulated usage is settled. Default 60.
+    pub ephemeral_ttl_seconds: u64,
 }
 
 impl Default for MeteredConfig {
     fn default() -> Self {
         Self {
-            upstream_kind: UpstreamKind::OpenRouter,
-            upstream_api_base: "https://openrouter.ai/api".to_string(),
-            upstream_api_key: String::new(),
+            openai_api_base: "https://api.openai.com".to_string(),
+            openai_api_key: None,
             openrouter_api_base: "https://openrouter.ai/api".to_string(),
-            openrouter_provisioning_key: None,
+            openrouter_key: None,
+            openrouter_inference_key: None,
             ephemeral_default_limit_usd: 1.0,
+            ephemeral_ttl_seconds: 60,
+        }
+    }
+}
+
+impl MeteredConfig {
+    /// Human-readable summary of which upstreams are configured.
+    pub fn upstreams_label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.openai_api_key.is_some() {
+            parts.push("openai");
+        }
+        if self.openrouter_key.is_some() {
+            parts.push("openrouter");
+        }
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join("+")
         }
     }
 }

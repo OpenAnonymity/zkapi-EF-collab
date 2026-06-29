@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::ServerError;
 
@@ -28,6 +29,29 @@ pub struct CreatedKey {
     pub hash: String,
     /// The credit limit (USD) the key was created with, if any.
     pub limit_usd: Option<f64>,
+    /// The expiry (ISO 8601) the key was created with, if any.
+    pub expires_at: Option<String>,
+}
+
+/// Format a UNIX timestamp (seconds) as an ISO-8601 UTC string
+/// (`YYYY-MM-DDTHH:MM:SSZ`) — the format OpenRouter's `expires_at` accepts.
+/// Self-contained (no date crate) via the civil-from-days algorithm.
+pub fn unix_to_iso8601(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant's civil_from_days (days since 1970-01-01).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 /// Authoritative usage/limit snapshot for a key.
@@ -70,6 +94,8 @@ struct KeyData {
     usage: f64,
     #[serde(default)]
     disabled: bool,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 impl OpenRouterProvisioner {
@@ -93,9 +119,17 @@ impl OpenRouterProvisioner {
         format!("{}/v1/keys/{}", self.base, hash)
     }
 
-    /// Create a credit-limited ephemeral runtime key.
-    pub async fn create_key(&self, name: &str, limit_usd: f64) -> Result<CreatedKey, ServerError> {
-        let body = serde_json::json!({ "name": name, "limit": limit_usd });
+    /// Create a credit-limited runtime key, optionally with an ISO-8601 expiry.
+    pub async fn create_key(
+        &self,
+        name: &str,
+        limit_usd: f64,
+        expires_at_iso: Option<&str>,
+    ) -> Result<CreatedKey, ServerError> {
+        let mut body = serde_json::json!({ "name": name, "limit": limit_usd });
+        if let (Some(exp), Value::Object(map)) = (expires_at_iso, &mut body) {
+            map.insert("expires_at".to_string(), Value::String(exp.to_string()));
+        }
         let resp = self
             .http
             .post(self.keys_url())
@@ -121,6 +155,7 @@ impl OpenRouterProvisioner {
             key: env.key,
             hash: env.data.hash,
             limit_usd: env.data.limit,
+            expires_at: env.data.expires_at,
         })
     }
 
@@ -177,6 +212,20 @@ impl OpenRouterProvisioner {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso8601_formats_known_timestamps() {
+        // `date -u -d @1700000000` => Tue Nov 14 22:13:20 UTC 2023
+        assert_eq!(unix_to_iso8601(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(unix_to_iso8601(0), "1970-01-01T00:00:00Z");
+        // A leap-day check: 2024-02-29.
+        assert_eq!(unix_to_iso8601(1_709_208_000), "2024-02-29T12:00:00Z");
     }
 }
 
