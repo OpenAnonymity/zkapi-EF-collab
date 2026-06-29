@@ -11,5 +11,5 @@ pub use service::{
     AuthService, ConfirmDepositRequest, CoreRequest, CoreResponse, DemoOverview, DepositPlan,
     FundingConfig, IndexerSnapshot, NoteStatus, ProtocolResponseTrace, RecoverResult,
     RequestDemoResult, RequestPreview, ServerAttestationSnapshot, ServerHealthSnapshot,
-    ServerSnapshot, WalletStatus, WithdrawalMode, WithdrawalPlan,
+    ServerSnapshot, WalletStatus, WithdrawalMode, WithdrawalPlan, ZkapiConfig, CREDITS_PER_USD,
 };

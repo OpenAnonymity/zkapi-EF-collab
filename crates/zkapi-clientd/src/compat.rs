@@ -137,6 +137,7 @@ pub fn ollama_chat(model: &str, response: &CoreResponse) -> Value {
     }
 
     let content = response_text(response);
+    let (prompt_tokens, completion_tokens) = response_usage(response);
     json!({
         "model": model,
         "created_at": "1970-01-01T00:00:00Z",
@@ -148,8 +149,8 @@ pub fn ollama_chat(model: &str, response: &CoreResponse) -> Value {
         "done_reason": "stop",
         "total_duration": 0,
         "load_duration": 0,
-        "prompt_eval_count": 0,
-        "eval_count": 0,
+        "prompt_eval_count": prompt_tokens,
+        "eval_count": completion_tokens,
         "zkapi": response_metadata(response),
     })
 }
@@ -157,9 +158,49 @@ pub fn ollama_chat(model: &str, response: &CoreResponse) -> Value {
 fn response_text(response: &CoreResponse) -> String {
     match response.payload.as_ref() {
         Some(Value::String(text)) => text.clone(),
-        Some(value) => value.to_string(),
+        Some(value) => {
+            // Prefer the assistant text from an OpenAI chat-completion
+            // (`choices[0].message.content`) or an OpenAI Responses
+            // (`output[0].content[0].text`) payload, so the Ollama/Responses
+            // shims surface real content from an OpenAI-format upstream rather
+            // than the whole JSON blob.
+            if let Some(text) = value
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_str)
+            {
+                return text.to_string();
+            }
+            if let Some(text) = value
+                .get("output")
+                .and_then(|o| o.get(0))
+                .and_then(|o| o.get("content"))
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("text"))
+                .and_then(Value::as_str)
+            {
+                return text.to_string();
+            }
+            value.to_string()
+        }
         None => response.raw_payload.clone(),
     }
+}
+
+/// Pull (prompt_tokens, completion_tokens) from an OpenAI-format `usage` block.
+fn response_usage(response: &CoreResponse) -> (u64, u64) {
+    let usage = response.payload.as_ref().and_then(|v| v.get("usage"));
+    let prompt = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (prompt, completion)
 }
 
 fn response_metadata(response: &CoreResponse) -> Value {
@@ -215,6 +256,30 @@ mod tests {
             result["choices"][0]["message"]["content"],
             "{\"foo\":\"bar\"}"
         );
+    }
+
+    #[test]
+    fn ollama_chat_extracts_openai_content_and_usage() {
+        // A real OpenAI-format upstream response (what the metered provider
+        // returns) must surface as proper Ollama content + token counts.
+        let payload = json!({
+            "choices": [{ "message": { "role": "assistant", "content": "ollama shim works" } }],
+            "usage": { "prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16 }
+        });
+        let result = ollama_chat("gpt-4o-mini", &response(Some(payload)));
+        assert_eq!(result["message"]["content"], "ollama shim works");
+        assert_eq!(result["prompt_eval_count"], 12);
+        assert_eq!(result["eval_count"], 4);
+        assert_eq!(result["done"], true);
+    }
+
+    #[test]
+    fn responses_api_extracts_openai_chat_content() {
+        let payload = json!({
+            "choices": [{ "message": { "role": "assistant", "content": "hello there" } }]
+        });
+        let result = responses_api("gpt-4o-mini", &response(Some(payload)));
+        assert_eq!(result["output"][0]["content"][0]["text"], "hello there");
     }
 
     #[test]

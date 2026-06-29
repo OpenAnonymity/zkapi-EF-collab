@@ -101,6 +101,28 @@ pub struct FundingConfig {
     pub demo_note_ttl_seconds: Option<u64>,
 }
 
+/// Integration credit unit: 1 credit = 1 micro-US-dollar. Mirrors
+/// `zkapi_serverd::pricing::CREDITS_PER_USD`; used by the client UI to render
+/// USD next to credit amounts when the server doesn't report its own scale.
+pub const CREDITS_PER_USD: f64 = 1_000_000.0;
+
+/// Integration configuration surfaced to the oa-chat client: the credit scale,
+/// per-request cap, funding parameters, and which billing modes the server
+/// supports (pass-through is always available; ephemeral needs an OpenRouter
+/// provisioning key on the server).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZkapiConfig {
+    pub credits_per_usd: f64,
+    pub request_charge_cap: u128,
+    pub request_charge_cap_usd: f64,
+    pub policy_charge_cap: u128,
+    pub policy_enabled: bool,
+    pub funding: FundingConfig,
+    pub ephemeral_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DemoOverview {
     pub wallet: WalletStatus,
@@ -376,6 +398,38 @@ impl AuthService {
             })
         })
         .await
+    }
+
+    /// Build the integration config for the client UI, probing the server's
+    /// dashboard summary for billing-mode availability + credit scale.
+    pub async fn zkapi_config(&self) -> ZkapiConfig {
+        let summary_url = format!(
+            "{}/v1/dashboard/summary",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
+        let summary = fetch_json::<Value>(&summary_url).await.ok();
+        let server = summary.as_ref().map(|s| &s["server"]);
+        let ephemeral_available = server
+            .and_then(|s| s["ephemeral_enabled"].as_bool())
+            .unwrap_or(false);
+        let upstream_kind = server
+            .and_then(|s| s["upstream_kind"].as_str())
+            .map(|s| s.to_string());
+        let credits_per_usd = server
+            .and_then(|s| s["credits_per_usd"].as_f64())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(CREDITS_PER_USD);
+
+        ZkapiConfig {
+            credits_per_usd,
+            request_charge_cap: self.config.request_charge_cap,
+            request_charge_cap_usd: self.config.request_charge_cap as f64 / credits_per_usd,
+            policy_charge_cap: self.config.policy_charge_cap,
+            policy_enabled: self.config.policy_enabled,
+            funding: self.funding_config(),
+            ephemeral_available,
+            upstream_kind,
+        }
     }
 
     pub fn funding_config(&self) -> FundingConfig {

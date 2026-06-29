@@ -18,8 +18,23 @@ use crate::error::ServerError;
 
 /// Canonical hash binding an upstream response payload, matching what the
 /// client wallet re-derives in `verify_request_response`.
-fn compute_response_hash(payload: impl AsRef<[u8]>) -> Felt252 {
+pub(crate) fn compute_response_hash(payload: impl AsRef<[u8]>) -> Felt252 {
     zkapi_types::canonical_response_hash(payload.as_ref())
+}
+
+/// Token usage + cost breakdown for a single upstream call, surfaced to the
+/// dashboard and (via the client daemon) the user. Cost is the real upstream
+/// spend in USD that drives `charge_applied`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageInfo {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    /// Upstream cost in US dollars.
+    pub cost_usd: f64,
+    /// Where the cost came from: e.g. `openrouter_reported`, `openai_table`,
+    /// `openai_table_fallback`, `ephemeral_settle_reported`.
+    pub cost_source: String,
 }
 
 /// Result of executing the upstream API call.
@@ -31,6 +46,40 @@ pub struct ProviderResponse {
     pub charge_applied: u128,
     pub policy_reason_code: Option<u32>,
     pub policy_evidence_hash: Option<Felt252>,
+    /// Token usage + cost that produced `charge_applied` (None for providers
+    /// that don't meter, like echo).
+    pub usage: Option<UsageInfo>,
+    /// Upstream model id actually billed, if known.
+    pub upstream_model: Option<String>,
+    /// Human-readable billing path label for the dashboard, e.g.
+    /// `passthrough:openrouter`, `ephemeral:issue`, `ephemeral:settle`,
+    /// `echo`, `proxy`.
+    pub billing_label: String,
+}
+
+impl ProviderResponse {
+    /// Construct a metered-free response (echo/proxy style) with the given
+    /// payload, charge and label.
+    fn unmetered(
+        status_code: u16,
+        payload: String,
+        charge_applied: u128,
+        billing_label: &str,
+        policy_reason_code: Option<u32>,
+        policy_evidence_hash: Option<Felt252>,
+    ) -> Self {
+        Self {
+            status_code,
+            response_hash: compute_response_hash(payload.as_bytes()),
+            payload,
+            charge_applied,
+            policy_reason_code,
+            policy_evidence_hash,
+            usage: None,
+            upstream_model: None,
+            billing_label: billing_label.to_string(),
+        }
+    }
 }
 
 /// Application-specific API executor.
@@ -72,14 +121,14 @@ impl ApiProvider for EchoProvider {
         _payload_hash: &'a Felt252,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ServerError>> + Send + 'a>> {
         Box::pin(async move {
-            Ok(ProviderResponse {
-                status_code: 200,
-                payload: payload.to_string(),
-                response_hash: compute_response_hash(payload.as_bytes()),
-                charge_applied: self.fixed_charge,
-                policy_reason_code: None,
-                policy_evidence_hash: None,
-            })
+            Ok(ProviderResponse::unmetered(
+                200,
+                payload.to_string(),
+                self.fixed_charge,
+                "echo",
+                None,
+                None,
+            ))
         })
     }
 }
@@ -143,6 +192,9 @@ impl ApiProvider for HttpProxyProvider {
                     .unwrap_or(self.default_charge),
                 policy_reason_code: parse_header_u32(&headers, "x-zkapi-policy-reason-code")?,
                 policy_evidence_hash: parse_header_felt(&headers, "x-zkapi-policy-evidence-hash")?,
+                usage: None,
+                upstream_model: None,
+                billing_label: "proxy".to_string(),
             })
         })
     }
@@ -160,6 +212,16 @@ pub fn build_provider(config: &ServerConfig) -> anyhow::Result<Arc<dyn ApiProvid
                 upstream_url,
                 Duration::from_millis(config.proxy_timeout_ms),
                 config.proxy_default_charge,
+            )?))
+        }
+        ProviderKind::Metered => {
+            let metered = config
+                .metered
+                .clone()
+                .ok_or_else(|| anyhow!("missing metered config for metered provider"))?;
+            Ok(Arc::new(crate::metered_provider::MeteredProvider::new(
+                metered,
+                config.request_charge_cap,
             )?))
         }
     }

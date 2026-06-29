@@ -9,7 +9,7 @@ use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
     WithdrawalMode,
 };
-use zkapi_serverd::config::{ProviderKind, ServerConfig};
+use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig, UpstreamKind};
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
@@ -70,6 +70,24 @@ enum Commands {
         upstream_url: Option<String>,
         #[arg(long, default_value_t = 30_000)]
         proxy_timeout_ms: u64,
+        /// Metered provider: upstream flavor (openai | openrouter).
+        #[arg(long, value_enum, default_value_t = UpstreamKindArg::Openrouter)]
+        upstream_kind: UpstreamKindArg,
+        /// Metered provider: upstream base URL (defaults per upstream-kind).
+        #[arg(long)]
+        upstream_api_base: Option<String>,
+        /// Metered provider: API key for pass-through inference.
+        #[arg(long)]
+        upstream_api_key: Option<String>,
+        /// Metered provider: OpenRouter base for ephemeral-key provisioning.
+        #[arg(long, default_value = "https://openrouter.ai/api")]
+        openrouter_api_base: String,
+        /// Metered provider: OpenRouter provisioning/management key (Mode 2).
+        #[arg(long)]
+        openrouter_provisioning_key: Option<String>,
+        /// Metered provider: default ephemeral-key credit limit (USD).
+        #[arg(long, default_value_t = 1.0)]
+        ephemeral_limit_usd: f64,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
         #[arg(long, default_value = "0x1")]
@@ -145,6 +163,14 @@ enum WithdrawalModeArg {
 enum ProviderArg {
     Echo,
     HttpProxy,
+    /// Token-usage-metered upstream (OpenAI / OpenRouter) with real billing.
+    Metered,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum UpstreamKindArg {
+    Openai,
+    Openrouter,
 }
 
 #[tokio::main]
@@ -177,6 +203,12 @@ async fn main() -> anyhow::Result<()> {
             flat_charge,
             upstream_url,
             proxy_timeout_ms,
+            upstream_kind,
+            upstream_api_base,
+            upstream_api_key,
+            openrouter_api_base,
+            openrouter_provisioning_key,
+            ephemeral_limit_usd,
             db_path,
             state_seed,
             clear_seed,
@@ -186,6 +218,26 @@ async fn main() -> anyhow::Result<()> {
             indexer_url,
             root_poll_interval_ms,
         } => {
+            let upstream_kind = match upstream_kind {
+                UpstreamKindArg::Openai => UpstreamKind::OpenAi,
+                UpstreamKindArg::Openrouter => UpstreamKind::OpenRouter,
+            };
+            let metered = if matches!(provider, ProviderArg::Metered) {
+                let upstream_api_base = upstream_api_base.unwrap_or_else(|| match upstream_kind {
+                    UpstreamKind::OpenAi => "https://api.openai.com".to_string(),
+                    UpstreamKind::OpenRouter => "https://openrouter.ai/api".to_string(),
+                });
+                Some(MeteredConfig {
+                    upstream_kind,
+                    upstream_api_base,
+                    upstream_api_key: upstream_api_key.unwrap_or_default(),
+                    openrouter_api_base,
+                    openrouter_provisioning_key,
+                    ephemeral_default_limit_usd: ephemeral_limit_usd,
+                })
+            } else {
+                None
+            };
             let config = ServerConfig {
                 protocol_version: cli.protocol_version,
                 chain_id: cli.chain_id,
@@ -198,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
                 provider_kind: match provider {
                     ProviderArg::Echo => ProviderKind::Echo,
                     ProviderArg::HttpProxy => ProviderKind::HttpProxy,
+                    ProviderArg::Metered => ProviderKind::Metered,
                 },
                 echo_fixed_charge: flat_charge,
                 proxy_default_charge: flat_charge,
@@ -211,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 initial_root: parse_felt("initial root", &initial_root)?,
                 indexer_url,
                 root_poll_interval_ms,
+                metered,
                 ..Default::default()
             };
             zkapi_serverd::routes::run_server(config).await?;

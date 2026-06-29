@@ -8,14 +8,18 @@
 //! - GET  /v1/requests/:id          -- recover by client_request_id
 //! - GET  /v1/nullifiers/:nullifier -- recover by nullifier
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream::Stream;
 use serde::Serialize;
+use tower_http::cors::CorsLayer;
 
 use zkapi_core::poseidon::felt_to_field;
 use zkapi_types::wire::{
@@ -24,7 +28,9 @@ use zkapi_types::wire::{
 };
 use zkapi_types::Felt252;
 
+use crate::dashboard::{DashboardEvent, DashboardHub, DashboardTotals};
 use crate::error::ServerError;
+use crate::pricing;
 use crate::processor::RequestProcessor;
 use crate::provider::build_provider;
 
@@ -54,13 +60,11 @@ pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<(
     } else {
         config.initial_root
     };
-    let processor = Arc::new(RequestProcessor::new(
-        config.clone(),
-        store,
-        signer,
-        provider,
-        initial_root,
-    ));
+    let dashboard = Arc::new(DashboardHub::new(500));
+    let processor = Arc::new(
+        RequestProcessor::new(config.clone(), store, signer, provider, initial_root)
+            .with_dashboard(dashboard),
+    );
     if let Some(indexer_url) = config.indexer_url.clone() {
         spawn_root_poller(
             processor.clone(),
@@ -77,6 +81,16 @@ pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<(
 
 /// Create the Axum router with all zkAPI server routes.
 pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
+    // The dashboard is a separate local origin and only ever reads these three
+    // routes, so cross-origin access is granted to THESE ONLY. The protocol
+    // POST and the recovery GETs (which can return a stored transcript) get no
+    // CORS, so a random web page can't read them cross-origin.
+    let dashboard = Router::new()
+        .route("/v1/dashboard/summary", get(handle_dashboard_summary))
+        .route("/v1/dashboard/recent", get(handle_dashboard_recent))
+        .route("/v1/dashboard/events", get(handle_dashboard_events))
+        .layer(CorsLayer::very_permissive());
+
     Router::new()
         .route("/", get(handle_health))
         .route("/health", get(handle_health))
@@ -91,6 +105,7 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
             "/v1/nullifiers/{nullifier}",
             get(handle_recovery_by_nullifier),
         )
+        .merge(dashboard)
         .with_state(processor)
 }
 
@@ -208,6 +223,116 @@ async fn handle_recovery_by_nullifier(
         .map_err(|e| error_to_response(&e, &nullifier_hex, &processor))
 }
 
+/// Server identity + signing capacity for the dashboard header panel.
+#[derive(Debug, Serialize)]
+struct ServerIdentity {
+    protocol_version: u16,
+    chain_id: u64,
+    contract_address: Felt252,
+    current_root: Felt252,
+    provider: &'static str,
+    upstream_kind: Option<String>,
+    upstream_api_base: Option<String>,
+    ephemeral_enabled: bool,
+    auth_scheme: &'static str,
+    policy_enabled: bool,
+    request_charge_cap: u128,
+    request_charge_cap_usd: f64,
+    credits_per_usd: f64,
+    state_sig_epoch: u32,
+    clear_sig_epoch: u32,
+    state_sig_root: Felt252,
+    clear_sig_root: Felt252,
+    state_signatures_remaining: u32,
+    clear_signatures_remaining: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardSummary {
+    server: ServerIdentity,
+    totals: DashboardTotals,
+    started_ms: u64,
+    recent_count: usize,
+}
+
+/// GET /v1/dashboard/summary -- server identity + running totals.
+async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<DashboardSummary> {
+    let config = processor.config();
+    let (upstream_kind, upstream_api_base, ephemeral_enabled) = match &config.metered {
+        Some(m) => (
+            Some(m.upstream_kind.as_str().to_string()),
+            Some(m.upstream_api_base.clone()),
+            m.openrouter_provisioning_key
+                .as_ref()
+                .map(|k| !k.is_empty())
+                .unwrap_or(false),
+        ),
+        None => (None, None, false),
+    };
+    let server = ServerIdentity {
+        protocol_version: config.protocol_version,
+        chain_id: config.chain_id,
+        contract_address: config.contract_address,
+        current_root: processor.current_root(),
+        provider: provider_name(config.provider_kind),
+        upstream_kind,
+        upstream_api_base,
+        ephemeral_enabled,
+        auth_scheme: config.auth_scheme.as_str(),
+        policy_enabled: config.policy_enabled,
+        request_charge_cap: config.request_charge_cap,
+        request_charge_cap_usd: pricing::credits_to_usd(config.request_charge_cap),
+        credits_per_usd: pricing::CREDITS_PER_USD,
+        state_sig_epoch: processor.state_sig_epoch(),
+        clear_sig_epoch: processor.clear_sig_epoch(),
+        state_sig_root: processor.state_sig_root(),
+        clear_sig_root: processor.clear_sig_root(),
+        state_signatures_remaining: processor.state_signatures_remaining(),
+        clear_signatures_remaining: processor.clear_signatures_remaining(),
+    };
+    let (totals, started_ms, recent_count) = match processor.dashboard() {
+        Some(hub) => (hub.totals(), hub.started_ms, hub.recent().len()),
+        None => (DashboardTotals::default(), 0, 0),
+    };
+    Json(DashboardSummary {
+        server,
+        totals,
+        started_ms,
+        recent_count,
+    })
+}
+
+/// GET /v1/dashboard/recent -- the recent request feed (newest last).
+async fn handle_dashboard_recent(State(processor): State<AppState>) -> Json<Vec<DashboardEvent>> {
+    let events = processor
+        .dashboard()
+        .map(|hub| hub.recent())
+        .unwrap_or_default();
+    Json(events)
+}
+
+/// GET /v1/dashboard/events -- Server-Sent-Events stream of live requests.
+async fn handle_dashboard_events(
+    State(processor): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = processor.dashboard().map(|hub| hub.subscribe());
+    let stream = futures_util::stream::unfold(rx, |state| async move {
+        let mut rx = state?;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    let sse = Event::default().event("request").data(data);
+                    return Some((Ok(sse), Some(rx)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 /// Convert a ServerError into an HTTP error response tuple.
 fn error_to_response(
     err: &ServerError,
@@ -268,6 +393,7 @@ fn provider_name(provider_kind: crate::config::ProviderKind) -> &'static str {
     match provider_kind {
         crate::config::ProviderKind::Echo => "echo",
         crate::config::ProviderKind::HttpProxy => "http-proxy",
+        crate::config::ProviderKind::Metered => "metered",
     }
 }
 

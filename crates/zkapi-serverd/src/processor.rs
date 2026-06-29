@@ -18,7 +18,7 @@
 //! `zkapi-client` wallet.
 
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use zkapi_core::commitment::{compute_blind_delta, compute_next_anchor, compute_state_message};
@@ -32,8 +32,12 @@ use zkapi_types::wire::{
 use zkapi_types::{Felt252, NullifierStatus, STATEMENT_TYPE_REQUEST};
 
 use crate::config::ServerConfig;
+use crate::dashboard::{
+    charge_usd, decode_request_view, redact_secrets, DashboardEvent, DashboardHub,
+};
 use crate::error::ServerError;
 use crate::nullifier_store::{NullifierStore, TranscriptRecord};
+use crate::pricing;
 use crate::provider::ApiProvider;
 use crate::signer::ServerSigner;
 
@@ -44,6 +48,8 @@ pub struct RequestProcessor {
     signer: Arc<ServerSigner>,
     provider: Arc<dyn ApiProvider>,
     current_root: Arc<RwLock<Felt252>>,
+    /// Optional live observability feed (does not affect protocol state).
+    dashboard: Option<Arc<DashboardHub>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +75,19 @@ impl RequestProcessor {
             signer,
             provider,
             current_root: Arc::new(RwLock::new(current_root)),
+            dashboard: None,
         }
+    }
+
+    /// Attach a live dashboard feed for observability.
+    pub fn with_dashboard(mut self, dashboard: Arc<DashboardHub>) -> Self {
+        self.dashboard = Some(dashboard);
+        self
+    }
+
+    /// Access the dashboard hub, if attached.
+    pub fn dashboard(&self) -> Option<&Arc<DashboardHub>> {
+        self.dashboard.as_ref()
     }
 
     /// Update the current Merkle root (called when the indexer detects a new root).
@@ -124,6 +142,7 @@ impl RequestProcessor {
         &self,
         api_request: &ApiRequest,
     ) -> Result<RequestResponse, ServerError> {
+        let started = Instant::now();
         let pi = &api_request.public_inputs;
 
         // Step 1: Validate protocol version
@@ -243,6 +262,7 @@ impl RequestProcessor {
         }
 
         // Step 11: Execute the upstream provider call.
+        let upstream_started = Instant::now();
         let provider_response = self
             .provider
             .execute(
@@ -251,10 +271,14 @@ impl RequestProcessor {
                 &api_request.payload_hash,
             )
             .await?;
+        let upstream_ms = upstream_started.elapsed().as_millis() as u64;
         let response_code = provider_response.status_code;
         let response_payload = provider_response.payload;
         let response_hash = provider_response.response_hash;
         let charge = provider_response.charge_applied;
+        let usage = provider_response.usage.clone();
+        let upstream_model = provider_response.upstream_model.clone();
+        let billing_label = provider_response.billing_label.clone();
 
         // Step 12: Enforce the charge cap before signing a next state.
         //
@@ -422,7 +446,10 @@ impl RequestProcessor {
             payload_hash: Some(api_request.payload_hash),
             charge_applied: Some(charge),
             response_code: Some(response_code),
-            response_payload: Some(response_payload.clone()),
+            // Redact bearer keys (e.g. a minted ephemeral key) from the durable
+            // store so the recovery endpoints can never surface a live secret.
+            // The client already received the real value in the live response.
+            response_payload: Some(redact_secrets(&response_payload)),
             response_hash: Some(response_hash),
             next_commitment_x: Some(prepared_next_state.next_cx),
             next_commitment_y: Some(prepared_next_state.next_cy),
@@ -442,6 +469,57 @@ impl RequestProcessor {
         self.store
             .finalize(&pi.request_nullifier, &transcript)
             .map_err(|e| ServerError::Internal(format!("failed to finalize transcript: {}", e)))?;
+
+        // Emit a rich observability event for the dashboard (best-effort, never
+        // affects the protocol response).
+        if let Some(hub) = &self.dashboard {
+            let (request_path, request_model, request_messages) =
+                decode_request_view(&api_request.payload);
+            let event = DashboardEvent {
+                seq: hub.next_seq(),
+                ts_ms: current_timestamp_ms(),
+                client_request_id: api_request.client_request_id.clone(),
+                billing_label,
+                upstream_model,
+                request_nullifier: pi.request_nullifier,
+                active_root: pi.active_root,
+                anon_commitment: CurvePointWire {
+                    x: pi.anon_commitment_x,
+                    y: pi.anon_commitment_y,
+                },
+                solvency_bound: pi.solvency_bound,
+                solvency_bound_usd: pricing::credits_to_usd(pi.solvency_bound),
+                statement_type: pi.statement_type,
+                state_sig_epoch_in: pi.state_sig_epoch,
+                proof_backend: "stwo_cairo".to_string(),
+                proof_public_output_hash: api_request.proof.public_output_hash,
+                proof_size_bytes: proof_bytes.len(),
+                request_path,
+                request_model,
+                request_messages,
+                // Scrub bearer keys (e.g. the minted ephemeral key) from the
+                // operator-facing feed; the client already has the real value.
+                request_raw: redact_secrets(&api_request.payload),
+                response_code,
+                response_text: redact_secrets(&response_payload),
+                response_hash,
+                usage,
+                charge_applied: charge,
+                charge_usd: charge_usd(charge),
+                next_commitment: CurvePointWire {
+                    x: prepared_next_state.next_cx,
+                    y: prepared_next_state.next_cy,
+                },
+                next_anchor: prepared_next_state.next_anchor,
+                blind_delta_srv: prepared_next_state.blind_delta_felt,
+                next_state_sig_epoch: state_sig.epoch,
+                next_state_sig_leaf_index: state_sig.leaf_index as u64,
+                next_state_sig_root: self.signer.state_root(),
+                upstream_ms,
+                total_ms: started.elapsed().as_millis() as u64,
+            };
+            hub.record(event);
+        }
 
         // Step 18: Return response
         Ok(RequestResponse {
@@ -636,6 +714,14 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Get the current UNIX timestamp in milliseconds.
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

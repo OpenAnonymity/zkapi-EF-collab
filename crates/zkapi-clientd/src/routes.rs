@@ -71,6 +71,11 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/recover", post(wallet_recover))
         .route("/wallet/withdraw", post(wallet_withdraw))
         .route("/funding/api/withdraw", post(wallet_withdraw))
+        // Integrated oa-chat client endpoints: full zkAPI inspection per call.
+        .route("/zkapi/v1/config", get(zkapi_config))
+        .route("/zkapi/v1/inference", post(zkapi_inference))
+        .route("/zkapi/v1/ephemeral/issue", post(zkapi_ephemeral_issue))
+        .route("/zkapi/v1/ephemeral/settle", post(zkapi_ephemeral_settle))
         .layer(local_cors_layer())
         .with_state(service)
 }
@@ -272,6 +277,55 @@ async fn request_submit(
     Json(body): Json<CoreRequest>,
 ) -> Response {
     match service.execute_request_demo(body).await {
+        Ok(result) => Json(result).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
+/// GET /zkapi/v1/config -- integration config for the client (credit scale,
+/// caps, billing modes available, funding parameters).
+async fn zkapi_config(State(service): State<Arc<AuthService>>) -> Response {
+    Json(service.zkapi_config().await).into_response()
+}
+
+/// POST /zkapi/v1/inference -- Mode 1 (pass-through): run an OpenAI-style chat
+/// completion through the full zkAPI proof+billing path and return both the
+/// completion and the complete zkAPI inspection (`RequestDemoResult`).
+async fn zkapi_inference(
+    State(service): State<Arc<AuthService>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let request = CoreRequest::post_json("/v1/chat/completions", body);
+    match service.execute_request_demo(request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
+/// POST /zkapi/v1/ephemeral/issue -- Mode 2: mint a credit-limited OpenRouter
+/// ephemeral key (the browser then streams directly). Body: `{limit_usd?,
+/// model?}`. Returns the full zkAPI inspection; the issued key is in
+/// `response.raw_payload`.
+async fn zkapi_ephemeral_issue(
+    State(service): State<Arc<AuthService>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let request = CoreRequest::post_json("/zkapi/v1/ephemeral_key", body);
+    match service.execute_request_demo(request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
+/// POST /zkapi/v1/ephemeral/settle -- Mode 2: bill a generation the browser ran
+/// on a previously-issued ephemeral key. Body: `{key_hash, reported_cost_usd,
+/// prompt_tokens?, completion_tokens?, model?}`.
+async fn zkapi_ephemeral_settle(
+    State(service): State<Arc<AuthService>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let request = CoreRequest::post_json("/zkapi/v1/ephemeral_settle", body);
+    match service.execute_request_demo(request).await {
         Ok(result) => Json(result).into_response(),
         Err(err) => generic_error(err),
     }

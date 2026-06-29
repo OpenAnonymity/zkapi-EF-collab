@@ -26,6 +26,8 @@ starknet-curve = { workspace = true }
 starknet-types-core = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
+futures-util = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

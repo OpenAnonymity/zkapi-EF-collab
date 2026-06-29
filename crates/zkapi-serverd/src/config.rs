@@ -7,6 +7,58 @@ use zkapi_types::Felt252;
 pub enum ProviderKind {
     Echo,
     HttpProxy,
+    /// Token-usage-metered upstream (OpenAI / OpenRouter) with real billing.
+    Metered,
+}
+
+/// Which upstream API flavor the metered provider talks to. Determines how
+/// cost is derived (OpenRouter self-reports `usage.cost`; OpenAI is priced
+/// from the built-in table) and how requests are shaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamKind {
+    OpenAi,
+    OpenRouter,
+}
+
+impl UpstreamKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpstreamKind::OpenAi => "openai",
+            UpstreamKind::OpenRouter => "openrouter",
+        }
+    }
+}
+
+/// Configuration for the token-usage-metered provider.
+#[derive(Debug, Clone)]
+pub struct MeteredConfig {
+    /// Upstream flavor for pass-through (Mode 1) inference.
+    pub upstream_kind: UpstreamKind,
+    /// Base URL for pass-through inference (e.g. `https://api.openai.com` or
+    /// `https://openrouter.ai/api`). The request `path` is appended.
+    pub upstream_api_base: String,
+    /// API key used for pass-through inference (server-held).
+    pub upstream_api_key: String,
+    /// OpenRouter base used for ephemeral-key provisioning (Mode 2).
+    pub openrouter_api_base: String,
+    /// OpenRouter provisioning/management key for minting ephemeral keys.
+    /// Required for Mode 2; absent disables ephemeral issuance.
+    pub openrouter_provisioning_key: Option<String>,
+    /// Default credit limit (USD) applied to a freshly-minted ephemeral key.
+    pub ephemeral_default_limit_usd: f64,
+}
+
+impl Default for MeteredConfig {
+    fn default() -> Self {
+        Self {
+            upstream_kind: UpstreamKind::OpenRouter,
+            upstream_api_base: "https://openrouter.ai/api".to_string(),
+            upstream_api_key: String::new(),
+            openrouter_api_base: "https://openrouter.ai/api".to_string(),
+            openrouter_provisioning_key: None,
+            ephemeral_default_limit_usd: 1.0,
+        }
+    }
 }
 
 /// Configuration for the zkAPI server.
@@ -56,6 +108,9 @@ pub struct ServerConfig {
     pub indexer_url: Option<String>,
     /// Poll interval for indexer root refresh.
     pub root_poll_interval_ms: u64,
+    /// Configuration for the metered upstream provider (when
+    /// `provider_kind == Metered`).
+    pub metered: Option<MeteredConfig>,
 }
 
 impl Default for ServerConfig {
@@ -83,6 +138,7 @@ impl Default for ServerConfig {
             initial_root: Felt252::ZERO,
             indexer_url: None,
             root_poll_interval_ms: 1_000,
+            metered: None,
         }
     }
 }
