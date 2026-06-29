@@ -58,6 +58,8 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/config", get(funding_config))
         .route("/wallet/status", get(wallet_status))
         .route("/wallet/recover", post(wallet_recover))
+        .route("/wallet/reset", post(wallet_reset))
+        .route("/funding/api/reset", post(wallet_reset))
         .route("/funding", get(funding_index))
         .route("/funding/", get(funding_index))
         .route("/funding/styles.css", get(funding_styles))
@@ -175,6 +177,13 @@ async fn wallet_status(State(service): State<Arc<AuthService>>) -> Response {
 
 async fn wallet_recover(State(service): State<Arc<AuthService>>) -> Response {
     match service.recover().await {
+        Ok(status) => Json(status).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
+async fn wallet_reset(State(service): State<Arc<AuthService>>) -> Response {
+    match service.reset_wallet().await {
         Ok(status) => Json(status).into_response(),
         Err(err) => generic_error(err),
     }

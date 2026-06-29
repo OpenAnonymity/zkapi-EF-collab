@@ -432,6 +432,37 @@ impl AuthService {
         }
     }
 
+    /// Clear the active note after its on-chain settlement (mutual close or
+    /// finalized escape), archiving the closed state so a fresh deposit can
+    /// start. Only call once the note is closed on chain — otherwise this drops
+    /// the local secret while funds are still escrowed.
+    pub async fn reset_wallet(&self) -> Result<WalletStatus, AuthError> {
+        let config = self.config.clone();
+        let wallet_mutex = self.wallet_mutex.clone();
+        spawn_blocking(move || {
+            let _guard = wallet_mutex
+                .lock()
+                .map_err(|err| AuthError::Wallet(err.to_string()))?;
+            let _lockfile = acquire_wallet_lock(&config.state_dir)?;
+            let state_path = config.state_dir.join("note_state.json");
+            let journal_path = config.state_dir.join("pending_journal.json");
+            if state_path.exists() {
+                // Best-effort archive (moves to archive/note_<id>_closed.json),
+                // then ensure the active state file is gone.
+                if let Ok(wallet) = load_wallet(&config, Vec::new()) {
+                    if let Some(state) = wallet.state() {
+                        let _ = state.archive(&state_path);
+                    }
+                }
+                let _ = std::fs::remove_file(&state_path);
+            }
+            let _ = std::fs::remove_file(&journal_path);
+            let wallet = load_wallet(&config, Vec::new())?;
+            Ok(wallet_status(&wallet))
+        })
+        .await
+    }
+
     pub fn funding_config(&self) -> FundingConfig {
         FundingConfig {
             contract_address: self.config.contract_address,
