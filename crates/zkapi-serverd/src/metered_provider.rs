@@ -128,6 +128,14 @@ impl MeteredProvider {
                 map.insert("usage".to_string(), json!({ "include": true }));
             }
         }
+        // For OpenAI, persist the completion on the platform (`store: true`) so
+        // it's retrievable for evals/distillation in the OpenAI dashboard. Only
+        // default it — honour an explicit client value.
+        if self.config.upstream_kind == UpstreamKind::OpenAi {
+            if let Value::Object(map) = &mut body {
+                map.entry("store").or_insert(Value::Bool(true));
+            }
+        }
         let request_model = body
             .get("model")
             .and_then(|m| m.as_str())
