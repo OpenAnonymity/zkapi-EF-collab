@@ -50,9 +50,10 @@ pub enum AuthError {
 }
 
 /// Which authentication method a daemon runs with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthSchemeKind {
     /// Reference: state-anchor chain (Pedersen + nullifier + XMSS).
+    #[default]
     StateAnchor,
     /// Alternate: blind Schnorr credentials.
     BlindSignature,
@@ -64,12 +65,6 @@ impl AuthSchemeKind {
             Self::StateAnchor => "state-anchor",
             Self::BlindSignature => "blind-signature",
         }
-    }
-}
-
-impl Default for AuthSchemeKind {
-    fn default() -> Self {
-        Self::StateAnchor
     }
 }
 

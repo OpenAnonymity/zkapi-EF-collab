@@ -50,8 +50,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # dev-witness-envelope swaps the real Stwo/Scarb prover for a dev
+      # envelope, so the unit tests don't shell out to `scarb prove` (absent
+      # in this job). Mirrors the integration job's --all-features.
       - name: Test protocol Rust workspace
-        run: cargo test --manifest-path protocol/rust/Cargo.toml --workspace
+        run: cargo test --manifest-path protocol/rust/Cargo.toml --workspace --features dev-witness-envelope
 
       - name: Clippy protocol Rust workspace
         run: cargo clippy --manifest-path protocol/rust/Cargo.toml --workspace -- -D warnings
