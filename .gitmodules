@@ -1,4 +1,4 @@
 [submodule "protocol"]
 	path = protocol
 	url = https://github.com/mingyech/zkAPI.git
-	branch = fix/crypto-blinding-xmss-height
+	branch = ef-collab-demo
