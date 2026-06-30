@@ -491,7 +491,9 @@ impl RequestProcessor {
                 solvency_bound_usd: pricing::credits_to_usd(pi.solvency_bound),
                 statement_type: pi.statement_type,
                 state_sig_epoch_in: pi.state_sig_epoch,
-                proof_backend: "stwo_cairo".to_string(),
+                // Honest: this build re-checks the dev witness envelope; it does
+                // NOT verify a STARK (the StwoScarb path exists but isn't wired in).
+                proof_backend: "dev_witness_envelope".to_string(),
                 proof_public_output_hash: api_request.proof.public_output_hash,
                 proof_size_bytes: proof_bytes.len(),
                 request_path,

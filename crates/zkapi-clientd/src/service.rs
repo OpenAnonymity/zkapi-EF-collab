@@ -492,7 +492,7 @@ impl AuthService {
             funding,
             indexer,
             server,
-            runtime_proof_backend: "mock_envelope".to_string(),
+            runtime_proof_backend: "dev_witness_envelope".to_string(),
         })
     }
 
@@ -835,7 +835,7 @@ async fn build_request_preview(
         wallet_note,
         state_sig_epoch: state.state_sig_epoch.unwrap_or(0),
         state_sig_root: state.state_sig_root.unwrap_or(Felt252::ZERO),
-        runtime_proof_backend: "mock_envelope".to_string(),
+        runtime_proof_backend: "dev_witness_envelope".to_string(),
     })
 }
 
@@ -1136,7 +1136,7 @@ mod tests {
         assert_eq!(preview.merkle_siblings.len(), zkapi_types::MERKLE_DEPTH);
         assert_eq!(preview.state_sig_epoch, 0);
         assert_eq!(preview.state_sig_root, Felt252::ZERO);
-        assert_eq!(preview.runtime_proof_backend, "mock_envelope");
+        assert_eq!(preview.runtime_proof_backend, "dev_witness_envelope");
         assert!(preview.request.path.contains("/v1/chat/completions"));
         assert!(!preview.payload_hash.is_zero());
         assert!(!preview.registration_commitment.is_zero());

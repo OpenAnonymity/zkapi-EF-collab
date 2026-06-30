@@ -328,7 +328,7 @@ mod tests {
             solvency_bound_usd: 1.0,
             statement_type: 1,
             state_sig_epoch_in: 0,
-            proof_backend: "stwo_cairo".to_string(),
+            proof_backend: "dev_witness_envelope".to_string(),
             proof_public_output_hash: Felt252::ZERO,
             proof_size_bytes: 100,
             request_path: "/v1/chat/completions".to_string(),
