@@ -140,6 +140,21 @@ pub struct ServerConfig {
     /// Configuration for the metered upstream provider (when
     /// `provider_kind == Metered`).
     pub metered: Option<MeteredConfig>,
+    /// Proof verifier backend: "stwo_scarb" (production, real STARK) or
+    /// "dev_witness_envelope" (dev-only witness replay; explicit opt-in).
+    pub proof_mode: String,
+    /// Cairo package dir for real Stwo verification (proof_mode=stwo_scarb).
+    pub cairo_dir: String,
+}
+
+impl ServerConfig {
+    /// Wire label for the configured proof backend.
+    pub fn proof_backend_label(&self) -> &'static str {
+        match self.proof_mode.as_str() {
+            "dev_witness_envelope" => "dev_witness_envelope",
+            _ => "stwo_cairo",
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -168,6 +183,8 @@ impl Default for ServerConfig {
             indexer_url: None,
             root_poll_interval_ms: 1_000,
             metered: None,
+            proof_mode: "stwo_scarb".to_string(),
+            cairo_dir: "protocol/cairo".to_string(),
         }
     }
 }

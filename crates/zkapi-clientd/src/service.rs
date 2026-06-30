@@ -492,7 +492,7 @@ impl AuthService {
             funding,
             indexer,
             server,
-            runtime_proof_backend: "dev_witness_envelope".to_string(),
+            runtime_proof_backend: self.config.proof_backend_label().to_string(),
         })
     }
 
@@ -835,7 +835,7 @@ async fn build_request_preview(
         wallet_note,
         state_sig_epoch: state.state_sig_epoch.unwrap_or(0),
         state_sig_root: state.state_sig_root.unwrap_or(Felt252::ZERO),
-        runtime_proof_backend: "dev_witness_envelope".to_string(),
+        runtime_proof_backend: config.proof_backend_label().to_string(),
     })
 }
 
@@ -853,10 +853,26 @@ fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> C
         policy_enabled: config.policy_enabled,
         server_url: config.protocol_server_url.clone(),
         state_dir: config.state_dir.to_string_lossy().to_string(),
-        // The runtime daemon path uses the development witness envelope; real
-        // Stwo-Cairo proving is the production proof mode (see roadmap).
-        proof_mode: ClientProofMode::DevWitnessEnvelope,
+        // Production default is real Stwo-Cairo proving; the dev witness envelope
+        // is only selected when explicitly configured (ZKAPI_PROOF_MODE).
+        proof_mode: resolve_client_proof_mode(&config.proof_mode, &config.cairo_dir),
         trusted_epoch_roots,
+    }
+}
+
+/// Map the configured proof-mode name to the protocol's `ClientProofMode`.
+fn resolve_client_proof_mode(name: &str, cairo_dir: &str) -> ClientProofMode {
+    match name {
+        "dev_witness_envelope" => ClientProofMode::DevWitnessEnvelope,
+        "stwo_scarb" => ClientProofMode::StwoScarb {
+            cairo_dir: cairo_dir.to_string(),
+        },
+        other => {
+            tracing::warn!("unknown proof_mode '{other}', defaulting to stwo_scarb");
+            ClientProofMode::StwoScarb {
+                cairo_dir: cairo_dir.to_string(),
+            }
+        }
     }
 }
 
@@ -1136,7 +1152,8 @@ mod tests {
         assert_eq!(preview.merkle_siblings.len(), zkapi_types::MERKLE_DEPTH);
         assert_eq!(preview.state_sig_epoch, 0);
         assert_eq!(preview.state_sig_root, Felt252::ZERO);
-        assert_eq!(preview.runtime_proof_backend, "dev_witness_envelope");
+        // Default proof mode is production stwo_scarb -> label "stwo_cairo".
+        assert_eq!(preview.runtime_proof_backend, "stwo_cairo");
         assert!(preview.request.path.contains("/v1/chat/completions"));
         assert!(!preview.payload_hash.is_zero());
         assert!(!preview.registration_commitment.is_zero());

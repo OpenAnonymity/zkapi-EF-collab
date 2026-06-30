@@ -47,6 +47,13 @@ struct Args {
     demo_private_key: Option<String>,
     #[arg(long)]
     demo_note_ttl_seconds: Option<u64>,
+    /// Proof backend: "stwo_scarb" (production) or "dev_witness_envelope" (dev-only).
+    /// Falls back to env ZKAPI_PROOF_MODE, then "stwo_scarb".
+    #[arg(long)]
+    proof_mode: Option<String>,
+    /// Cairo package dir for real Stwo proving. Falls back to env ZKAPI_CAIRO_DIR.
+    #[arg(long)]
+    cairo_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -79,6 +86,14 @@ async fn main() -> anyhow::Result<()> {
         demo_billing_token_address: args.demo_billing_token_address,
         demo_private_key: args.demo_private_key,
         demo_note_ttl_seconds: args.demo_note_ttl_seconds,
+        proof_mode: args
+            .proof_mode
+            .or_else(|| std::env::var("ZKAPI_PROOF_MODE").ok())
+            .unwrap_or_else(|| "stwo_scarb".to_string()),
+        cairo_dir: args
+            .cairo_dir
+            .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
+            .unwrap_or_else(|| "protocol/cairo".to_string()),
     })?;
 
     run(service, &args.listen).await

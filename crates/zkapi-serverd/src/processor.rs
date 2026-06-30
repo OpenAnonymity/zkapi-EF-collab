@@ -24,7 +24,7 @@ use base64::Engine;
 use zkapi_core::commitment::{compute_blind_delta, compute_next_anchor, compute_state_message};
 use zkapi_core::poseidon::{felt_to_field, field_to_felt};
 use zkapi_crypto::pedersen::PedersenCommitment;
-use zkapi_proof::verify_request_proof;
+use zkapi_proof::{verify_request_proof, ProofArtifact, ScarbStwoProver};
 use zkapi_types::wire::{
     ApiRequest, ClearanceRequest, ClearanceResponse, CurvePointWire, ProofBackendWire,
     RecoveryResponse, RequestResponse,
@@ -215,12 +215,11 @@ impl RequestProcessor {
 
         // Step 9: Verify the opaque proof artifact against the stated public inputs.
         //
-        // The wire now carries a structured `ProofArtifactWire` (backend tag,
-        // canonical public-output hash, base64 proof blob) rather than an
-        // inlined witness envelope. We bind the artifact to the public inputs
-        // by checking the public-output hash, then replay the dev witness
-        // envelope (this daemon is the local/demo verifier; real Stwo-Cairo
-        // verification is the production path documented in the roadmap).
+        // The wire carries a structured `ProofArtifactWire` (backend tag,
+        // canonical public-output hash, base64 proof blob). We bind the artifact
+        // to the public inputs by checking the public-output hash, then verify
+        // per the configured proof mode: production verifies a real Stwo-Cairo
+        // STARK; the dev witness-envelope replay is an explicit opt-in.
         let artifact = &api_request.proof;
         if artifact.backend != ProofBackendWire::StwoCairo {
             return Err(ServerError::InvalidProof(
@@ -235,8 +234,20 @@ impl RequestProcessor {
         let proof_bytes = base64::engine::general_purpose::STANDARD
             .decode(artifact.proof.as_bytes())
             .map_err(|e| ServerError::InvalidProof(format!("invalid base64 proof: {}", e)))?;
-        verify_request_proof(&proof_bytes, pi)
-            .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
+        match self.config.proof_mode.as_str() {
+            "dev_witness_envelope" => {
+                verify_request_proof(&proof_bytes, pi)
+                    .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
+            }
+            // Production: verify a real Stwo-Cairo STARK artifact via Scarb.
+            _ => {
+                let proof_artifact =
+                    ProofArtifact::stwo_cairo(artifact.public_output_hash, proof_bytes.clone());
+                ScarbStwoProver::new(&self.config.cairo_dir)
+                    .verify_artifact(&proof_artifact)
+                    .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
+            }
+        }
 
         // Step 10: Reserve nullifier in store
         match self.store.lookup_by_nullifier(&pi.request_nullifier) {
@@ -491,9 +502,7 @@ impl RequestProcessor {
                 solvency_bound_usd: pricing::credits_to_usd(pi.solvency_bound),
                 statement_type: pi.statement_type,
                 state_sig_epoch_in: pi.state_sig_epoch,
-                // Honest: this build re-checks the dev witness envelope; it does
-                // NOT verify a STARK (the StwoScarb path exists but isn't wired in).
-                proof_backend: "dev_witness_envelope".to_string(),
+                proof_backend: self.config.proof_backend_label().to_string(),
                 proof_public_output_hash: api_request.proof.public_output_hash,
                 proof_size_bytes: proof_bytes.len(),
                 request_path,

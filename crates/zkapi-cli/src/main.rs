@@ -109,6 +109,13 @@ enum Commands {
         indexer_url: Option<String>,
         #[arg(long, default_value_t = 1_000)]
         root_poll_interval_ms: u64,
+        /// Proof verifier: "stwo_scarb" (production) or "dev_witness_envelope"
+        /// (dev-only). Falls back to env ZKAPI_PROOF_MODE, then "stwo_scarb".
+        #[arg(long)]
+        proof_mode: Option<String>,
+        /// Cairo package dir for real Stwo verification. Env ZKAPI_CAIRO_DIR.
+        #[arg(long)]
+        cairo_dir: Option<String>,
     },
     Indexer {
         #[arg(long, default_value = "127.0.0.1:3001")]
@@ -217,7 +224,15 @@ async fn main() -> anyhow::Result<()> {
             initial_root,
             indexer_url,
             root_poll_interval_ms,
+            proof_mode,
+            cairo_dir,
         } => {
+            let proof_mode = proof_mode
+                .or_else(|| std::env::var("ZKAPI_PROOF_MODE").ok())
+                .unwrap_or_else(|| "stwo_scarb".to_string());
+            let cairo_dir = cairo_dir
+                .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
+                .unwrap_or_else(|| "protocol/cairo".to_string());
             let metered = if matches!(provider, ProviderArg::Metered) {
                 Some(MeteredConfig {
                     openai_api_base,
@@ -258,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
                 indexer_url,
                 root_poll_interval_ms,
                 metered,
+                proof_mode,
+                cairo_dir,
                 ..Default::default()
             };
             zkapi_serverd::routes::run_server(config).await?;
@@ -364,6 +381,8 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
         demo_billing_token_address: cli.demo_billing_token_address.clone(),
         demo_private_key: cli.demo_private_key.clone(),
         demo_note_ttl_seconds: cli.demo_note_ttl_seconds,
+        proof_mode: std::env::var("ZKAPI_PROOF_MODE").unwrap_or_else(|_| "stwo_scarb".to_string()),
+        cairo_dir: std::env::var("ZKAPI_CAIRO_DIR").unwrap_or_else(|_| "protocol/cairo".to_string()),
     })
     .map_err(Into::into)
 }
