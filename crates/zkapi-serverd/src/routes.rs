@@ -233,7 +233,6 @@ struct ServerIdentity {
     provider: &'static str,
     upstream_kind: Option<String>,
     upstream_api_base: Option<String>,
-    ephemeral_enabled: bool,
     auth_scheme: &'static str,
     policy_enabled: bool,
     request_charge_cap: u128,
@@ -258,22 +257,18 @@ struct DashboardSummary {
 /// GET /v1/dashboard/summary -- server identity + running totals.
 async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<DashboardSummary> {
     let config = processor.config();
-    let (upstream_kind, upstream_api_base, ephemeral_enabled) = match &config.metered {
+    let (upstream_kind, upstream_api_base) = match &config.metered {
         Some(m) => {
             let mut bases = Vec::new();
             if m.openai_api_key.is_some() {
                 bases.push(format!("openai={}", m.openai_api_base));
             }
-            if m.openrouter_key.is_some() {
+            if m.openrouter_inference_key.is_some() {
                 bases.push(format!("openrouter={}", m.openrouter_api_base));
             }
-            (
-                Some(m.upstreams_label()),
-                Some(bases.join(", ")),
-                m.openrouter_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
-            )
+            (Some(m.upstreams_label()), Some(bases.join(", ")))
         }
-        None => (None, None, false),
+        None => (None, None),
     };
     let server = ServerIdentity {
         protocol_version: config.protocol_version,
@@ -283,7 +278,6 @@ async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<Das
         provider: provider_name(config.provider_kind),
         upstream_kind,
         upstream_api_base,
-        ephemeral_enabled,
         auth_scheme: config.auth_scheme.as_str(),
         policy_enabled: config.policy_enabled,
         request_charge_cap: config.request_charge_cap,
@@ -497,6 +491,39 @@ mod tests {
         assert_eq!(response["chain_id"], 55);
         assert_eq!(response["provider"], "echo");
         assert_eq!(response["current_root"], Felt252::from_u64(99).to_hex());
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_remains_available_without_ephemeral_mode() {
+        let app = create_router(test_processor());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let summary = reqwest::get(format!("http://{}/v1/dashboard/summary", addr))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        assert_eq!(summary["server"]["provider"], "echo");
+        assert_eq!(summary["totals"]["request_count"], 0);
+        assert!(summary["server"].get("ephemeral_enabled").is_none());
+
+        let recent = reqwest::get(format!("http://{}/v1/dashboard/recent", addr))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(recent, serde_json::json!([]));
     }
 
     #[tokio::test]

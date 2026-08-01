@@ -76,23 +76,12 @@ enum Commands {
         /// Metered provider: OpenAI base URL.
         #[arg(long, default_value = "https://api.openai.com")]
         openai_api_base: String,
-        /// Metered provider: OpenRouter management/provisioning key (mints
-        /// ephemeral keys + a pass-through inference key for vendor/model ids).
-        #[arg(long)]
-        openrouter_key: Option<String>,
-        /// Metered provider: optional dedicated OpenRouter runtime key for
-        /// pass-through (else one is minted from --openrouter-key).
+        /// Metered provider: OpenRouter API key for server-side pass-through.
         #[arg(long)]
         openrouter_inference_key: Option<String>,
         /// Metered provider: OpenRouter base URL.
         #[arg(long, default_value = "https://openrouter.ai/api")]
         openrouter_api_base: String,
-        /// Metered provider: default ephemeral-key credit limit (USD).
-        #[arg(long, default_value_t = 1.0)]
-        ephemeral_limit_usd: f64,
-        /// Metered provider: ephemeral-key lifetime in seconds (default 60).
-        #[arg(long, default_value_t = 60)]
-        ephemeral_ttl_seconds: u64,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
         #[arg(long, default_value = "0x1")]
@@ -211,11 +200,8 @@ async fn main() -> anyhow::Result<()> {
             proxy_timeout_ms,
             openai_api_key,
             openai_api_base,
-            openrouter_key,
             openrouter_inference_key,
             openrouter_api_base,
-            ephemeral_limit_usd,
-            ephemeral_ttl_seconds,
             db_path,
             state_seed,
             clear_seed,
@@ -238,10 +224,7 @@ async fn main() -> anyhow::Result<()> {
                     openai_api_base,
                     openai_api_key: openai_api_key.filter(|k| !k.is_empty()),
                     openrouter_api_base,
-                    openrouter_key: openrouter_key.filter(|k| !k.is_empty()),
                     openrouter_inference_key: openrouter_inference_key.filter(|k| !k.is_empty()),
-                    ephemeral_default_limit_usd: ephemeral_limit_usd,
-                    ephemeral_ttl_seconds,
                 })
             } else {
                 None
@@ -382,7 +365,8 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
         demo_private_key: cli.demo_private_key.clone(),
         demo_note_ttl_seconds: cli.demo_note_ttl_seconds,
         proof_mode: std::env::var("ZKAPI_PROOF_MODE").unwrap_or_else(|_| "stwo_scarb".to_string()),
-        cairo_dir: std::env::var("ZKAPI_CAIRO_DIR").unwrap_or_else(|_| "protocol/cairo".to_string()),
+        cairo_dir: std::env::var("ZKAPI_CAIRO_DIR")
+            .unwrap_or_else(|_| "protocol/cairo".to_string()),
     })
     .map_err(Into::into)
 }
@@ -540,6 +524,23 @@ mod tests {
                 assert_eq!(cursor_path.as_deref(), Some("indexer.cursor"));
             }
             other => panic!("expected indexer command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_removed_openrouter_provisioning_options() {
+        for option in ["--openrouter-key", "--ephemeral-limit-usd"] {
+            let result = Cli::try_parse_from([
+                "zkapi",
+                "--contract-address",
+                "0xdeadbeef",
+                "serverd",
+                "--provider",
+                "metered",
+                option,
+                "test-value",
+            ]);
+            assert!(result.is_err(), "removed option {option} was accepted");
         }
     }
 

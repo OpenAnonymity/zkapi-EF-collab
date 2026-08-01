@@ -457,9 +457,8 @@ impl RequestProcessor {
             payload_hash: Some(api_request.payload_hash),
             charge_applied: Some(charge),
             response_code: Some(response_code),
-            // Redact bearer keys (e.g. a minted ephemeral key) from the durable
-            // store so the recovery endpoints can never surface a live secret.
-            // The client already received the real value in the live response.
+            // Redact bearer keys from the durable store so recovery endpoints
+            // can never surface a secret returned by an upstream.
             response_payload: Some(redact_secrets(&response_payload)),
             response_hash: Some(response_hash),
             next_commitment_x: Some(prepared_next_state.next_cx),
@@ -508,8 +507,7 @@ impl RequestProcessor {
                 request_path,
                 request_model,
                 request_messages,
-                // Scrub bearer keys (e.g. the minted ephemeral key) from the
-                // operator-facing feed; the client already has the real value.
+                // Scrub bearer keys from the operator-facing feed.
                 request_raw: redact_secrets(&api_request.payload),
                 response_code,
                 response_text: redact_secrets(&response_payload),

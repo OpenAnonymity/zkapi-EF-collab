@@ -1,8 +1,8 @@
 //! Token-usage → cost → zkAPI credit conversion.
 //!
 //! The zkAPI protocol charges an opaque `u128` amount per request (the
-//! `charge_applied` field). For the OpenAnonymity integration we define that
-//! unit concretely so token-usage billing is meaningful end to end:
+//! `charge_applied` field). The metered provider defines that unit concretely
+//! so token-usage billing is meaningful end to end:
 //!
 //! ```text
 //! 1 credit = 1 micro-US-dollar = $0.000001
@@ -27,8 +27,7 @@ pub const CREDITS_PER_USD: f64 = 1_000_000.0;
 /// Convert a US-dollar cost into integer zkAPI credits.
 ///
 /// Rounds up so the operator is never under-paid, with a 1-credit floor for
-/// any strictly-positive cost. A cost of exactly zero (e.g. a free key
-/// issuance) maps to zero credits.
+/// any strictly-positive cost. A cost of exactly zero maps to zero credits.
 pub fn usd_to_credits(cost_usd: f64) -> u128 {
     if !cost_usd.is_finite() || cost_usd <= 0.0 {
         return 0;

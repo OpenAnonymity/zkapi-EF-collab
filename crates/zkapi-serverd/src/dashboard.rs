@@ -125,12 +125,14 @@ impl DashboardHub {
         {
             let mut totals = self.totals.lock().unwrap();
             totals.request_count += 1;
-            totals.total_credits_charged =
-                totals.total_credits_charged.saturating_add(event.charge_applied);
+            totals.total_credits_charged = totals
+                .total_credits_charged
+                .saturating_add(event.charge_applied);
             totals.total_cost_usd += event.charge_usd;
             if let Some(usage) = &event.usage {
-                totals.total_prompt_tokens =
-                    totals.total_prompt_tokens.saturating_add(usage.prompt_tokens);
+                totals.total_prompt_tokens = totals
+                    .total_prompt_tokens
+                    .saturating_add(usage.prompt_tokens);
                 totals.total_completion_tokens = totals
                     .total_completion_tokens
                     .saturating_add(usage.completion_tokens);
@@ -226,11 +228,8 @@ pub fn charge_usd(credits: u128) -> f64 {
     pricing::credits_to_usd(credits)
 }
 
-/// Mask bearer-style API keys (`sk-...`, e.g. the ephemeral OpenRouter key the
-/// server mints in Mode 2) before they reach the dashboard feed. The client
-/// still receives the real key in the request response; this only scrubs the
-/// operator-facing observability copy so a secret bearer token never lands in a
-/// dashboard, screen-share, or log.
+/// Mask bearer-style API keys (`sk-...`) before they reach the dashboard feed
+/// so a secret bearer token never lands in a dashboard, screen-share, or log.
 pub fn redact_secrets(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
@@ -276,12 +275,12 @@ mod tests {
     }
 
     #[test]
-    fn redact_masks_ephemeral_keys() {
-        let s = r#"{"ephemeral_key":"sk-or-v1-3527c84aabcdef0123456789","key_hash":"49802767d5a1"}"#;
+    fn redact_masks_bearer_keys() {
+        let s = r#"{"api_key":"sk-or-v1-3527c84aabcdef0123456789","request_id":"49802767d5a1"}"#;
         let red = redact_secrets(s);
         assert!(!red.contains("sk-or-v1-3527"), "key not redacted: {red}");
         assert!(red.contains("sk-***REDACTED***"));
-        assert!(red.contains("49802767d5a1"), "hash should survive");
+        assert!(red.contains("49802767d5a1"), "request id should survive");
         // Short non-key strings are untouched.
         assert_eq!(redact_secrets("sk-1"), "sk-1");
         // Unicode content is preserved around a redaction.
@@ -306,8 +305,8 @@ mod tests {
         }
         let totals = hub.totals();
         assert_eq!(totals.request_count, 3);
-        assert_eq!(totals.total_credits_charged, 6); // 1+2+3
-        // Ring buffer capped at 2.
+        assert_eq!(totals.total_credits_charged, 6); // 1 + 2 + 3
+                                                     // Ring buffer capped at 2.
         assert_eq!(hub.recent().len(), 2);
     }
 

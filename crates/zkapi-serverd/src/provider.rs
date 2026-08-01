@@ -33,7 +33,7 @@ pub struct UsageInfo {
     /// Upstream cost in US dollars.
     pub cost_usd: f64,
     /// Where the cost came from: e.g. `openrouter_reported`, `openai_table`,
-    /// `openai_table_fallback`, `ephemeral_settle_reported`.
+    /// or `openai_table_fallback`.
     pub cost_source: String,
 }
 
@@ -52,8 +52,7 @@ pub struct ProviderResponse {
     /// Upstream model id actually billed, if known.
     pub upstream_model: Option<String>,
     /// Human-readable billing path label for the dashboard, e.g.
-    /// `passthrough:openrouter`, `ephemeral:issue`, `ephemeral:settle`,
-    /// `echo`, `proxy`.
+    /// `passthrough:openrouter`, `echo`, or `proxy`.
     pub billing_label: String,
 }
 

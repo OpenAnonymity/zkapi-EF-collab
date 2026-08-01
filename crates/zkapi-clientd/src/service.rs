@@ -106,10 +106,8 @@ pub struct FundingConfig {
 /// USD next to credit amounts when the server doesn't report its own scale.
 pub const CREDITS_PER_USD: f64 = 1_000_000.0;
 
-/// Integration configuration surfaced to the oa-chat client: the credit scale,
-/// per-request cap, funding parameters, and which billing modes the server
-/// supports (pass-through is always available; ephemeral needs an OpenRouter
-/// provisioning key on the server).
+/// Integration configuration surfaced to browser clients: the credit scale,
+/// per-request cap, funding parameters, and upstream metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ZkapiConfig {
     pub credits_per_usd: f64,
@@ -118,7 +116,6 @@ pub struct ZkapiConfig {
     pub policy_charge_cap: u128,
     pub policy_enabled: bool,
     pub funding: FundingConfig,
-    pub ephemeral_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_kind: Option<String>,
 }
@@ -401,7 +398,7 @@ impl AuthService {
     }
 
     /// Build the integration config for the client UI, probing the server's
-    /// dashboard summary for billing-mode availability + credit scale.
+    /// dashboard summary for upstream metadata and credit scale.
     pub async fn zkapi_config(&self) -> ZkapiConfig {
         let summary_url = format!(
             "{}/v1/dashboard/summary",
@@ -409,9 +406,6 @@ impl AuthService {
         );
         let summary = fetch_json::<Value>(&summary_url).await.ok();
         let server = summary.as_ref().map(|s| &s["server"]);
-        let ephemeral_available = server
-            .and_then(|s| s["ephemeral_enabled"].as_bool())
-            .unwrap_or(false);
         let upstream_kind = server
             .and_then(|s| s["upstream_kind"].as_str())
             .map(|s| s.to_string());
@@ -427,7 +421,6 @@ impl AuthService {
             policy_charge_cap: self.config.policy_charge_cap,
             policy_enabled: self.config.policy_enabled,
             funding: self.funding_config(),
-            ephemeral_available,
             upstream_kind,
         }
     }
