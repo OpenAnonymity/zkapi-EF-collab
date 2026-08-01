@@ -23,7 +23,7 @@ use zkapi_types::Felt252;
 use crate::config::MeteredConfig;
 use crate::error::ServerError;
 use crate::pricing;
-use crate::provider::{compute_response_hash, ApiProvider, ProviderResponse, UsageInfo};
+use crate::provider::{ApiProvider, ProviderResponse, UsageInfo};
 
 /// Which upstream a pass-through request routes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +208,6 @@ impl MeteredProvider {
         };
         Ok(ProviderResponse {
             status_code,
-            response_hash: compute_response_hash(text.as_bytes()),
             payload: text,
             charge_applied: credits,
             policy_reason_code: None,

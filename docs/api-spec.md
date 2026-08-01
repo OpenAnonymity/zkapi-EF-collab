@@ -169,7 +169,11 @@ Request body: `ApiRequest` (see `zkapi-types::wire`):
   "payload": "<opaque string>",
   "payload_hash": "0x<felt>",
   "public_inputs": { /* RequestPublicInputs */ },
-  "proof_envelope": "<base64>"
+  "proof": {
+    "backend": "stwo_cairo",
+    "public_output_hash": "0x<felt>",
+    "proof": "<base64 opaque proof bytes>"
+  }
 }
 ```
 
@@ -340,12 +344,15 @@ pub trait ApiProvider: Send + Sync {
 pub struct ProviderResponse {
     pub status_code: u16,
     pub payload: String,
-    pub response_hash: Felt252,
     pub charge_applied: u128,
     pub policy_reason_code: Option<u32>,
     pub policy_evidence_hash: Option<Felt252>,
 }
 ```
+
+`zkapi-serverd` computes `response_hash` canonically from the exact returned
+`payload`; providers cannot supply or override that binding. It likewise
+recomputes `ApiRequest.payload_hash` before proof verification.
 
 Existing implementations: `EchoProvider` (test), `HttpProxyProvider` (forwards
 to any URL — used for Ollama, OpenAI, or any HTTP backend).

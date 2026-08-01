@@ -121,7 +121,6 @@ async fn wallet_recover_restores_state_from_server_transcript() {
         fixture.active_root,
         fixture.merkle_siblings,
         "{\"op\":\"recover\"}",
-        Felt252::from_u64(88),
         "recoverable-request",
         FieldElement::from(5u64),
     );

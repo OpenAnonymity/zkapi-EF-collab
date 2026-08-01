@@ -9,12 +9,17 @@
 - Multi-request correctness: Pedersen blinding is now accumulated modulo the curve order (it was wrapping at the base-field prime, which broke state-signature verification on the 2nd+ request), and XMSS validation honors the configured tree height instead of a hard-coded maximum.
 - Swappable authentication method (`zkapi-auth::CredentialScheme`): the state-anchor chain as the reference implementation plus a blind Schnorr signature backend, selectable with `--auth-scheme` and negotiated over `/v1/attestation`. See [`auth-schemes.md`](./auth-schemes.md).
 - CI coverage for outer crates, protocol Rust crates, integration tests, Foundry, and Scarb.
+- Real Stwo-Cairo request and withdrawal artifacts in the default runtime, with
+  private witness replay isolated behind an explicit development feature.
 
 ## Remaining Gaps
 
-### Runtime Prover Bridge
+### Direct Prover Integration
 
-The live Rust request and withdrawal flows still serialize mock proof envelopes while the Cairo circuits remain the authoritative proving implementation. The next production milestone is replacing the mock envelope path with a prover bridge that emits real Cairo proofs for the same public inputs already exercised by the Rust and Cairo test suites. The `ClientProofMode::StwoScarb` / `ServerProofMode::StwoScarb` config variants already select the real prover; what remains is hardening the Scarb/Stwo runner and shipping it as the default in production deployments.
+The production runtime currently orchestrates real Stwo proofs through the
+Scarb CLI. A future optimization can embed `stwo-vm-runner` and
+`stwo-cairo-prover` directly to reduce process startup overhead and simplify
+deployment packaging without changing the proof-artifact wire format.
 
 ### On-chain Operator Slashing
 

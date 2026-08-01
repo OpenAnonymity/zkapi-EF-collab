@@ -55,13 +55,32 @@ cast send "$VAULT_ADDRESS" \
   --private-key "$PRIVATE_KEY"
 ```
 
-6. Start the auth daemon:
+6. After verifying that the transaction succeeded and the values registered by
+   the vault match the server's published roots, write the trusted registry:
 
-```bash
-cargo run -p zkapi-cli -- auth --listen 127.0.0.1:11434
+```json
+[
+  {
+    "epoch": 1,
+    "state_root": "0x<verified-state-root>",
+    "clear_root": "0x<verified-clear-root>"
+  }
+]
 ```
 
-7. Run the scripted local demo if you want the entire flow in one shot:
+The attestation endpoint is a source of candidate values, not a trust anchor.
+Only put roots in this file after verifying them against the configured vault
+on chain.
+
+7. Start the auth daemon with that registry:
+
+```bash
+cargo run -p zkapi-cli -- \
+  --trusted-epoch-roots ./trusted-epoch-roots.json \
+  auth --listen 127.0.0.1:11434
+```
+
+8. Run the scripted local demo if you want the entire flow in one shot:
 
 ```bash
 ./scripts/e2e-demo.sh
@@ -100,8 +119,10 @@ deploys the `ZkApiVault`, and publishes a config bundle clients consume.
    --initial-root <root> --indexer-url ...` and `zkapi-indexerd --rpc-url ...
    --contract-address <vault>`.
 5. **Publish the config bundle.** Clients need: `chain_id`, `contract_address`,
-   `protocol_version`, the charge caps, the indexer URL, and the server's
-   `/v1/attestation` (which reports the signing roots and `auth_scheme`).
+   `protocol_version`, the charge caps, the indexer URL, `auth_scheme`, and an
+   epoch-root registry independently verified against the vault. Pass the
+   registry to clientd with `--trusted-epoch-roots`. Pass it to serverd as well
+   when prior epochs should remain valid after a signing-root rotation.
 
 ## Public Testnet (public testnet)
 
@@ -140,10 +161,16 @@ documented here rather than run in CI.
 ## Security Notes
 
 - The auth daemon serializes wallet access with both an in-process mutex and a filesystem lock file.
-- The server and client both use the canonical payload hash helper from `zkapi-core`.
+- The server and client both use the canonical payload hash helper from `zkapi-types`.
+- Signing roots fetched from the server are not trusted automatically. Configure
+  only roots verified against the intended on-chain vault.
 - `zkapi-serverd` now persists `response_payload` so recovery returns the real upstream response body.
 - The indexer is untrusted. Bad paths cause proof/transaction failure rather than silent state corruption.
 
-## Mock-Proof Caveat
+## Proof Backends
 
-The Rust request/withdrawal runtime still uses mock envelopes. For deployments that require cryptographically binding proofs in the live request path, a Cairo prover bridge must replace that mock layer.
+Production builds default to `stwo_scarb`, which generates and verifies opaque
+Stwo-Cairo artifacts through Scarb. The private-witness replay backend is
+excluded from default builds; compile with `--features dev-witness-envelope`
+and explicitly set `ZKAPI_PROOF_MODE=dev_witness_envelope` only for local
+integration work.

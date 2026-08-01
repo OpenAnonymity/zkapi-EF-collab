@@ -19,7 +19,7 @@ servers:
     description: zkapi-indexerdd (chain mirror, default)
 
 # No authentication is required at the HTTP layer. Credentials are carried
-# inside `ApiRequest.proof_envelope` as a zero-knowledge proof; the HTTP
+# inside `ApiRequest.proof` as an opaque zero-knowledge proof artifact; the HTTP
 # transport itself is unauthenticated and expected to run on localhost (for
 # zkapi-clientd) or inside a protected TEE perimeter (for zkapi-serverdd).
 security: []
@@ -515,11 +515,11 @@ paths:
   /v1/attestation:
     get:
       tags: [health]
-      summary: Attestation metadata (TEE hook)
+      summary: Runtime and signing-root metadata
       description: |
-        Returns binary hash, config hash, XMSS roots, and (when running inside
-        a TEE) a platform-specific attestation report. Null platform fields
-        indicate the server is not running in a TEE.
+        Reports this server's protocol identity, current Merkle root, and XMSS
+        signing roots. Clients must verify signing roots against the configured
+        on-chain vault before adding them to their trusted epoch registry.
       responses:
         "200":
           description: attestation payload
@@ -927,20 +927,31 @@ components:
     # ---- Server shapes ----
     ApiRequest:
       type: object
-      required: [client_request_id, payload, payload_hash, public_inputs, proof_envelope]
+      required: [client_request_id, payload, payload_hash, public_inputs, proof]
       properties:
         client_request_id: { type: string, description: uuid-v4 recommended }
         payload: { type: string, description: opaque payload bytes as string }
         payload_hash: { $ref: "#/components/schemas/Felt252" }
         public_inputs: { $ref: "#/components/schemas/RequestPublicInputs" }
-        proof_envelope:
+        proof: { $ref: "#/components/schemas/ProofArtifactWire" }
+
+    ProofArtifactWire:
+      type: object
+      required: [backend, public_output_hash, proof]
+      properties:
+        backend:
+          type: string
+          enum: [stwo_cairo]
+        public_output_hash: { $ref: "#/components/schemas/Felt252" }
+        proof:
           type: string
           format: byte
-          description: base64-encoded proof envelope
+          description: base64-encoded opaque proof bytes; never a private witness envelope
 
     RequestPublicInputs:
       type: object
       required:
+        - statement_type
         - protocol_version
         - chain_id
         - contract_address
@@ -948,10 +959,12 @@ components:
         - state_sig_epoch
         - state_sig_root
         - request_nullifier
-        - anon_commitment
+        - anon_commitment_x
+        - anon_commitment_y
         - expiry_ts
         - solvency_bound
       properties:
+        statement_type: { type: integer, format: uint8, enum: [1] }
         protocol_version: { type: integer, format: uint16 }
         chain_id: { type: integer, format: uint64 }
         contract_address: { $ref: "#/components/schemas/Felt252" }
@@ -964,13 +977,15 @@ components:
           allOf: [{ $ref: "#/components/schemas/Felt252" }]
           description: 0 for genesis
         request_nullifier: { $ref: "#/components/schemas/Felt252" }
-        anon_commitment: { $ref: "#/components/schemas/CurvePointWire" }
+        anon_commitment_x: { $ref: "#/components/schemas/Felt252" }
+        anon_commitment_y: { $ref: "#/components/schemas/Felt252" }
         expiry_ts: { type: integer, format: uint64 }
         solvency_bound: { type: integer, format: uint128 }
 
     WithdrawalPublicInputs:
       type: object
       required:
+        - statement_type
         - protocol_version
         - chain_id
         - contract_address
@@ -986,6 +1001,7 @@ components:
         - clear_sig_epoch
         - clear_sig_root
       properties:
+        statement_type: { type: integer, format: uint8, enum: [2] }
         protocol_version: { type: integer, format: uint16 }
         chain_id: { type: integer, format: uint64 }
         contract_address: { $ref: "#/components/schemas/Felt252" }
@@ -1104,20 +1120,32 @@ components:
 
     AttestationResponse:
       type: object
-      required: [binary_sha256, protocol_version, chain_id, contract_address, state_sig_epoch, state_sig_root, clear_sig_root]
+      required:
+        - status
+        - protocol_version
+        - chain_id
+        - contract_address
+        - current_root
+        - state_sig_epoch
+        - clear_sig_epoch
+        - state_sig_root
+        - clear_sig_root
+        - state_signatures_remaining
+        - clear_signatures_remaining
+        - auth_scheme
       properties:
-        binary_sha256: { type: string, description: hex sha256 of the running binary }
+        status: { type: string, enum: [ok] }
         protocol_version: { type: integer, format: uint16 }
         chain_id: { type: integer, format: uint64 }
         contract_address: { $ref: "#/components/schemas/Felt252" }
+        current_root: { $ref: "#/components/schemas/Felt252" }
         state_sig_epoch: { type: integer, format: uint32 }
+        clear_sig_epoch: { type: integer, format: uint32 }
         state_sig_root: { $ref: "#/components/schemas/Felt252" }
         clear_sig_root: { $ref: "#/components/schemas/Felt252" }
-        platform:
-          nullable: true
-          description: TEE-platform-specific attestation document (null when not running in a TEE)
-          type: object
-          additionalProperties: true
+        state_signatures_remaining: { type: integer, format: uint32 }
+        clear_signatures_remaining: { type: integer, format: uint32 }
+        auth_scheme: { type: string, enum: [state-anchor, blind-signature] }
 
     # ---- Indexer shapes ----
     TreeRootResponse:

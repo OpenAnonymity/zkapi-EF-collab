@@ -30,7 +30,8 @@ use zkapi_types::wire::{
     ProofArtifactWire, ProofBackendWire, RecoveryResponse, RequestResponse,
 };
 use zkapi_types::{
-    canonical_response_hash, EpochRoots, Felt252, RequestPublicInputs, MERKLE_DEPTH,
+    canonical_payload_hash, canonical_response_hash, EpochRoots, Felt252, RequestPublicInputs,
+    MERKLE_DEPTH,
 };
 
 pub const TEST_PROTOCOL_VERSION: u16 = 1;
@@ -114,6 +115,15 @@ impl MockApiState {
         &self,
         api_request: ApiRequest,
     ) -> Result<RequestResponse, ErrorResponse> {
+        if api_request.payload_hash != canonical_payload_hash(api_request.payload.as_bytes()) {
+            return Err(error_body(
+                &api_request.client_request_id,
+                "INVALID_REQUEST",
+                "payload_hash does not match actual payload bytes".to_string(),
+                None,
+            ));
+        }
+
         if let Some(existing) = self
             .responses_by_client_id
             .lock()
@@ -429,10 +439,10 @@ pub fn build_request_artifacts(
     active_root: Felt252,
     merkle_siblings: [Felt252; MERKLE_DEPTH],
     payload: &str,
-    payload_hash: Felt252,
     client_request_id: &str,
     user_rerandomization: FieldElement,
 ) -> RequestArtifacts {
+    let payload_hash = canonical_payload_hash(payload.as_bytes());
     let current_blinding = parse_blinding(&note_state.balance_blinding);
     let (state_sig_epoch, state_sig_root) = if note_state.is_genesis {
         (0, Felt252::ZERO)

@@ -25,7 +25,7 @@ use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
 use zkapi_core::nullifier::compute_nullifier;
-use zkapi_types::wire::RequestResponse;
+use zkapi_types::wire::{ProofArtifactWire, RequestResponse};
 use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputs};
 
 fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
@@ -267,7 +267,8 @@ pub struct WithdrawalPlan {
     /// The note's Merkle sibling path, so the on-chain submitter (cast or the
     /// browser wallet) can call `mutualClose`/escape without a per-slot lookup.
     pub siblings: Vec<Felt252>,
-    pub proof_base64: String,
+    /// Complete opaque proof artifact, including backend and public-output hash.
+    pub proof: ProofArtifactWire,
 }
 
 #[derive(Debug)]
@@ -279,6 +280,12 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new(config: AuthConfig) -> Result<Arc<Self>, AuthError> {
+        if config.proof_mode == "dev_witness_envelope" && !cfg!(feature = "dev-witness-envelope") {
+            return Err(AuthError::InvalidInput(
+                "proof_mode=dev_witness_envelope requires the dev-witness-envelope build feature"
+                    .to_string(),
+            ));
+        }
         std::fs::create_dir_all(&config.state_dir)
             .map_err(|err| AuthError::Wallet(err.to_string()))?;
         Ok(Arc::new(Self {
@@ -376,7 +383,7 @@ impl AuthService {
     pub async fn recover(&self) -> Result<RecoverResult, AuthError> {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
-        let trusted_roots = self.fetch_trusted_roots().await;
+        let trusted_roots = self.trusted_roots();
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
@@ -515,7 +522,7 @@ impl AuthService {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
-        let trusted_roots = self.fetch_trusted_roots().await;
+        let trusted_roots = self.trusted_roots();
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
@@ -582,7 +589,7 @@ impl AuthService {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
-        let trusted_roots = self.fetch_trusted_roots().await;
+        let trusted_roots = self.trusted_roots();
         spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
@@ -611,9 +618,7 @@ impl AuthService {
                     mode,
                     public_inputs,
                     siblings: plan_siblings,
-                    // `proof.proof` already carries the base64-encoded opaque
-                    // proof blob that the on-chain proof adapter consumes.
-                    proof_base64: proof.proof,
+                    proof,
                 })
             })
         })
@@ -678,21 +683,10 @@ impl AuthService {
         }
     }
 
-    /// Fetch the server's published signing roots so the wallet can validate
-    /// state/clearance signatures against a trusted epoch registry.
-    ///
-    /// On failure we return an empty registry; genesis (registration) requests
-    /// do not need it, and any later verification then fails closed with a
-    /// clear "epoch is not trusted" error rather than trusting a forged root.
-    async fn fetch_trusted_roots(&self) -> Vec<EpochRoots> {
-        let attestation_url = format!(
-            "{}/v1/attestation",
-            self.config.protocol_server_url.trim_end_matches('/')
-        );
-        match fetch_json::<ServerAttestationSnapshot>(&attestation_url).await {
-            Ok(att) => epoch_roots_from_attestation(&att),
-            Err(_) => Vec::new(),
-        }
+    /// Return the explicitly configured, on-chain-verified signing-root
+    /// registry. Server attestation is observability data, not a trust anchor.
+    fn trusted_roots(&self) -> Vec<EpochRoots> {
+        self.config.trusted_epoch_roots.clone()
     }
 
     /// Fail fast if the server runs a different authentication method than this
@@ -856,7 +850,21 @@ fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> C
 /// Map the configured proof-mode name to the protocol's `ClientProofMode`.
 fn resolve_client_proof_mode(name: &str, cairo_dir: &str) -> ClientProofMode {
     match name {
-        "dev_witness_envelope" => ClientProofMode::DevWitnessEnvelope,
+        "dev_witness_envelope" => {
+            #[cfg(feature = "dev-witness-envelope")]
+            {
+                ClientProofMode::DevWitnessEnvelope
+            }
+            #[cfg(not(feature = "dev-witness-envelope"))]
+            {
+                tracing::warn!(
+                    "dev_witness_envelope is unavailable in this build; using stwo_scarb"
+                );
+                ClientProofMode::StwoScarb {
+                    cairo_dir: cairo_dir.to_string(),
+                }
+            }
+        }
         "stwo_scarb" => ClientProofMode::StwoScarb {
             cairo_dir: cairo_dir.to_string(),
         },
@@ -874,28 +882,6 @@ fn load_wallet(
     trusted_epoch_roots: Vec<EpochRoots>,
 ) -> Result<Wallet, AuthError> {
     Wallet::new(client_config(config, trusted_epoch_roots)).map_err(Into::into)
-}
-
-/// Build the trusted server signing roots from a server attestation snapshot.
-///
-/// The client now validates every server-returned state/clearance signature
-/// root against this registry (the server cannot make the client trust an
-/// arbitrary root). A single epoch entry carries both the state and clearance
-/// roots; we add a second entry only if the two epochs diverge.
-fn epoch_roots_from_attestation(att: &ServerAttestationSnapshot) -> Vec<EpochRoots> {
-    let mut roots = vec![EpochRoots {
-        epoch: att.state_sig_epoch,
-        state_root: att.state_sig_root,
-        clear_root: att.clear_sig_root,
-    }];
-    if att.clear_sig_epoch != att.state_sig_epoch {
-        roots.push(EpochRoots {
-            epoch: att.clear_sig_epoch,
-            state_root: att.state_sig_root,
-            clear_root: att.clear_sig_root,
-        });
-    }
-    roots
 }
 
 fn acquire_wallet_lock(state_dir: &Path) -> Result<std::fs::File, AuthError> {
@@ -965,11 +951,17 @@ mod tests {
     use tokio::net::TcpListener;
     use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
     use zkapi_core::merkle::MerkleTree;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_core::poseidon::felt_to_field;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_serverd::nullifier_store::NullifierStore;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_serverd::processor::RequestProcessor;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_serverd::provider::EchoProvider;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_serverd::routes::create_router;
+    #[cfg(feature = "dev-witness-envelope")]
     use zkapi_serverd::signer::ServerSigner;
 
     use super::*;
@@ -1001,6 +993,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(not(feature = "dev-witness-envelope"))]
+    #[test]
+    fn dev_witness_mode_requires_the_build_feature() {
+        let result = AuthService::new(AuthConfig {
+            proof_mode: "dev_witness_envelope".to_string(),
+            state_dir: test_dir("dev_witness_feature_gate"),
+            ..Default::default()
+        });
+
+        assert!(matches!(result, Err(AuthError::InvalidInput(message)) if
+            message.contains("requires the dev-witness-envelope build feature")));
     }
 
     async fn spawn_axum(router: Router) -> String {
@@ -1044,7 +1049,8 @@ mod tests {
             .with_state(IndexerState { tree })
     }
 
-    async fn protocol_server(root: Felt252, dir: &Path) -> String {
+    #[cfg(feature = "dev-witness-envelope")]
+    async fn protocol_server(root: Felt252, dir: &Path) -> (String, EpochRoots) {
         let store = Arc::new(NullifierStore::new(dir.join("server.db")).unwrap());
         let signer = Arc::new(ServerSigner::with_height(
             felt_to_field(&Felt252::from_u64(1)),
@@ -1052,6 +1058,11 @@ mod tests {
             1,
             8,
         ));
+        let trusted_roots = EpochRoots {
+            epoch: 1,
+            state_root: signer.state_root(),
+            clear_root: signer.clear_root(),
+        };
         let processor = Arc::new(RequestProcessor::new(
             zkapi_serverd::config::ServerConfig {
                 contract_address: Felt252::from_u64(0xdeadbeef),
@@ -1060,6 +1071,7 @@ mod tests {
                 request_charge_cap: 100,
                 policy_charge_cap: 100,
                 initial_root: root,
+                proof_mode: "dev_witness_envelope".to_string(),
                 ..Default::default()
             },
             store,
@@ -1067,7 +1079,7 @@ mod tests {
             Arc::new(EchoProvider::default()),
             root,
         ));
-        spawn_axum(create_router(processor)).await
+        (spawn_axum(create_router(processor)).await, trusted_roots)
     }
 
     #[tokio::test]
@@ -1106,7 +1118,9 @@ mod tests {
             policy_enabled: false,
             server_url: "http://127.0.0.1:1".to_string(),
             state_dir: state_dir.to_string_lossy().to_string(),
-            proof_mode: ClientProofMode::DevWitnessEnvelope,
+            proof_mode: ClientProofMode::StwoScarb {
+                cairo_dir: "protocol/cairo".to_string(),
+            },
             trusted_epoch_roots: Vec::new(),
         })
         .unwrap();
@@ -1153,6 +1167,7 @@ mod tests {
         assert!(!preview.request_nullifier.is_zero());
     }
 
+    #[cfg(feature = "dev-witness-envelope")]
     #[tokio::test]
     #[ignore = "full proof generation and request roundtrip is expensive"]
     async fn execute_request_round_trips_through_protocol_server() {
@@ -1181,7 +1196,7 @@ mod tests {
         let leaf = compute_note_leaf(0, &commitment, 100, 4_000_000_000);
         tree.write().unwrap().insert(leaf);
         let root = tree.read().unwrap().root();
-        let protocol_server_url = protocol_server(root, &state_dir).await;
+        let (protocol_server_url, trusted_roots) = protocol_server(root, &state_dir).await;
 
         let service = AuthService::new(AuthConfig {
             protocol_server_url,
@@ -1191,6 +1206,8 @@ mod tests {
             policy_charge_cap: 100,
             contract_address: Felt252::from_u64(0xdeadbeef),
             models: vec![ModelDescriptor::new("demo")],
+            proof_mode: "dev_witness_envelope".to_string(),
+            trusted_epoch_roots: vec![trusted_roots],
             ..Default::default()
         })
         .unwrap();

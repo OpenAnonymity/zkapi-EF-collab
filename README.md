@@ -40,9 +40,10 @@ paths.**
 - [Foundry](https://book.getfoundry.sh/) — `anvil`, `forge`, `cast`
 - `jq` and `curl`
 
-No Cairo/Scarb toolchain is needed for the PoC: it runs the development
-mock-proof runtime against an accept-all on-chain proof adapter, so it exercises
-the full system plumbing rather than STARK soundness (see
+No Cairo/Scarb toolchain is needed for this scripted PoC: the script compiles
+and explicitly selects the `dev-witness-envelope` feature against an
+accept-all on-chain proof adapter, so it exercises the full system plumbing
+rather than STARK soundness (see
 [Proof scope](#proof-scope)).
 
 ### One command
@@ -185,7 +186,7 @@ against whichever owner hosts this superproject (e.g. `OpenAnonymity/zkapi`).
 git submodule update --init --recursive
 cargo build
 cargo test --workspace --exclude zkapi-integration-tests
-cargo test -p zkapi-integration-tests --all-features -- --test-threads=1
+cargo test -p zkapi-integration-tests --features dev-witness-envelope -- --test-threads=1
 cargo test --manifest-path protocol/rust/Cargo.toml --features dev-witness-envelope --workspace
 ```
 
@@ -207,8 +208,9 @@ cargo run -p zkapi-cli -- indexer \
 cargo run -p zkapi-cli -- --contract-address 0xYourVault serverd \
   --provider echo --indexer-url http://127.0.0.1:3001
 
-# 3. Client daemon
-cargo run -p zkapi-cli -- --contract-address 0xYourVault clientd \
+# 3. Client daemon (the roots file must contain values verified on chain)
+cargo run -p zkapi-cli -- --contract-address 0xYourVault \
+  --trusted-epoch-roots ./trusted-epoch-roots.json clientd \
   --listen 127.0.0.1:11434
 
 # Inspect the server
@@ -241,18 +243,24 @@ cargo run -p zkapi-cli -- withdraw --mode mutual --destination 0xYourAddress
 
 ## Proof scope
 
-The current Rust runtime uses development mock-proof envelopes for
-request/withdrawal roundtrips, verified against an accept-all on-chain adapter.
-The Cairo circuits in `protocol/cairo/` are the real proving logic and are
-tested independently with `scarb test`. Wiring the Cairo prover into the live
-Rust path is the next production milestone — see
-[docs/roadmap.md](./docs/roadmap.md).
+Production builds default to real Stwo-Cairo proof artifacts generated and
+verified through Scarb. Private witness replay is not in the default build; it
+is available only through the explicit `dev-witness-envelope` feature used by
+the fast local demo and integration suite. Those development paths still use
+the accept-all on-chain adapter, while the real circuits and fact bindings are
+covered by the protocol Scarb and Foundry suites.
+
+Production proving requires a Scarb distribution that includes the `execute`,
+`prove`, and `verify` companion commands. Confirm them with `scarb commands`;
+if they are absent, install the complete official Scarb release bundle rather
+than a package-manager build that ships only the core binary.
 
 ## Verification matrix
 
 - Outer app crates: `cargo test --workspace --exclude zkapi-integration-tests`
-- Outer integration tests: `cargo test -p zkapi-integration-tests --all-features -- --test-threads=1`
-- Protocol Rust crates: `cargo test --manifest-path protocol/rust/Cargo.toml --features dev-witness-envelope --workspace`
+- Outer integration tests: `cargo test -p zkapi-integration-tests --features dev-witness-envelope -- --test-threads=1`
+- Protocol Rust crates (production): `cargo test --manifest-path protocol/rust/Cargo.toml --workspace`
+- Protocol Rust crates (dev witness): `cargo test --manifest-path protocol/rust/Cargo.toml --features dev-witness-envelope --workspace`
 - Protocol Solidity: `cd protocol/contracts && forge test -vvv`
 - Protocol Cairo: `cd protocol/cairo && scarb test`
 </content>

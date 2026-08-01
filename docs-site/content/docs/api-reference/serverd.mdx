@@ -11,9 +11,14 @@ clearance signatures, and recover transcripts.
 | Field | Value |
 |---|---|
 | Method + path | `POST /v1/requests` |
-| Request | `ApiRequest { client_request_id: uuid, payload: string, payload_hash: Felt252, public_inputs: RequestPublicInputs, proof_envelope: base64 }` |
+| Request | `ApiRequest { client_request_id: uuid, payload: string, payload_hash: Felt252, public_inputs: RequestPublicInputs, proof: { backend: "stwo_cairo", public_output_hash: Felt252, proof: base64 } }` |
 | Response (200) | `RequestResponse { status, client_request_id, request_nullifier, response_code, response_payload, response_hash, charge_applied, next_commitment: {x,y}, next_anchor, blind_delta_srv, next_state_sig: XmssSignature, policy_reason_code?, policy_evidence_hash? }` |
 | Errors | `400 INVALID_PROOF`, `409 STALE_ROOT {latest_root}`, `409 REPLAY`, `410 NOTE_EXPIRED`, `500 CAPACITY_EXHAUSTED` |
+
+Production requests carry opaque Stwo proof bytes plus their canonical public-
+output hash. Private witness envelopes are available only in builds compiled
+with the explicit `dev-witness-envelope` feature. `serverd` recomputes request
+and response payload hashes from the exact bytes at its boundary.
 
 ## Request mutual-close clearance
 

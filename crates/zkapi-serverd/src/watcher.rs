@@ -16,7 +16,8 @@ use crate::nullifier_store::{NullifierStore, TranscriptRecord};
 pub struct ChallengeAction {
     pub note_id: u32,
     pub request_inputs: RequestPublicInputs,
-    pub proof_envelope: Vec<u8>,
+    /// Opaque production proof bytes archived from `ProofArtifactWire`.
+    pub proof_artifact: Vec<u8>,
     pub siblings: [Felt252; MERKLE_DEPTH],
 }
 
@@ -57,14 +58,14 @@ impl ChallengeWatcher {
             return Err("archived request nullifier mismatch".to_string());
         }
 
-        let proof_envelope = record
+        let proof_artifact = record
             .proof_blob
             .ok_or_else(|| "missing archived proof blob".to_string())?;
 
         Ok(ChallengeAction {
             note_id,
             request_inputs,
-            proof_envelope,
+            proof_artifact,
             siblings,
         })
     }
@@ -137,6 +138,6 @@ mod tests {
             .unwrap();
         assert_eq!(action.note_id, 9);
         assert_eq!(action.request_inputs.request_nullifier, nullifier);
-        assert_eq!(action.proof_envelope, vec![1, 2, 3]);
+        assert_eq!(action.proof_artifact, vec![1, 2, 3]);
     }
 }

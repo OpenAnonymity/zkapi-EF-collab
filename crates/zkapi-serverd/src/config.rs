@@ -1,6 +1,6 @@
 //! Server configuration.
 
-use zkapi_types::Felt252;
+use zkapi_types::{EpochRoots, Felt252};
 
 /// Upstream provider implementation to use for request execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +124,8 @@ pub struct ServerConfig {
     pub indexer_url: Option<String>,
     /// Poll interval for indexer root refresh.
     pub root_poll_interval_ms: u64,
+    /// Previously published signing roots accepted for non-current epochs.
+    pub trusted_epoch_roots: Vec<EpochRoots>,
     /// Configuration for the metered upstream provider (when
     /// `provider_kind == Metered`).
     pub metered: Option<MeteredConfig>,
@@ -169,6 +171,7 @@ impl Default for ServerConfig {
             initial_root: Felt252::ZERO,
             indexer_url: None,
             root_poll_interval_ms: 1_000,
+            trusted_epoch_roots: Vec::new(),
             metered: None,
             proof_mode: "stwo_scarb".to_string(),
             cairo_dir: "protocol/cairo".to_string(),

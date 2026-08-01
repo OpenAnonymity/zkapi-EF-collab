@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use zkapi_types::Felt252;
+use zkapi_types::{EpochRoots, Felt252};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelDescriptor {
@@ -46,6 +46,8 @@ pub struct AuthConfig {
     pub proof_mode: String,
     /// Cairo package dir for real Stwo proving (used when proof_mode=stwo_scarb).
     pub cairo_dir: String,
+    /// On-chain-verified server signing roots trusted by this client.
+    pub trusted_epoch_roots: Vec<EpochRoots>,
 }
 
 impl AuthConfig {
@@ -79,6 +81,7 @@ impl Default for AuthConfig {
             demo_note_ttl_seconds: None,
             proof_mode: "stwo_scarb".to_string(),
             cairo_dir: "protocol/cairo".to_string(),
+            trusted_epoch_roots: Vec::new(),
         }
     }
 }

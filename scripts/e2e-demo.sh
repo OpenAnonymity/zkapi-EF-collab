@@ -6,6 +6,7 @@ RUN_DIR="${RUN_DIR:-$ROOT_DIR/.demo}"
 STATE_DIR="${STATE_DIR:-$RUN_DIR/state}"
 LOG_DIR="$RUN_DIR/logs"
 DEPLOYMENT_JSON="$RUN_DIR/deployment.json"
+TRUSTED_ROOTS_JSON="$RUN_DIR/trusted-epoch-roots.json"
 
 RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
 CHAIN_ID="${CHAIN_ID:-31337}"
@@ -146,10 +147,15 @@ rm -f "$RUN_DIR/indexer.cursor" "$RUN_DIR"/zkapi-server.db* "$RUN_DIR/attestatio
   "$RUN_DIR/wallet-status.json" "$RUN_DIR/models.json" "$RUN_DIR/tags.json" \
   "$RUN_DIR/indexer-note-path.json" "$RUN_DIR/server.sample.txt"
 mkdir -p "$STATE_DIR" "$LOG_DIR"
-rm -f "$DEPLOYMENT_JSON"
+rm -f "$DEPLOYMENT_JSON" "$TRUSTED_ROOTS_JSON"
 
-echo "Building workspace binaries..."
-cargo build --workspace --exclude zkapi-integration-tests >/dev/null
+echo "Building demo binaries with the explicit dev proof backend..."
+cargo build \
+  -p zkapi-cli \
+  -p zkapi-clientd \
+  -p zkapi-indexerd \
+  --features zkapi-cli/dev-witness-envelope,zkapi-clientd/dev-witness-envelope \
+  >/dev/null
 
 echo "Starting Anvil..."
 anvil --host "$ANVIL_HOST" --port "$ANVIL_PORT" >"$LOG_DIR/anvil.log" 2>&1 &
@@ -190,7 +196,7 @@ INDEXER_PID=$!
 wait_status_ok "${INDEXER_URL}/health" "indexer"
 
 echo "Starting zkapi-serverd..."
-"$ROOT_DIR/target/debug/zkapi" \
+ZKAPI_PROOF_MODE=dev_witness_envelope "$ROOT_DIR/target/debug/zkapi" \
   --chain-id "$CHAIN_ID" \
   --contract-address "$VAULT_ADDRESS" \
   --request-charge-cap "$REQUEST_CHARGE_CAP" \
@@ -217,9 +223,11 @@ cast send "$VAULT_ADDRESS" \
   "$STATE_SIG_EPOCH" "$STATE_SIG_ROOT" "$CLEAR_SIG_ROOT" \
   --rpc-url "$RPC_URL" \
   --private-key "$PRIVATE_KEY" >"$LOG_DIR/rotate-roots.log" 2>&1
+jq '[{epoch: .state_sig_epoch, state_root: .state_sig_root, clear_root: .clear_sig_root}]' \
+  <<<"$attestation_payload" >"$TRUSTED_ROOTS_JSON"
 
 echo "Starting client daemon..."
-"$ROOT_DIR/target/debug/zkapi-clientd" \
+ZKAPI_PROOF_MODE=dev_witness_envelope "$ROOT_DIR/target/debug/zkapi-clientd" \
   --listen "$AUTH_ADDR" \
   --state-dir "$STATE_DIR" \
   --protocol-server-url "$SERVER_URL" \
@@ -233,6 +241,7 @@ echo "Starting client daemon..."
   --demo-billing-token-address "$TOKEN_ADDRESS" \
   --demo-private-key "$PRIVATE_KEY" \
   --demo-note-ttl-seconds "$NOTE_TTL" \
+  --trusted-epoch-roots "$TRUSTED_ROOTS_JSON" \
   --model "$MODEL_ID" >"$LOG_DIR/auth.log" 2>&1 &
 AUTH_PID=$!
 wait_status_ok "${AUTH_URL}/health" "auth daemon"

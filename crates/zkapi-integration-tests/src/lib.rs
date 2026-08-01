@@ -8,4 +8,5 @@
 //! This crate root re-exports the shared [`fixtures`] used by the tests under
 //! `tests/`: deposit fixtures, the mock server, and request-artifact builders.
 
+#[cfg(feature = "dev-witness-envelope")]
 pub mod fixtures;

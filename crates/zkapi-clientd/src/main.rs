@@ -47,6 +47,9 @@ struct Args {
     demo_private_key: Option<String>,
     #[arg(long)]
     demo_note_ttl_seconds: Option<u64>,
+    /// JSON file containing an array of on-chain-verified epoch root records.
+    #[arg(long, value_name = "JSON_PATH")]
+    trusted_epoch_roots: Option<std::path::PathBuf>,
     /// Proof backend: "stwo_scarb" (production) or "dev_witness_envelope" (dev-only).
     /// Falls back to env ZKAPI_PROOF_MODE, then "stwo_scarb".
     #[arg(long)]
@@ -94,6 +97,21 @@ async fn main() -> anyhow::Result<()> {
             .cairo_dir
             .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
             .unwrap_or_else(|| "protocol/cairo".to_string()),
+        trusted_epoch_roots: match args.trusted_epoch_roots {
+            Some(path) => serde_json::from_slice(&std::fs::read(&path).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to read trusted epoch roots from {}: {err}",
+                    path.display()
+                )
+            })?)
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to parse trusted epoch roots from {}: {err}",
+                    path.display()
+                )
+            })?,
+            None => Vec::new(),
+        },
     })?;
 
     run(service, &args.listen).await

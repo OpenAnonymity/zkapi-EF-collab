@@ -10,7 +10,7 @@ use zkapi_clientd::{
     WithdrawalMode,
 };
 use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
-use zkapi_types::Felt252;
+use zkapi_types::{EpochRoots, Felt252};
 
 #[derive(Debug, Parser)]
 #[command(name = "zkapi", about = "App-layer CLI for zkAPI")]
@@ -46,6 +46,9 @@ struct Cli {
     demo_private_key: Option<String>,
     #[arg(long)]
     demo_note_ttl_seconds: Option<u64>,
+    /// JSON file containing an array of on-chain-verified epoch root records.
+    #[arg(long, value_name = "JSON_PATH")]
+    trusted_epoch_roots: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -255,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
                 initial_root: parse_felt("initial root", &initial_root)?,
                 indexer_url,
                 root_poll_interval_ms,
+                trusted_epoch_roots: load_trusted_epoch_roots(cli.trusted_epoch_roots.as_deref())?,
                 metered,
                 proof_mode,
                 cairo_dir,
@@ -367,6 +371,7 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
         proof_mode: std::env::var("ZKAPI_PROOF_MODE").unwrap_or_else(|_| "stwo_scarb".to_string()),
         cairo_dir: std::env::var("ZKAPI_CAIRO_DIR")
             .unwrap_or_else(|_| "protocol/cairo".to_string()),
+        trusted_epoch_roots: load_trusted_epoch_roots(cli.trusted_epoch_roots.as_deref())?,
     })
     .map_err(Into::into)
 }
@@ -381,9 +386,11 @@ fn client_config(cli: &Cli) -> anyhow::Result<ClientConfig> {
         policy_enabled: cli.policy_enabled,
         server_url: cli.protocol_server_url.clone(),
         state_dir: cli.state_dir.display().to_string(),
-        // CLI `client_config` only backs the local-only `keygen` command; the
-        // daemon path (build_auth_service) populates trusted roots per request.
-        proof_mode: ClientProofMode::DevWitnessEnvelope,
+        // CLI `client_config` only backs the local-only `keygen` command,
+        // which does not generate request or withdrawal proofs.
+        proof_mode: ClientProofMode::StwoScarb {
+            cairo_dir: "protocol/cairo".to_string(),
+        },
         trusted_epoch_roots: Vec::new(),
     })
 }
@@ -400,6 +407,24 @@ fn request_body(json: Option<String>, body_file: Option<PathBuf>) -> anyhow::Res
 
 fn parse_felt(label: &str, value: &str) -> anyhow::Result<Felt252> {
     Felt252::from_hex(value).map_err(|err| anyhow::anyhow!("invalid {label}: {err}"))
+}
+
+fn load_trusted_epoch_roots(path: Option<&std::path::Path>) -> anyhow::Result<Vec<EpochRoots>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let bytes = std::fs::read(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read trusted epoch roots from {}: {err}",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to parse trusted epoch roots from {}: {err}",
+            path.display()
+        )
+    })
 }
 
 fn parse_auth_scheme(value: &str) -> anyhow::Result<zkapi_auth::AuthSchemeKind> {
@@ -448,6 +473,8 @@ mod tests {
             "http://127.0.0.1:3998",
             "--contract-address",
             "0x1234",
+            "--trusted-epoch-roots",
+            "/tmp/trusted-roots.json",
             "--model",
             "gpt-proxy",
             "clientd",
@@ -460,6 +487,10 @@ mod tests {
         assert_eq!(cli.protocol_server_url, "http://127.0.0.1:3999");
         assert_eq!(cli.indexer_url, "http://127.0.0.1:3998");
         assert_eq!(cli.models, vec!["gpt-proxy".to_string()]);
+        assert_eq!(
+            cli.trusted_epoch_roots,
+            Some(PathBuf::from("/tmp/trusted-roots.json"))
+        );
 
         match cli.command {
             Commands::Clientd { listen } => assert_eq!(listen, "127.0.0.1:11435"),

@@ -14,6 +14,55 @@ use zkapi_types::wire::{ClearanceResponse, ErrorResponse, RecoveryResponse};
 use zkapi_types::Felt252;
 
 #[tokio::test]
+async fn router_rejects_payload_hash_mismatch() {
+    let fixture = deposit_fixture();
+    let router = mock_router(fixture.active_root);
+    let note_state = zkapi_client::note_state::NoteState::new_from_deposit(
+        TEST_PROTOCOL_VERSION,
+        TEST_CHAIN_ID,
+        TEST_CONTRACT_ADDRESS,
+        fixture.note_id,
+        fixture.secret_s,
+        fixture.deposit_amount,
+        fixture.expiry_ts,
+        "0x1".to_string(),
+        Felt252::from_u64(1),
+        Felt252::from_u64(2),
+    );
+    let mut request = build_request_artifacts(
+        &note_state,
+        fixture.active_root,
+        fixture.merkle_siblings,
+        "{\"op\":\"bound\"}",
+        "payload-mismatch",
+        FieldElement::from(5u64),
+    );
+    request.api_request.payload = "{\"op\":\"tampered\"}".to_string();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/requests")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request.api_request).expect("request json"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("router response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("error body");
+    let error: ErrorResponse = serde_json::from_slice(&body).expect("error response");
+    assert_eq!(error.error_code, "INVALID_REQUEST");
+    assert!(error.error_message.contains("payload_hash"));
+}
+
+#[tokio::test]
 async fn router_rejects_stale_roots_with_conflict_and_latest_root() {
     let fixture = deposit_fixture();
     let router = mock_router(fixture.active_root);
@@ -33,7 +82,6 @@ async fn router_rejects_stale_roots_with_conflict_and_latest_root() {
         fixture.active_root,
         fixture.merkle_siblings,
         "{\"op\":\"quote\"}",
-        Felt252::from_u64(11),
         "stale-root",
         FieldElement::from(7u64),
     );
@@ -83,7 +131,6 @@ async fn router_finalizes_requests_and_exposes_recovery_endpoints() {
         fixture.active_root,
         fixture.merkle_siblings,
         "{\"op\":\"echo\"}",
-        Felt252::from_u64(22),
         "req-finalized",
         FieldElement::from(9u64),
     );
@@ -128,6 +175,10 @@ async fn router_finalizes_requests_and_exposes_recovery_endpoints() {
         request.public_inputs.request_nullifier
     );
     assert_eq!(recovered.charge_applied, 1);
+    assert_eq!(
+        recovered.response_hash,
+        zkapi_types::canonical_response_hash(recovered.response_payload.as_bytes())
+    );
 
     let by_nullifier = router
         .oneshot(
@@ -238,7 +289,6 @@ fn request_artifacts_round_trip_through_merkle_and_proof_verification() {
         fixture.active_root,
         fixture.merkle_siblings,
         "{\"op\":\"proof-roundtrip\"}",
-        Felt252::from_u64(33),
         "proof-roundtrip",
         FieldElement::from(3u64),
     );

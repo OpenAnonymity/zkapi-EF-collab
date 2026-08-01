@@ -328,16 +328,10 @@ layer on top.
 | Withdrawal liveness         | escape hatch + 24h challenge window                 | contract upgraded or paused by owner             |
 | Challenge validity          | server has archived transcripts                     | server DB loss                                   |
 
-## 7. Implementation Caveat
+## 7. Proof Runtime
 
-The Rust proof layer currently uses mock proof envelopes (JSON witness
-serialization + constraint replay). The Cairo circuits exist and pass their
-own test suite, but a runtime Cairo prover/verifier bridge is not wired into
-the Rust stack. This is an explicit grant-scope decision: the protocol
-correctness story is the Cairo circuits; the Rust stack validates the
-protocol logic and integration.
-
-For production deployment, either:
-- Integrate a Cairo prover (e.g., `stone-prover`) into `zkapi-client`, OR
-- Move proof generation to a dedicated service that outputs serialized
-  STARK proofs consumable by the on-chain fact registry adapter.
+The default Rust runtime generates and verifies opaque Stwo-Cairo artifacts
+through the Scarb CLI. Only the proof bytes, backend tag, and canonical public-
+output hash cross the client/server boundary; private witness JSON does not.
+Witness-envelope replay remains available solely in builds compiled with the
+explicit `dev-witness-envelope` feature for fast local integration tests.

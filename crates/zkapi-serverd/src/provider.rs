@@ -16,12 +16,6 @@ use zkapi_types::Felt252;
 use crate::config::{ProviderKind, ServerConfig};
 use crate::error::ServerError;
 
-/// Canonical hash binding an upstream response payload, matching what the
-/// client wallet re-derives in `verify_request_response`.
-pub(crate) fn compute_response_hash(payload: impl AsRef<[u8]>) -> Felt252 {
-    zkapi_types::canonical_response_hash(payload.as_ref())
-}
-
 /// Token usage + cost breakdown for a single upstream call, surfaced to the
 /// dashboard and (via the client daemon) the user. Cost is the real upstream
 /// spend in USD that drives `charge_applied`.
@@ -42,7 +36,6 @@ pub struct UsageInfo {
 pub struct ProviderResponse {
     pub status_code: u16,
     pub payload: String,
-    pub response_hash: Felt252,
     pub charge_applied: u128,
     pub policy_reason_code: Option<u32>,
     pub policy_evidence_hash: Option<Felt252>,
@@ -69,7 +62,6 @@ impl ProviderResponse {
     ) -> Self {
         Self {
             status_code,
-            response_hash: compute_response_hash(payload.as_bytes()),
             payload,
             charge_applied,
             policy_reason_code,
@@ -185,7 +177,6 @@ impl ApiProvider for HttpProxyProvider {
 
             Ok(ProviderResponse {
                 status_code,
-                response_hash: compute_response_hash(payload.as_bytes()),
                 payload,
                 charge_applied: parse_header_u128(&headers, "x-zkapi-charge-applied")?
                     .unwrap_or(self.default_charge),
@@ -313,10 +304,6 @@ mod tests {
 
         assert_eq!(response.status_code, 201);
         assert_eq!(response.payload, "proxy:{\"hello\":\"world\"}");
-        assert_eq!(
-            response.response_hash,
-            compute_response_hash(response.payload.as_bytes())
-        );
         assert_eq!(response.charge_applied, 7);
     }
 

@@ -39,6 +39,11 @@ type AppState = Arc<RequestProcessor>;
 
 /// Start the HTTP server with the given config.
 pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<()> {
+    if config.proof_mode == "dev_witness_envelope" && !cfg!(feature = "dev-witness-envelope") {
+        anyhow::bail!(
+            "proof_mode=dev_witness_envelope requires the dev-witness-envelope build feature"
+        );
+    }
     let store = Arc::new(crate::nullifier_store::NullifierStore::new(
         &config.db_path,
     )?);
@@ -238,6 +243,7 @@ struct ServerIdentity {
     request_charge_cap: u128,
     request_charge_cap_usd: f64,
     credits_per_usd: f64,
+    trusted_epoch_count: usize,
     state_sig_epoch: u32,
     clear_sig_epoch: u32,
     state_sig_root: Felt252,
@@ -283,6 +289,7 @@ async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<Das
         request_charge_cap: config.request_charge_cap,
         request_charge_cap_usd: pricing::credits_to_usd(config.request_charge_cap),
         credits_per_usd: pricing::CREDITS_PER_USD,
+        trusted_epoch_count: config.trusted_epoch_roots.len(),
         state_sig_epoch: processor.state_sig_epoch(),
         clear_sig_epoch: processor.clear_sig_epoch(),
         state_sig_root: processor.state_sig_root(),

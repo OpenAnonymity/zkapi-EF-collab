@@ -24,12 +24,17 @@ use base64::Engine;
 use zkapi_core::commitment::{compute_blind_delta, compute_next_anchor, compute_state_message};
 use zkapi_core::poseidon::{felt_to_field, field_to_felt};
 use zkapi_crypto::pedersen::PedersenCommitment;
-use zkapi_proof::{verify_request_proof, ProofArtifact, ScarbStwoProver};
+#[cfg(feature = "dev-witness-envelope")]
+use zkapi_proof::verify_request_proof;
+use zkapi_proof::{ProofArtifact, ScarbStwoProver};
 use zkapi_types::wire::{
     ApiRequest, ClearanceRequest, ClearanceResponse, CurvePointWire, ProofBackendWire,
     RecoveryResponse, RequestResponse,
 };
-use zkapi_types::{Felt252, NullifierStatus, STATEMENT_TYPE_REQUEST};
+use zkapi_types::{
+    canonical_payload_hash, canonical_response_hash, lookup_state_root, Felt252, NullifierStatus,
+    STATEMENT_TYPE_REQUEST,
+};
 
 use crate::config::ServerConfig;
 use crate::dashboard::{
@@ -145,6 +150,13 @@ impl RequestProcessor {
         let started = Instant::now();
         let pi = &api_request.public_inputs;
 
+        let actual_payload_hash = canonical_payload_hash(api_request.payload.as_bytes());
+        if api_request.payload_hash != actual_payload_hash {
+            return Err(ServerError::InvalidRequest(
+                "payload_hash does not match actual payload bytes".to_string(),
+            ));
+        }
+
         // Step 1: Validate protocol version
         if pi.protocol_version != self.config.protocol_version {
             return Err(ServerError::ProtocolMismatch(format!(
@@ -204,14 +216,14 @@ impl RequestProcessor {
             )));
         }
 
-        // Step 8: Verify state_sig_epoch/root consistency
-        // For genesis (epoch 0), state_sig_root should be zero
-        // For later states, epoch should match and root should match signer's root
-        if pi.state_sig_epoch != 0 && pi.state_sig_root != self.signer.state_root() {
-            return Err(ServerError::InvalidRequest(
-                "state_sig_root does not match server's state signing root".to_string(),
-            ));
-        }
+        // Step 8: Verify state_sig_epoch/root consistency against the current
+        // signer or an explicitly configured prior epoch.
+        validate_state_sig_root(
+            &self.config,
+            &self.signer,
+            pi.state_sig_epoch,
+            pi.state_sig_root,
+        )?;
 
         // Step 9: Verify the opaque proof artifact against the stated public inputs.
         //
@@ -236,8 +248,17 @@ impl RequestProcessor {
             .map_err(|e| ServerError::InvalidProof(format!("invalid base64 proof: {}", e)))?;
         match self.config.proof_mode.as_str() {
             "dev_witness_envelope" => {
-                verify_request_proof(&proof_bytes, pi)
-                    .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
+                #[cfg(feature = "dev-witness-envelope")]
+                {
+                    verify_request_proof(&proof_bytes, pi)
+                        .map_err(|e| ServerError::InvalidProof(e.to_string()))?;
+                }
+                #[cfg(not(feature = "dev-witness-envelope"))]
+                {
+                    return Err(ServerError::InvalidProof(
+                        "dev_witness_envelope is unavailable in this build".to_string(),
+                    ));
+                }
             }
             // Production: verify a real Stwo-Cairo STARK artifact via Scarb.
             _ => {
@@ -285,7 +306,7 @@ impl RequestProcessor {
         let upstream_ms = upstream_started.elapsed().as_millis() as u64;
         let response_code = provider_response.status_code;
         let response_payload = provider_response.payload;
-        let response_hash = provider_response.response_hash;
+        let response_hash = canonical_response_hash(response_payload.as_bytes());
         let charge = provider_response.charge_applied;
         let usage = provider_response.usage.clone();
         let upstream_model = provider_response.upstream_model.clone();
@@ -692,6 +713,34 @@ fn reconstruct_affine_point(
         .expect("invalid affine point")
 }
 
+fn validate_state_sig_root(
+    config: &ServerConfig,
+    signer: &ServerSigner,
+    epoch: u32,
+    root: Felt252,
+) -> Result<(), ServerError> {
+    if epoch == 0 {
+        if !root.is_zero() {
+            return Err(ServerError::InvalidRequest(
+                "genesis state_sig_root must be zero".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if epoch == signer.epoch() && root == signer.state_root() {
+        return Ok(());
+    }
+
+    if lookup_state_root(&config.trusted_epoch_roots, epoch) == Some(root) {
+        return Ok(());
+    }
+
+    Err(ServerError::InvalidRequest(
+        "state_sig_root is not trusted for state_sig_epoch".to_string(),
+    ))
+}
+
 /// Generate a deterministic server RNG value from the nullifier (for anchor derivation).
 ///
 /// In production this would use a proper server-side secret + CSPRNG.
@@ -738,6 +787,8 @@ mod tests {
     use super::*;
 
     use zkapi_core::poseidon::FieldElement;
+    use zkapi_types::wire::{ApiRequest, ProofArtifactWire, ProofBackendWire};
+    use zkapi_types::RequestPublicInputs;
 
     use crate::provider::EchoProvider;
 
@@ -799,5 +850,59 @@ mod tests {
 
         assert_eq!(recovery.nullifier_status, "finalized");
         assert_eq!(response.response_payload, "{\"answer\":\"ok\"}");
+    }
+
+    #[tokio::test]
+    async fn request_payload_hash_is_recomputed_before_proof_verification() {
+        let processor = test_processor(Arc::new(NullifierStore::in_memory().unwrap()));
+        let request = ApiRequest {
+            client_request_id: "tampered-payload".to_string(),
+            payload: "tampered".to_string(),
+            payload_hash: canonical_payload_hash(b"original"),
+            public_inputs: RequestPublicInputs {
+                statement_type: STATEMENT_TYPE_REQUEST,
+                protocol_version: 1,
+                chain_id: 1,
+                contract_address: Felt252::ZERO,
+                active_root: Felt252::ZERO,
+                state_sig_epoch: 0,
+                state_sig_root: Felt252::ZERO,
+                request_nullifier: Felt252::from_u64(1),
+                anon_commitment_x: Felt252::ZERO,
+                anon_commitment_y: Felt252::ZERO,
+                expiry_ts: u64::MAX,
+                solvency_bound: 1_000_000,
+            },
+            proof: ProofArtifactWire {
+                backend: ProofBackendWire::StwoCairo,
+                public_output_hash: Felt252::ZERO,
+                proof: String::new(),
+            },
+        };
+
+        let error = processor.process_request(&request).await.unwrap_err();
+        assert!(matches!(error, ServerError::InvalidRequest(message) if
+            message.contains("payload_hash")));
+    }
+
+    #[test]
+    fn state_signature_roots_require_the_matching_trusted_epoch() {
+        let signer =
+            ServerSigner::with_height(FieldElement::from(1u64), FieldElement::from(2u64), 7, 4);
+        let prior_root = Felt252::from_u64(1234);
+        let config = ServerConfig {
+            trusted_epoch_roots: vec![zkapi_types::EpochRoots {
+                epoch: 6,
+                state_root: prior_root,
+                clear_root: Felt252::from_u64(5678),
+            }],
+            ..Default::default()
+        };
+
+        assert!(validate_state_sig_root(&config, &signer, 0, Felt252::ZERO).is_ok());
+        assert!(validate_state_sig_root(&config, &signer, 7, signer.state_root()).is_ok());
+        assert!(validate_state_sig_root(&config, &signer, 6, prior_root).is_ok());
+        assert!(validate_state_sig_root(&config, &signer, 5, prior_root).is_err());
+        assert!(validate_state_sig_root(&config, &signer, 0, prior_root).is_err());
     }
 }
