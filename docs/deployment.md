@@ -2,7 +2,8 @@
 
 ## Components
 
-- `protocol/contracts`: on-chain vault, proof adapter, token
+- `protocol/contracts`: reusable on-chain vault and proof-adapter contracts
+- `demo/contracts`: EF-owned demo token and local deployment harness
 - `zkapi-indexerd`: mirrors vault events into a local Merkle tree view
 - `zkapi-serverd`: verifies proofs, charges requests, signs next state
 - `zkapi-clientd`: local daemon used by apps and UIs
@@ -19,10 +20,14 @@ anvil --host 127.0.0.1 --port 8545
 2. Deploy contracts:
 
 ```bash
-cd protocol/contracts
+mkdir -p .demo
+cd demo/contracts
+OUTPUT_PATH=../../.demo/deployment.json \
+PRIVATE_KEY="$PRIVATE_KEY" \
+TREASURY="$TREASURY" \
+MINT_AMOUNT="$MINT_AMOUNT" \
 forge script script/Deploy.s.sol:DeployScript \
   --rpc-url http://127.0.0.1:8545 \
-  --private-key "$PRIVATE_KEY" \
   --broadcast
 ```
 
@@ -108,10 +113,12 @@ deploys the `ZkApiVault`, and publishes a config bundle clients consume.
    trees (state + clearance). Generate two random seeds and keep them secret;
    pass them as `--state-seed` / `--clear-seed`. The published *roots* (not the
    seeds) go in the client bundle.
-2. **Deploy the vault.** `forge script script/Deploy.s.sol:DeployScript` deploys
-   the billing token, proof adapter, and `ZkApiVault`, writing
-   `{vault, billingToken, noteTtl}` to `$OUTPUT_PATH`. Set `treasury` to the
-   operator payout address.
+2. **Deploy the vault.** From `demo/contracts`, `forge script
+   script/Deploy.s.sol:DeployScript` provides the EF demo deployment: it deploys
+   the billing token, permissive proof adapter, and `ZkApiVault`, writing
+   `{vault, billingToken, treasury, noteTtl}` to `$OUTPUT_PATH`. Set `TREASURY`
+   to the operator payout address. Production deployments should substitute
+   their production token and proof adapter.
 3. **Register signing roots on chain.** Call `vault.rotateServerRoots(epoch,
    stateRoot, clearRoot)` so withdrawals can verify the operator's signatures.
    (Automating this rotation is a roadmap item.)
@@ -130,10 +137,12 @@ The contracts and daemons are network-agnostic; deploying to public testnet is t
 flow as local with a real RPC and a funded key:
 
 ```bash
-# 1. Deploy the vault + (mock or real) billing token to public testnet.
-cd protocol/contracts
+# 1. Deploy the EF demo token, mock adapter, and vault to public testnet.
+cd demo/contracts
 OUTPUT_PATH=../../.demo/public-testnet.json \
 PRIVATE_KEY=$PUBLIC_TESTNET_DEPLOYER_KEY \
+TREASURY=$PUBLIC_TESTNET_TREASURY \
+MINT_AMOUNT=$PUBLIC_TESTNET_MINT_AMOUNT \
 forge script script/Deploy.s.sol:DeployScript \
   --rpc-url https://public-testnet.infura.io/v3/$INFURA_KEY \
   --broadcast --verify

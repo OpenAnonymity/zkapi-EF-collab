@@ -262,5 +262,6 @@ than a package-manager build that ships only the core binary.
 - Protocol Rust crates (production): `cargo test --manifest-path protocol/rust/Cargo.toml --workspace`
 - Protocol Rust crates (dev witness): `cargo test --manifest-path protocol/rust/Cargo.toml --features dev-witness-envelope --workspace`
 - Protocol Solidity: `cd protocol/contracts && forge test -vvv`
+- EF demo deployment: `cd demo/contracts && forge build`
 - Protocol Cairo: `cd protocol/cairo && scarb test`
 </content>

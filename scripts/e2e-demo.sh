@@ -164,7 +164,7 @@ wait_rpc "${RPC_URL}" "anvil rpc"
 
 echo "Deploying demo contracts..."
 (
-  cd "$ROOT_DIR/protocol/contracts"
+  cd "$ROOT_DIR/demo/contracts"
   OUTPUT_PATH="$DEPLOYMENT_JSON" \
   PRIVATE_KEY="$PRIVATE_KEY" \
   TREASURY="$TREASURY_ADDR" \
