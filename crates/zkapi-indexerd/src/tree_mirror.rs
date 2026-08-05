@@ -89,7 +89,7 @@ impl TreeMirror {
                     self.tree.set_leaf(*note_id, *original);
                 }
             }
-            VaultEvent::EscapeWithdrawalFinalized { note_id: _, .. } => {
+            VaultEvent::EscapeWithdrawalFinalized { .. } => {
                 // Leaf was already zeroed during initiation, nothing more to do
             }
             VaultEvent::ExpiredClaimed { note_id, .. } => {

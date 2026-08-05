@@ -14,7 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,7 +46,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
+
+      - name: Provision swap for the Stwo prover
+        run: |
+          sudo fallocate -l 8G /mnt/zkapi-stwo.swap
+          sudo chmod 600 /mnt/zkapi-stwo.swap
+          sudo mkswap /mnt/zkapi-stwo.swap
+          sudo swapon /mnt/zkapi-stwo.swap
+          free -h
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,18 +66,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test protocol Rust workspace
-        run: cargo test --manifest-path protocol/rust/Cargo.toml --workspace
+      - name: Install Scarb for the production proof backend
+        uses: software-mansion/setup-scarb@v1
 
       - name: Clippy protocol Rust workspace
         run: cargo clippy --manifest-path protocol/rust/Cargo.toml --workspace -- -D warnings
+
+      - name: Test protocol Rust workspace
+        run: cargo test --manifest-path protocol/rust/Cargo.toml --workspace -- --test-threads=1
 
   contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -79,7 +102,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Install Scarb
         uses: software-mansion/setup-scarb@v1
@@ -97,7 +124,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -119,7 +150,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/checkout-protocol
+        with:
+          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Build Docker image
         run: docker build -f docker/Dockerfile -t zkapi/ef-collaboration:ci .

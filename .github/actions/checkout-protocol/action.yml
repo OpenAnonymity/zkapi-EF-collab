@@ -1,0 +1,25 @@
+name: Checkout private protocol
+description: Check out the protocol repository at the commit pinned by the parent gitlink
+
+inputs:
+  token:
+    description: Read-only token for OpenAnonymity/zkapi
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve pinned protocol commit
+      id: protocol-ref
+      shell: bash
+      run: echo "sha=$(git rev-parse HEAD:protocol)" >> "$GITHUB_OUTPUT"
+
+    - name: Check out private protocol repository
+      uses: actions/checkout@v4
+      with:
+        repository: OpenAnonymity/zkapi
+        ref: ${{ steps.protocol-ref.outputs.sha }}
+        path: protocol
+        token: ${{ inputs.token }}
+        submodules: recursive
+        persist-credentials: false

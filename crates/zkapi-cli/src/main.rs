@@ -54,6 +54,9 @@ struct Cli {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+// This value is constructed once at startup; boxing Clap fields would only
+// complicate argument handling without improving the long-lived runtime.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     Keygen,
     #[command(name = "clientd", alias = "auth", alias = "serve-auth")]
