@@ -52,12 +52,13 @@ pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<(
     let store = Arc::new(crate::nullifier_store::NullifierStore::new(
         &config.db_path,
     )?);
-    let signer = Arc::new(crate::signer::ServerSigner::with_height(
+    let signer = Arc::new(crate::signer::ServerSigner::with_height_durable(
         felt_to_field(&config.state_seed),
         felt_to_field(&config.clear_seed),
         config.epoch,
         config.xmss_height,
-    ));
+        &config.db_path,
+    )?);
     let provider = build_provider(&config)?;
     let initial_root = if let Some(indexer_url) = config.indexer_url.as_deref() {
         match fetch_indexer_root(indexer_url).await {
