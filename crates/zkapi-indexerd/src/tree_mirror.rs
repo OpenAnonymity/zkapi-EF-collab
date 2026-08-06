@@ -6,6 +6,17 @@ use zkapi_types::{Felt252, MERKLE_DEPTH};
 
 use crate::events::VaultEvent;
 
+/// Serializable state paired atomically with the indexer's block cursor.
+///
+/// Persisting only the cursor is unsafe because TreeMirror otherwise starts
+/// empty after a process restart and skips the events needed to rebuild it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TreeMirrorSnapshot {
+    pub next_note_id: u32,
+    pub current_leaves: Vec<Felt252>,
+    pub original_leaves: Vec<(u32, Felt252)>,
+}
+
 /// A mirror of the on-chain Merkle tree, maintained by consuming events.
 pub struct TreeMirror {
     tree: MerkleTree,
@@ -43,6 +54,53 @@ impl TreeMirror {
         (0..self.next_note_id)
             .map(|i| self.tree.get_leaf(i))
             .collect()
+    }
+
+    /// Capture all state needed to restore paths and challengeable leaves.
+    pub fn snapshot(&self) -> TreeMirrorSnapshot {
+        let mut original_leaves: Vec<_> = self
+            .original_leaves
+            .iter()
+            .map(|(note_id, leaf)| (*note_id, *leaf))
+            .collect();
+        original_leaves.sort_unstable_by_key(|(note_id, _)| *note_id);
+
+        TreeMirrorSnapshot {
+            next_note_id: self.next_note_id,
+            current_leaves: self.current_leaves(),
+            original_leaves,
+        }
+    }
+
+    /// Restore a mirror from an atomic cursor checkpoint.
+    pub fn from_snapshot(snapshot: TreeMirrorSnapshot) -> Result<Self, String> {
+        if snapshot.current_leaves.len() != snapshot.next_note_id as usize {
+            return Err(format!(
+                "snapshot has {} leaves but next_note_id is {}",
+                snapshot.current_leaves.len(),
+                snapshot.next_note_id
+            ));
+        }
+        if snapshot
+            .original_leaves
+            .iter()
+            .any(|(note_id, _)| *note_id >= snapshot.next_note_id)
+        {
+            return Err("snapshot contains an original leaf beyond next_note_id".to_string());
+        }
+
+        let mut tree = MerkleTree::new();
+        for (note_id, leaf) in snapshot.current_leaves.iter().copied().enumerate() {
+            if !leaf.is_zero() {
+                tree.set_leaf(note_id as u32, leaf);
+            }
+        }
+
+        Ok(Self {
+            tree,
+            next_note_id: snapshot.next_note_id,
+            original_leaves: snapshot.original_leaves.into_iter().collect(),
+        })
     }
 
     /// Get the sibling path for a note's current leaf.
@@ -190,5 +248,41 @@ mod tests {
             let leaf = mirror.get_leaf(i);
             assert!(!leaf.is_zero());
         }
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_current_and_original_leaves() {
+        let mut mirror = TreeMirror::new();
+        for note_id in 0..3 {
+            mirror.process_event(&VaultEvent::NoteDeposited {
+                note_id,
+                commitment: Felt252::from_u64(100 + note_id as u64),
+                amount: 1_000,
+                expiry_ts: 1_700_000_000,
+                new_root: Felt252::ZERO,
+            });
+        }
+        mirror.process_event(&VaultEvent::EscapeWithdrawalInitiated {
+            note_id: 1,
+            nullifier: Felt252::from_u64(999),
+            final_balance: 900,
+            challenge_deadline: 1_700_086_400,
+            new_root: Felt252::ZERO,
+        });
+
+        let expected_root = mirror.root();
+        let expected_path = mirror.get_path(2);
+        let restored = TreeMirror::from_snapshot(mirror.snapshot()).unwrap();
+        assert_eq!(restored.root(), expected_root);
+        assert_eq!(restored.next_note_id(), 3);
+        assert_eq!(restored.get_path(2), expected_path);
+
+        let mut restored = restored;
+        restored.process_event(&VaultEvent::EscapeWithdrawalChallenged {
+            note_id: 1,
+            nullifier: Felt252::from_u64(999),
+            restored_root: Felt252::ZERO,
+        });
+        assert!(!restored.get_leaf(1).is_zero());
     }
 }

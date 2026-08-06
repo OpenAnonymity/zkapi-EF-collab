@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use zkapi_types::Felt252;
@@ -42,10 +44,15 @@ impl Default for IndexerConfig {
 type AppState = Arc<IndexerService>;
 
 pub async fn run_indexer(config: IndexerConfig) -> anyhow::Result<()> {
-    let service = Arc::new(IndexerService::new(Arc::new(
-        RwLock::new(TreeMirror::new()),
-    )));
-    if !config.rpc_url.trim().is_empty() && !config.contract_address.trim().is_empty() {
+    let polling_enabled =
+        !config.rpc_url.trim().is_empty() && !config.contract_address.trim().is_empty();
+    let mirror = Arc::new(RwLock::new(TreeMirror::new()));
+    let service = Arc::new(if polling_enabled {
+        IndexerService::new_syncing(mirror)
+    } else {
+        IndexerService::new(mirror)
+    });
+    if polling_enabled {
         spawn_json_rpc_log_poller(
             service.clone(),
             PollerConfig {
@@ -76,48 +83,74 @@ pub fn create_router(service: Arc<IndexerService>) -> Router {
         .with_state(service)
 }
 
-async fn handle_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn handle_health(State(service): State<AppState>) -> Response {
+    if service.is_ready() {
+        Json(serde_json::json!({ "status": "ok" })).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "syncing" })),
+        )
+            .into_response()
+    }
 }
 
-async fn handle_root(State(service): State<AppState>) -> Json<TreeRootResponse> {
-    Json(TreeRootResponse {
+async fn handle_root(
+    State(service): State<AppState>,
+) -> Result<Json<TreeRootResponse>, StatusCode> {
+    ensure_ready(&service)?;
+    Ok(Json(TreeRootResponse {
         root: service.get_root(),
-    })
+    }))
 }
 
 /// Privacy-safe whole-tree snapshot. The same payload is returned regardless of
 /// which note the caller cares about, so the untrusted indexer never learns it.
-async fn handle_snapshot(State(service): State<AppState>) -> Json<TreeSnapshotResponse> {
-    Json(service.get_snapshot())
+async fn handle_snapshot(
+    State(service): State<AppState>,
+) -> Result<Json<TreeSnapshotResponse>, StatusCode> {
+    ensure_ready(&service)?;
+    Ok(Json(service.get_snapshot()))
 }
 
-async fn handle_next_note_id(State(service): State<AppState>) -> Json<NextNoteIdResponse> {
-    Json(NextNoteIdResponse {
+async fn handle_next_note_id(
+    State(service): State<AppState>,
+) -> Result<Json<NextNoteIdResponse>, StatusCode> {
+    ensure_ready(&service)?;
+    Ok(Json(NextNoteIdResponse {
         next_note_id: service.get_next_note_id(),
-    })
+    }))
 }
 
 async fn handle_note_path(
     State(service): State<AppState>,
     Path(note_id): Path<u32>,
-) -> Json<TreePathResponse> {
-    Json(TreePathResponse {
+) -> Result<Json<TreePathResponse>, StatusCode> {
+    ensure_ready(&service)?;
+    Ok(Json(TreePathResponse {
         note_id,
         leaf: service.get_leaf(note_id),
         siblings: service.get_note_path(note_id).to_vec(),
-    })
+    }))
 }
 
 async fn handle_zero_path(
     State(service): State<AppState>,
     Path(note_id): Path<u32>,
-) -> Json<TreePathResponse> {
-    Json(TreePathResponse {
+) -> Result<Json<TreePathResponse>, StatusCode> {
+    ensure_ready(&service)?;
+    Ok(Json(TreePathResponse {
         note_id,
         leaf: Felt252::ZERO,
         siblings: service.get_zero_path(note_id).to_vec(),
-    })
+    }))
+}
+
+fn ensure_ready(service: &IndexerService) -> Result<(), StatusCode> {
+    service
+        .is_ready()
+        .then_some(())
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 #[cfg(test)]
@@ -206,5 +239,31 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn syncing_indexer_does_not_serve_partial_tree_data() {
+        let service = Arc::new(IndexerService::new_syncing(Arc::new(RwLock::new(
+            TreeMirror::new(),
+        ))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = create_router(service.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let root = reqwest::get(format!("http://{addr}/v1/tree/root"))
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        service.mark_ready();
+        let root = reqwest::get(format!("http://{addr}/v1/tree/root"))
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
     }
 }

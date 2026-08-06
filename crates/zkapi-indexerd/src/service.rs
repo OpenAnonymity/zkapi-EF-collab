@@ -1,20 +1,51 @@
 //! Indexer HTTP service exposing tree data.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use zkapi_types::{Felt252, MERKLE_DEPTH};
 
 use crate::events::VaultEvent;
-use crate::tree_mirror::TreeMirror;
+use crate::tree_mirror::{TreeMirror, TreeMirrorSnapshot};
 
 /// The indexer service wraps a TreeMirror and provides read access.
 pub struct IndexerService {
     mirror: Arc<RwLock<TreeMirror>>,
+    ready: AtomicBool,
 }
 
 impl IndexerService {
     pub fn new(mirror: Arc<RwLock<TreeMirror>>) -> Self {
-        Self { mirror }
+        Self {
+            mirror,
+            ready: AtomicBool::new(true),
+        }
+    }
+
+    /// Construct an indexer that must finish its initial replay before serving
+    /// tree data.
+    pub fn new_syncing(mirror: Arc<RwLock<TreeMirror>>) -> Self {
+        Self {
+            mirror,
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    pub fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> TreeMirrorSnapshot {
+        self.mirror.read().unwrap().snapshot()
+    }
+
+    pub fn restore(&self, snapshot: TreeMirrorSnapshot) -> Result<(), String> {
+        *self.mirror.write().unwrap() = TreeMirror::from_snapshot(snapshot)?;
+        Ok(())
     }
 
     /// GET /v1/tree/root

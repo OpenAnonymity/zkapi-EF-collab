@@ -14,6 +14,10 @@ use zkapi_types::Felt252;
 
 use crate::events::VaultEvent;
 use crate::service::IndexerService;
+use crate::tree_mirror::TreeMirrorSnapshot;
+
+const CHECKPOINT_VERSION: u32 = 1;
+const MAX_BLOCK_RANGE: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct PollerConfig {
@@ -43,12 +47,25 @@ pub struct JsonRpcLogPoller {
 }
 
 impl JsonRpcLogPoller {
-    pub fn new(config: PollerConfig) -> anyhow::Result<Self> {
+    pub fn new(config: PollerConfig, service: &IndexerService) -> anyhow::Result<Self> {
         let next_from_block = match config.cursor_path.as_deref() {
-            Some(path) => load_cursor(Path::new(path))?.map(|last| last.saturating_add(1)),
-            None => None,
-        }
-        .unwrap_or(config.from_block);
+            Some(path) => match load_checkpoint(Path::new(path))? {
+                Some(checkpoint) => {
+                    if checkpoint.version != CHECKPOINT_VERSION {
+                        return Err(anyhow!(
+                            "unsupported indexer checkpoint version {}",
+                            checkpoint.version
+                        ));
+                    }
+                    service
+                        .restore(checkpoint.mirror)
+                        .map_err(|err| anyhow!("invalid indexer checkpoint: {err}"))?;
+                    checkpoint.last_processed_block.saturating_add(1)
+                }
+                None => config.from_block,
+            },
+            None => config.from_block,
+        };
 
         Ok(Self {
             client: Client::new(),
@@ -66,10 +83,15 @@ impl JsonRpcLogPoller {
     pub async fn poll_once(&mut self, service: &IndexerService) -> anyhow::Result<usize> {
         let latest_block = self.fetch_block_number().await?;
         if latest_block < self.next_from_block {
+            service.mark_ready();
             return Ok(0);
         }
 
-        let logs = self.fetch_logs(self.next_from_block, latest_block).await?;
+        let to_block = latest_block.min(
+            self.next_from_block
+                .saturating_add(MAX_BLOCK_RANGE.saturating_sub(1)),
+        );
+        let logs = self.fetch_logs(self.next_from_block, to_block).await?;
         let mut applied = 0usize;
         for log in logs {
             let Some((event, expected_root)) = decode_log(&log)? else {
@@ -91,8 +113,11 @@ impl JsonRpcLogPoller {
             }
         }
 
-        self.next_from_block = latest_block.saturating_add(1);
-        self.persist_cursor(latest_block)?;
+        self.next_from_block = to_block.saturating_add(1);
+        self.persist_checkpoint(to_block, service)?;
+        if to_block == latest_block {
+            service.mark_ready();
+        }
         Ok(applied)
     }
 
@@ -138,7 +163,11 @@ impl JsonRpcLogPoller {
             .ok_or_else(|| anyhow!("rpc response missing result"))
     }
 
-    fn persist_cursor(&self, last_processed_block: u64) -> anyhow::Result<()> {
+    fn persist_checkpoint(
+        &self,
+        last_processed_block: u64,
+        service: &IndexerService,
+    ) -> anyhow::Result<()> {
         let Some(path) = &self.cursor_path else {
             return Ok(());
         };
@@ -146,8 +175,17 @@ impl JsonRpcLogPoller {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create cursor dir {}", parent.display()))?;
         }
-        fs::write(path, last_processed_block.to_string())
-            .with_context(|| format!("failed to write cursor file {}", path.display()))
+        let checkpoint = IndexerCheckpoint {
+            version: CHECKPOINT_VERSION,
+            last_processed_block,
+            mirror: service.snapshot(),
+        };
+        let encoded = serde_json::to_vec(&checkpoint).context("failed to encode checkpoint")?;
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        fs::write(&temp_path, encoded)
+            .with_context(|| format!("failed to write checkpoint {}", temp_path.display()))?;
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to replace checkpoint {}", path.display()))
     }
 }
 
@@ -157,7 +195,7 @@ pub fn spawn_json_rpc_log_poller(
     interval: Duration,
 ) {
     tokio::spawn(async move {
-        let mut poller = match JsonRpcLogPoller::new(config) {
+        let mut poller = match JsonRpcLogPoller::new(config, &service) {
             Ok(poller) => poller,
             Err(err) => {
                 tracing::error!("failed to initialize indexer poller: {}", err);
@@ -174,6 +212,13 @@ pub fn spawn_json_rpc_log_poller(
             }
         }
     });
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IndexerCheckpoint {
+    version: u32,
+    last_processed_block: u64,
+    mirror: TreeMirrorSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -204,15 +249,27 @@ struct JsonRpcError {
     message: String,
 }
 
-fn load_cursor(path: &Path) -> anyhow::Result<Option<u64>> {
+fn load_checkpoint(path: &Path) -> anyhow::Result<Option<IndexerCheckpoint>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read cursor file {}", path.display()))?;
-    Ok(Some(raw.trim().parse::<u64>().with_context(|| {
-        format!("invalid cursor value in {}", path.display())
-    })?))
+    let raw =
+        fs::read(path).with_context(|| format!("failed to read cursor file {}", path.display()))?;
+    if let Ok(checkpoint) = serde_json::from_slice(&raw) {
+        return Ok(Some(checkpoint));
+    }
+    if std::str::from_utf8(&raw)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some()
+    {
+        tracing::warn!(
+            path = %path.display(),
+            "legacy cursor has no Merkle snapshot; replaying from deployment block"
+        );
+        return Ok(None);
+    }
+    Err(anyhow!("invalid indexer checkpoint in {}", path.display()))
 }
 
 fn normalize_address(address: &str) -> anyhow::Result<String> {
@@ -466,12 +523,130 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_file_round_trip() {
+    fn legacy_cursor_without_snapshot_is_ignored() {
         let dir = std::env::temp_dir().join("zkapi_indexer_cursor");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cursor.txt");
         fs::write(&path, "17").unwrap();
-        assert_eq!(load_cursor(&path).unwrap(), Some(17));
+        assert!(load_checkpoint(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn checkpoint_round_trip_restores_tree_and_cursor_together() {
+        use std::sync::{Arc, RwLock};
+
+        use crate::tree_mirror::TreeMirror;
+
+        let dir = std::env::temp_dir().join("zkapi_indexer_checkpoint");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("checkpoint.json");
+        let service = IndexerService::new(Arc::new(RwLock::new(TreeMirror::new())));
+        service.process_event(&VaultEvent::NoteDeposited {
+            note_id: 0,
+            commitment: Felt252::from_u64(1234),
+            amount: 55,
+            expiry_ts: 1_700_000_000,
+            new_root: Felt252::ZERO,
+        });
+        let expected_root = service.get_root();
+        let poller = JsonRpcLogPoller {
+            client: Client::new(),
+            rpc_url: "http://127.0.0.1:1".to_string(),
+            contract_address: "0x0000000000000000000000000000000000000001".to_string(),
+            next_from_block: 10,
+            cursor_path: Some(path.clone()),
+        };
+        poller.persist_checkpoint(17, &service).unwrap();
+
+        let restored = IndexerService::new_syncing(Arc::new(RwLock::new(TreeMirror::new())));
+        let restored_poller = JsonRpcLogPoller::new(
+            PollerConfig {
+                rpc_url: "http://127.0.0.1:1".to_string(),
+                contract_address: "0x1".to_string(),
+                from_block: 3,
+                cursor_path: Some(path.display().to_string()),
+            },
+            &restored,
+        )
+        .unwrap();
+        assert_eq!(restored_poller.next_from_block(), 18);
+        assert_eq!(restored.get_next_note_id(), 1);
+        assert_eq!(restored.get_root(), expected_root);
+    }
+
+    #[tokio::test]
+    async fn poller_scans_large_replays_in_bounded_ranges() {
+        use std::sync::{Arc, Mutex, RwLock};
+
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use serde_json::{json, Value};
+
+        use crate::tree_mirror::TreeMirror;
+
+        type RpcRanges = Arc<Mutex<Vec<(String, String)>>>;
+
+        async fn rpc(State(ranges): State<RpcRanges>, Json(body): Json<Value>) -> Json<Value> {
+            match body["method"].as_str().unwrap() {
+                "eth_blockNumber" => Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": "0x9c4"
+                })),
+                "eth_getLogs" => {
+                    let filter = &body["params"][0];
+                    ranges.lock().unwrap().push((
+                        filter["fromBlock"].as_str().unwrap().to_string(),
+                        filter["toBlock"].as_str().unwrap().to_string(),
+                    ));
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": []
+                    }))
+                }
+                method => panic!("unexpected RPC method {method}"),
+            }
+        }
+
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/", post(rpc))
+            .with_state(ranges.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let service = IndexerService::new_syncing(Arc::new(RwLock::new(TreeMirror::new())));
+        let mut poller = JsonRpcLogPoller::new(
+            PollerConfig {
+                rpc_url: format!("http://{addr}"),
+                contract_address: "0x1".to_string(),
+                from_block: 1,
+                cursor_path: None,
+            },
+            &service,
+        )
+        .unwrap();
+
+        for _ in 0..3 {
+            poller.poll_once(&service).await.unwrap();
+        }
+
+        assert_eq!(
+            *ranges.lock().unwrap(),
+            vec![
+                ("0x1".to_string(), "0x3e8".to_string()),
+                ("0x3e9".to_string(), "0x7d0".to_string()),
+                ("0x7d1".to_string(), "0x9c4".to_string()),
+            ]
+        );
+        assert_eq!(poller.next_from_block(), 2_501);
+        assert!(service.is_ready());
     }
 }
