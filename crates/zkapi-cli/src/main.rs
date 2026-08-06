@@ -90,10 +90,12 @@ enum Commands {
         openrouter_api_base: String,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
-        #[arg(long, default_value = "0x1")]
-        state_seed: String,
-        #[arg(long, default_value = "0x2")]
-        clear_seed: String,
+        /// XMSS state-signing seed. Falls back to ZKAPI_STATE_SEED, then 0x1.
+        #[arg(long)]
+        state_seed: Option<String>,
+        /// XMSS clearance-signing seed. Falls back to ZKAPI_CLEAR_SEED, then 0x2.
+        #[arg(long)]
+        clear_seed: Option<String>,
         #[arg(long, default_value_t = 1)]
         epoch: u32,
         #[arg(long, default_value_t = zkapi_types::XMSS_TREE_HEIGHT)]
@@ -225,12 +227,22 @@ async fn main() -> anyhow::Result<()> {
             let cairo_dir = cairo_dir
                 .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
                 .unwrap_or_else(|| "protocol/cairo".to_string());
+            let state_seed = resolve_secret(state_seed, std::env::var("ZKAPI_STATE_SEED").ok())
+                .unwrap_or_else(|| "0x1".to_string());
+            let clear_seed = resolve_secret(clear_seed, std::env::var("ZKAPI_CLEAR_SEED").ok())
+                .unwrap_or_else(|| "0x2".to_string());
             let metered = if matches!(provider, ProviderArg::Metered) {
                 Some(MeteredConfig {
                     openai_api_base,
-                    openai_api_key: openai_api_key.filter(|k| !k.is_empty()),
+                    openai_api_key: resolve_secret(
+                        openai_api_key,
+                        std::env::var("ZKAPI_OPENAI_API_KEY").ok(),
+                    ),
                     openrouter_api_base,
-                    openrouter_inference_key: openrouter_inference_key.filter(|k| !k.is_empty()),
+                    openrouter_inference_key: resolve_secret(
+                        openrouter_inference_key,
+                        std::env::var("ZKAPI_OPENROUTER_INFERENCE_KEY").ok(),
+                    ),
                 })
             } else {
                 None
@@ -412,6 +424,10 @@ fn parse_felt(label: &str, value: &str) -> anyhow::Result<Felt252> {
     Felt252::from_hex(value).map_err(|err| anyhow::anyhow!("invalid {label}: {err}"))
 }
 
+fn resolve_secret(cli_value: Option<String>, env_value: Option<String>) -> Option<String> {
+    cli_value.or(env_value).filter(|value| !value.is_empty())
+}
+
 fn load_trusted_epoch_roots(path: Option<&std::path::Path>) -> anyhow::Result<Vec<EpochRoots>> {
     let Some(path) = path else {
         return Ok(Vec::new());
@@ -463,6 +479,22 @@ impl From<WithdrawalModeArg> for WithdrawalMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_secret_prefers_cli_and_ignores_empty_values() {
+        assert_eq!(
+            resolve_secret(
+                Some("cli-secret".to_string()),
+                Some("env-secret".to_string())
+            ),
+            Some("cli-secret".to_string())
+        );
+        assert_eq!(
+            resolve_secret(None, Some("env-secret".to_string())),
+            Some("env-secret".to_string())
+        );
+        assert_eq!(resolve_secret(None, Some(String::new())), None);
+    }
 
     #[test]
     fn cli_parses_auth_command_with_global_options() {

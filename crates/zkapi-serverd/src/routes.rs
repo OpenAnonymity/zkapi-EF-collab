@@ -12,7 +12,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
@@ -36,6 +36,11 @@ use crate::provider::build_provider;
 
 /// Shared application state.
 type AppState = Arc<RequestProcessor>;
+
+// Stwo proof JSON is base64-encoded inside the protocol request. Current
+// request proofs are about 13 MiB before base64 encoding, so Axum's 2 MiB
+// default body limit cannot carry a production proof artifact.
+const PROTOCOL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Start the HTTP server with the given config.
 pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<()> {
@@ -111,6 +116,7 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
             get(handle_recovery_by_nullifier),
         )
         .merge(dashboard)
+        .layer(DefaultBodyLimit::max(PROTOCOL_BODY_LIMIT_BYTES))
         .with_state(processor)
 }
 
