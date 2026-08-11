@@ -72,7 +72,8 @@ the vault, then confirm the mined note locally:
 ./target/release/zkapi "${ZKAPI_ARGS[@]}" prepare-deposit --amount 5000000
 
 ./target/release/zkapi "${ZKAPI_ARGS[@]}" confirm-deposit \
-  --secret 0x... --note-id 0 --amount 5000000 --expiry-ts 0
+  --secret 0x... --note-id 0 --amount 5000000 \
+  --expiry-ts <EXPIRY_TS_FROM_NOTE_DEPOSITED_EVENT>
 ```
 
 Use the actual bucketed `expiryTs` from the `NoteDeposited` event in the confirm
