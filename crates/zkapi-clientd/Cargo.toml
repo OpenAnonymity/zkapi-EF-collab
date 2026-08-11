@@ -5,10 +5,6 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-dev-witness-envelope = ["zkapi-client/dev-witness-envelope"]
-
 [[bin]]
 name = "zkapi-clientd"
 path = "src/main.rs"

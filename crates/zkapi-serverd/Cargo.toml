@@ -5,10 +5,6 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-dev-witness-envelope = ["zkapi-proof/dev-witness-envelope"]
-
 [dependencies]
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }

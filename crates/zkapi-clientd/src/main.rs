@@ -6,6 +6,7 @@
 
 use clap::Parser;
 use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor};
+use zkapi_types::wire::CurvePointWire;
 use zkapi_types::Felt252;
 
 #[derive(Debug, Parser)]
@@ -22,7 +23,7 @@ struct Args {
     protocol_server_url: String,
     #[arg(long, default_value = "http://127.0.0.1:3001")]
     indexer_url: String,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 2)]
     protocol_version: u16,
     #[arg(long, default_value_t = 1)]
     chain_id: u64,
@@ -50,13 +51,20 @@ struct Args {
     /// JSON file containing an array of on-chain-verified epoch root records.
     #[arg(long, value_name = "JSON_PATH")]
     trusted_epoch_roots: Option<std::path::PathBuf>,
-    /// Proof backend: "stwo_scarb" (production) or "dev_witness_envelope" (dev-only).
-    /// Falls back to env ZKAPI_PROOF_MODE, then "stwo_scarb".
-    #[arg(long)]
-    proof_mode: Option<String>,
-    /// Cairo package dir for real Stwo proving. Falls back to env ZKAPI_CAIRO_DIR.
-    #[arg(long)]
-    cairo_dir: Option<String>,
+    #[arg(
+        long,
+        env = "ZKAPI_PROOF_SETUP_DIR",
+        default_value = "protocol/setup/v2"
+    )]
+    proof_setup_dir: String,
+    #[arg(long, env = "ZKAPI_STATE_SIGNING_KEY_X", default_value = "0x0")]
+    state_signing_key_x: String,
+    #[arg(long, env = "ZKAPI_STATE_SIGNING_KEY_Y", default_value = "0x1")]
+    state_signing_key_y: String,
+    #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_X", default_value = "0x0")]
+    clearance_signing_key_x: String,
+    #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_Y", default_value = "0x1")]
+    clearance_signing_key_y: String,
 }
 
 #[tokio::main]
@@ -89,14 +97,8 @@ async fn main() -> anyhow::Result<()> {
         demo_billing_token_address: args.demo_billing_token_address,
         demo_private_key: args.demo_private_key,
         demo_note_ttl_seconds: args.demo_note_ttl_seconds,
-        proof_mode: args
-            .proof_mode
-            .or_else(|| std::env::var("ZKAPI_PROOF_MODE").ok())
-            .unwrap_or_else(|| "stwo_scarb".to_string()),
-        cairo_dir: args
-            .cairo_dir
-            .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
-            .unwrap_or_else(|| "protocol/cairo".to_string()),
+        proof_mode: "groth16_bn254".to_string(),
+        cairo_dir: String::new(),
         trusted_epoch_roots: match args.trusted_epoch_roots {
             Some(path) => serde_json::from_slice(&std::fs::read(&path).map_err(|err| {
                 anyhow::anyhow!(
@@ -111,6 +113,19 @@ async fn main() -> anyhow::Result<()> {
                 )
             })?,
             None => Vec::new(),
+        },
+        proof_setup_dir: args.proof_setup_dir,
+        state_signing_key: CurvePointWire {
+            x: Felt252::from_hex(&args.state_signing_key_x)
+                .map_err(|err| anyhow::anyhow!("invalid state signing key x: {err}"))?,
+            y: Felt252::from_hex(&args.state_signing_key_y)
+                .map_err(|err| anyhow::anyhow!("invalid state signing key y: {err}"))?,
+        },
+        clearance_signing_key: CurvePointWire {
+            x: Felt252::from_hex(&args.clearance_signing_key_x)
+                .map_err(|err| anyhow::anyhow!("invalid clearance signing key x: {err}"))?,
+            y: Felt252::from_hex(&args.clearance_signing_key_y)
+                .map_err(|err| anyhow::anyhow!("invalid clearance signing key y: {err}"))?,
         },
     })?;
 

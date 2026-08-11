@@ -467,8 +467,7 @@ mod tests {
         assert_eq!(demo.status(), StatusCode::OK);
         let body = demo.into_body().collect().await.unwrap().to_bytes();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        // Default proof mode is production stwo_scarb -> label "stwo_cairo".
-        assert_eq!(value["runtime_proof_backend"], "stwo_cairo");
+        assert_eq!(value["runtime_proof_backend"], "groth16_bn254");
         assert_eq!(value["funding"]["models"][0]["id"], "demo-model");
     }
 }

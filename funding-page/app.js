@@ -252,7 +252,7 @@ function renderExecution() {
 
   const charge = e.protocol_response?.charge_applied;
   const nextAnchor = e.protocol_response?.next_anchor;
-  const xmssEpoch = e.protocol_response?.next_state_sig_epoch;
+  const stateSignature = e.protocol_response?.next_state_sig_root;
 
   els.requestResult.classList.remove("empty");
   els.requestResult.innerHTML = `
@@ -260,13 +260,13 @@ function renderExecution() {
     <div class="response-meta">
       <span>charge <strong>${charge ?? "—"}</strong></span>
       <span>next anchor <strong>${truncate(nextAnchor, 6)}</strong></span>
-      <span>xmss epoch <strong>${xmssEpoch ?? "—"}</strong></span>
+      <span>state signature <strong>${truncate(stateSignature, 6)}</strong></span>
     </div>
   `;
 
   els.traceCharge.textContent = charge != null ? String(charge) : "-";
   els.traceNextAnchor.textContent = truncate(nextAnchor);
-  els.traceXmss.textContent = xmssEpoch != null ? String(xmssEpoch) : "-";
+  els.traceXmss.textContent = truncate(stateSignature);
   if (e.protocol_response) {
     els.protocolOutput.textContent = pretty(e.protocol_response);
   }

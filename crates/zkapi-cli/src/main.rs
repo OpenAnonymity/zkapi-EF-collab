@@ -10,6 +10,7 @@ use zkapi_clientd::{
     WithdrawalMode,
 };
 use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
+use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
 #[derive(Debug, Parser)]
@@ -21,7 +22,7 @@ struct Cli {
     protocol_server_url: String,
     #[arg(long, default_value = "http://127.0.0.1:3001")]
     indexer_url: String,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 2)]
     protocol_version: u16,
     #[arg(long, default_value_t = 1)]
     chain_id: u64,
@@ -49,6 +50,20 @@ struct Cli {
     /// JSON file containing an array of on-chain-verified epoch root records.
     #[arg(long, value_name = "JSON_PATH")]
     trusted_epoch_roots: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "ZKAPI_PROOF_SETUP_DIR",
+        default_value = "protocol/setup/v2"
+    )]
+    proof_setup_dir: String,
+    #[arg(long, env = "ZKAPI_STATE_SIGNING_KEY_X", default_value = "0x0")]
+    state_signing_key_x: String,
+    #[arg(long, env = "ZKAPI_STATE_SIGNING_KEY_Y", default_value = "0x1")]
+    state_signing_key_y: String,
+    #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_X", default_value = "0x0")]
+    clearance_signing_key_x: String,
+    #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_Y", default_value = "0x1")]
+    clearance_signing_key_y: String,
     #[command(subcommand)]
     command: Commands,
 }
@@ -58,6 +73,18 @@ struct Cli {
 // complicate argument handling without improving the long-lived runtime.
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Generate the circuit-specific Groth16 proving and verification keys.
+    Setup {
+        #[arg(long, default_value = "protocol/setup/v2")]
+        output_dir: PathBuf,
+    },
+    /// Derive deployment-pinned public signing keys from server seeds.
+    SigningKeys {
+        #[arg(long, env = "ZKAPI_STATE_SEED")]
+        state_seed: String,
+        #[arg(long, env = "ZKAPI_CLEAR_SEED")]
+        clear_seed: String,
+    },
     Keygen,
     #[command(name = "clientd", alias = "auth", alias = "serve-auth")]
     Clientd {
@@ -90,29 +117,18 @@ enum Commands {
         openrouter_api_base: String,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
-        /// XMSS state-signing seed. Falls back to ZKAPI_STATE_SEED, then 0x1.
+        /// State-signing secret seed. Falls back to ZKAPI_STATE_SEED, then 0x1.
         #[arg(long)]
         state_seed: Option<String>,
-        /// XMSS clearance-signing seed. Falls back to ZKAPI_CLEAR_SEED, then 0x2.
+        /// Clearance-signing secret seed. Falls back to ZKAPI_CLEAR_SEED, then 0x2.
         #[arg(long)]
         clear_seed: Option<String>,
-        #[arg(long, default_value_t = 1)]
-        epoch: u32,
-        #[arg(long, default_value_t = zkapi_types::XMSS_TREE_HEIGHT)]
-        xmss_height: usize,
         #[arg(long, default_value = "0x0")]
         initial_root: String,
         #[arg(long)]
         indexer_url: Option<String>,
         #[arg(long, default_value_t = 1_000)]
         root_poll_interval_ms: u64,
-        /// Proof verifier: "stwo_scarb" (production) or "dev_witness_envelope"
-        /// (dev-only). Falls back to env ZKAPI_PROOF_MODE, then "stwo_scarb".
-        #[arg(long)]
-        proof_mode: Option<String>,
-        /// Cairo package dir for real Stwo verification. Env ZKAPI_CAIRO_DIR.
-        #[arg(long)]
-        cairo_dir: Option<String>,
     },
     Indexer {
         #[arg(long, default_value = "127.0.0.1:3001")]
@@ -187,6 +203,31 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command.clone() {
+        Commands::Setup { output_dir } => {
+            zkapi_proof::compact::setup(&output_dir)?;
+            print_json(&serde_json::json!({
+                "status": "ok",
+                "proof_backend": "groth16_bn254",
+                "output_dir": output_dir,
+            }))?;
+        }
+        Commands::SigningKeys {
+            state_seed,
+            clear_seed,
+        } => {
+            let state = zkapi_proof::compact::CompactSigner::from_seed(&parse_felt(
+                "state seed",
+                &state_seed,
+            )?);
+            let clearance = zkapi_proof::compact::CompactSigner::from_seed(&parse_felt(
+                "clearance seed",
+                &clear_seed,
+            )?);
+            print_json(&serde_json::json!({
+                "state_signing_key": state.public_key(),
+                "clearance_signing_key": clearance.public_key(),
+            }))?;
+        }
         Commands::Keygen => {
             let wallet = Wallet::new(client_config(&cli)?)
                 .map_err(|err| anyhow::anyhow!("failed to create wallet: {err}"))?;
@@ -213,20 +254,10 @@ async fn main() -> anyhow::Result<()> {
             db_path,
             state_seed,
             clear_seed,
-            epoch,
-            xmss_height,
             initial_root,
             indexer_url,
             root_poll_interval_ms,
-            proof_mode,
-            cairo_dir,
         } => {
-            let proof_mode = proof_mode
-                .or_else(|| std::env::var("ZKAPI_PROOF_MODE").ok())
-                .unwrap_or_else(|| "stwo_scarb".to_string());
-            let cairo_dir = cairo_dir
-                .or_else(|| std::env::var("ZKAPI_CAIRO_DIR").ok())
-                .unwrap_or_else(|| "protocol/cairo".to_string());
             let state_seed = resolve_secret(state_seed, std::env::var("ZKAPI_STATE_SEED").ok())
                 .unwrap_or_else(|| "0x1".to_string());
             let clear_seed = resolve_secret(clear_seed, std::env::var("ZKAPI_CLEAR_SEED").ok())
@@ -268,15 +299,12 @@ async fn main() -> anyhow::Result<()> {
                 db_path,
                 state_seed: parse_felt("state seed", &state_seed)?,
                 clear_seed: parse_felt("clear seed", &clear_seed)?,
-                epoch,
-                xmss_height,
                 initial_root: parse_felt("initial root", &initial_root)?,
                 indexer_url,
                 root_poll_interval_ms,
                 trusted_epoch_roots: load_trusted_epoch_roots(cli.trusted_epoch_roots.as_deref())?,
                 metered,
-                proof_mode,
-                cairo_dir,
+                proof_setup_dir: cli.proof_setup_dir.clone(),
                 ..Default::default()
             };
             zkapi_serverd::routes::run_server(config).await?;
@@ -383,10 +411,20 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
         demo_billing_token_address: cli.demo_billing_token_address.clone(),
         demo_private_key: cli.demo_private_key.clone(),
         demo_note_ttl_seconds: cli.demo_note_ttl_seconds,
-        proof_mode: std::env::var("ZKAPI_PROOF_MODE").unwrap_or_else(|_| "stwo_scarb".to_string()),
-        cairo_dir: std::env::var("ZKAPI_CAIRO_DIR")
-            .unwrap_or_else(|_| "protocol/cairo".to_string()),
+        proof_mode: "groth16_bn254".to_string(),
+        cairo_dir: String::new(),
         trusted_epoch_roots: load_trusted_epoch_roots(cli.trusted_epoch_roots.as_deref())?,
+        proof_setup_dir: cli.proof_setup_dir.clone(),
+        state_signing_key: parse_curve_point(
+            "state signing key",
+            &cli.state_signing_key_x,
+            &cli.state_signing_key_y,
+        )?,
+        clearance_signing_key: parse_curve_point(
+            "clearance signing key",
+            &cli.clearance_signing_key_x,
+            &cli.clearance_signing_key_y,
+        )?,
     })
     .map_err(Into::into)
 }
@@ -403,10 +441,20 @@ fn client_config(cli: &Cli) -> anyhow::Result<ClientConfig> {
         state_dir: cli.state_dir.display().to_string(),
         // CLI `client_config` only backs the local-only `keygen` command,
         // which does not generate request or withdrawal proofs.
-        proof_mode: ClientProofMode::StwoScarb {
-            cairo_dir: "protocol/cairo".to_string(),
+        proof_mode: ClientProofMode::Groth16 {
+            setup_dir: cli.proof_setup_dir.clone(),
         },
         trusted_epoch_roots: Vec::new(),
+        state_signing_key: parse_curve_point(
+            "state signing key",
+            &cli.state_signing_key_x,
+            &cli.state_signing_key_y,
+        )?,
+        clearance_signing_key: parse_curve_point(
+            "clearance signing key",
+            &cli.clearance_signing_key_x,
+            &cli.clearance_signing_key_y,
+        )?,
     })
 }
 
@@ -422,6 +470,13 @@ fn request_body(json: Option<String>, body_file: Option<PathBuf>) -> anyhow::Res
 
 fn parse_felt(label: &str, value: &str) -> anyhow::Result<Felt252> {
     Felt252::from_hex(value).map_err(|err| anyhow::anyhow!("invalid {label}: {err}"))
+}
+
+fn parse_curve_point(label: &str, x: &str, y: &str) -> anyhow::Result<CurvePointWire> {
+    Ok(CurvePointWire {
+        x: parse_felt(&format!("{label} x"), x)?,
+        y: parse_felt(&format!("{label} y"), y)?,
+    })
 }
 
 fn resolve_secret(cli_value: Option<String>, env_value: Option<String>) -> Option<String> {

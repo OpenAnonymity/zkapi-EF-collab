@@ -80,7 +80,7 @@ impl MeteredConfig {
 /// Configuration for the zkAPI server.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Protocol version (must be 1 for v1).
+    /// Protocol version (must be 2).
     pub protocol_version: u16,
     /// Chain ID this server is bound to.
     pub chain_id: u64,
@@ -110,13 +110,13 @@ pub struct ServerConfig {
     pub db_path: String,
     /// Timeout in milliseconds for recovery of reserved-but-unfinalized entries.
     pub recovery_timeout_ms: u64,
-    /// Seed for the state-signing XMSS tree.
+    /// Seed for the proof-friendly state-signing key.
     pub state_seed: Felt252,
-    /// Seed for the clearance-signing XMSS tree.
+    /// Seed for the proof-friendly clearance-signing key.
     pub clear_seed: Felt252,
-    /// Published XMSS epoch served by this process.
+    /// Retired v1 compatibility field; ignored by the v2 processor.
     pub epoch: u32,
-    /// XMSS tree height.
+    /// Retired v1 compatibility field; ignored by the v2 processor.
     pub xmss_height: usize,
     /// Initial Merkle root the server should accept until the indexer updates it.
     pub initial_root: Felt252,
@@ -124,32 +124,30 @@ pub struct ServerConfig {
     pub indexer_url: Option<String>,
     /// Poll interval for indexer root refresh.
     pub root_poll_interval_ms: u64,
-    /// Previously published signing roots accepted for non-current epochs.
+    /// Retired v1 compatibility field; ignored by the v2 processor.
     pub trusted_epoch_roots: Vec<EpochRoots>,
     /// Configuration for the metered upstream provider (when
     /// `provider_kind == Metered`).
     pub metered: Option<MeteredConfig>,
-    /// Proof verifier backend: "stwo_scarb" (production, real STARK) or
-    /// "dev_witness_envelope" (dev-only witness replay; explicit opt-in).
+    /// Retired v1 compatibility field; v2 always uses Groth16 BN254.
     pub proof_mode: String,
-    /// Cairo package dir for real Stwo verification (proof_mode=stwo_scarb).
+    /// Retired v1 compatibility field; ignored by the v2 processor.
     pub cairo_dir: String,
+    /// Directory containing the v2 Groth16 proving/verifying key files.
+    pub proof_setup_dir: String,
 }
 
 impl ServerConfig {
     /// Wire label for the configured proof backend.
     pub fn proof_backend_label(&self) -> &'static str {
-        match self.proof_mode.as_str() {
-            "dev_witness_envelope" => "dev_witness_envelope",
-            _ => "stwo_cairo",
-        }
+        "groth16_bn254"
     }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            protocol_version: 1,
+            protocol_version: 2,
             chain_id: 1,
             contract_address: Felt252::ZERO,
             request_charge_cap: 1_000_000,
@@ -173,8 +171,9 @@ impl Default for ServerConfig {
             root_poll_interval_ms: 1_000,
             trusted_epoch_roots: Vec::new(),
             metered: None,
-            proof_mode: "stwo_scarb".to_string(),
+            proof_mode: "groth16_bn254".to_string(),
             cairo_dir: "protocol/cairo".to_string(),
+            proof_setup_dir: "protocol/setup/v2".to_string(),
         }
     }
 }

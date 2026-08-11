@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,30 +41,30 @@ pub struct AuthConfig {
     pub demo_billing_token_address: Option<String>,
     pub demo_private_key: Option<String>,
     pub demo_note_ttl_seconds: Option<u64>,
-    /// Proof backend the wallet uses: "stwo_scarb" (production, real STARK) or
-    /// "dev_witness_envelope" (dev-only witness replay; must be selected
-    /// explicitly). Defaults to production.
+    /// Retired v1 compatibility field; v2 always uses Groth16 BN254.
     pub proof_mode: String,
-    /// Cairo package dir for real Stwo proving (used when proof_mode=stwo_scarb).
+    /// Retired v1 compatibility field; ignored by the v2 wallet.
     pub cairo_dir: String,
     /// On-chain-verified server signing roots trusted by this client.
     pub trusted_epoch_roots: Vec<EpochRoots>,
+    /// Circuit-specific Groth16 key directory.
+    pub proof_setup_dir: String,
+    /// Deployment-pinned proof-friendly signing keys.
+    pub state_signing_key: CurvePointWire,
+    pub clearance_signing_key: CurvePointWire,
 }
 
 impl AuthConfig {
     /// Wire label for the configured proof backend.
     pub fn proof_backend_label(&self) -> &'static str {
-        match self.proof_mode.as_str() {
-            "dev_witness_envelope" => "dev_witness_envelope",
-            _ => "stwo_cairo",
-        }
+        "groth16_bn254"
     }
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            protocol_version: 1,
+            protocol_version: 2,
             chain_id: 1,
             contract_address: Felt252::ZERO,
             request_charge_cap: 1_000_000,
@@ -79,9 +80,18 @@ impl Default for AuthConfig {
             demo_billing_token_address: None,
             demo_private_key: None,
             demo_note_ttl_seconds: None,
-            proof_mode: "stwo_scarb".to_string(),
+            proof_mode: "groth16_bn254".to_string(),
             cairo_dir: "protocol/cairo".to_string(),
             trusted_epoch_roots: Vec::new(),
+            proof_setup_dir: "protocol/setup/v2".to_string(),
+            state_signing_key: CurvePointWire {
+                x: Felt252::ZERO,
+                y: Felt252::ONE,
+            },
+            clearance_signing_key: CurvePointWire {
+                x: Felt252::ZERO,
+                y: Felt252::ONE,
+            },
         }
     }
 }
@@ -93,16 +103,16 @@ mod tests {
     #[test]
     fn proof_backend_label_maps_modes() {
         // Production default.
-        assert_eq!(AuthConfig::default().proof_backend_label(), "stwo_cairo");
+        assert_eq!(AuthConfig::default().proof_backend_label(), "groth16_bn254");
         let dev = AuthConfig {
             proof_mode: "dev_witness_envelope".to_string(),
             ..Default::default()
         };
-        assert_eq!(dev.proof_backend_label(), "dev_witness_envelope");
+        assert_eq!(dev.proof_backend_label(), "groth16_bn254");
         let stwo = AuthConfig {
             proof_mode: "stwo_scarb".to_string(),
             ..Default::default()
         };
-        assert_eq!(stwo.proof_backend_label(), "stwo_cairo");
+        assert_eq!(stwo.proof_backend_label(), "groth16_bn254");
     }
 }

@@ -5,14 +5,6 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-dev-witness-envelope = [
-    "zkapi-client/dev-witness-envelope",
-    "zkapi-clientd/dev-witness-envelope",
-    "zkapi-serverd/dev-witness-envelope",
-]
-
 [[bin]]
 name = "zkapi"
 path = "src/main.rs"
@@ -25,6 +17,7 @@ zkapi-auth = { path = "../zkapi-auth" }
 zkapi-client = { path = "../../protocol/rust/crates/zkapi-client" }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
+zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

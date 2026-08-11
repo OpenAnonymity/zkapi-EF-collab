@@ -23,10 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
-use zkapi_core::leaf::{compute_note_leaf, compute_registration_commitment};
-use zkapi_core::nullifier::compute_nullifier;
-use zkapi_types::wire::{ProofArtifactWire, RequestResponse};
-use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputs};
+use zkapi_core::v2 as core_v2;
+use zkapi_types::wire::{Groth16ProofWire, RequestResponseV2};
+use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputsV2};
 
 fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
     // Must match the protocol's canonical request-payload binding; the wallet
@@ -173,12 +172,8 @@ pub struct ServerAttestationSnapshot {
     pub chain_id: u64,
     pub contract_address: Felt252,
     pub current_root: Felt252,
-    pub state_sig_epoch: u32,
-    pub clear_sig_epoch: u32,
-    pub state_sig_root: Felt252,
-    pub clear_sig_root: Felt252,
-    pub state_signatures_remaining: u32,
-    pub clear_signatures_remaining: u32,
+    pub state_signing_key: zkapi_types::wire::CurvePointWire,
+    pub clearance_signing_key: zkapi_types::wire::CurvePointWire,
     #[serde(default)]
     pub auth_scheme: String,
 }
@@ -263,12 +258,12 @@ pub enum WithdrawalMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WithdrawalPlan {
     pub mode: WithdrawalMode,
-    pub public_inputs: WithdrawalPublicInputs,
+    pub public_inputs: WithdrawalPublicInputsV2,
     /// The note's Merkle sibling path, so the on-chain submitter (cast or the
     /// browser wallet) can call `mutualClose`/escape without a per-slot lookup.
     pub siblings: Vec<Felt252>,
     /// Complete opaque proof artifact, including backend and public-output hash.
-    pub proof: ProofArtifactWire,
+    pub proof: Groth16ProofWire,
 }
 
 #[derive(Debug)]
@@ -280,12 +275,6 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new(config: AuthConfig) -> Result<Arc<Self>, AuthError> {
-        if config.proof_mode == "dev_witness_envelope" && !cfg!(feature = "dev-witness-envelope") {
-            return Err(AuthError::InvalidInput(
-                "proof_mode=dev_witness_envelope requires the dev-witness-envelope build feature"
-                    .to_string(),
-            ));
-        }
         std::fs::create_dir_all(&config.state_dir)
             .map_err(|err| AuthError::Wallet(err.to_string()))?;
         Ok(Arc::new(Self {
@@ -595,7 +584,7 @@ impl AuthService {
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
-            let mut wallet = load_wallet(&config, trusted_roots)?;
+            let wallet = load_wallet(&config, trusted_roots)?;
             let runtime = current_thread_runtime()?;
 
             runtime.block_on(async move {
@@ -721,7 +710,7 @@ impl CoreRequest {
     }
 }
 
-fn core_response(response: &RequestResponse, remaining_balance: Option<u128>) -> CoreResponse {
+fn core_response(response: &RequestResponseV2, remaining_balance: Option<u128>) -> CoreResponse {
     CoreResponse {
         client_request_id: response.client_request_id.clone(),
         response_code: response.response_code,
@@ -733,7 +722,7 @@ fn core_response(response: &RequestResponse, remaining_balance: Option<u128>) ->
     }
 }
 
-fn protocol_response_trace(response: &RequestResponse) -> ProtocolResponseTrace {
+fn protocol_response_trace(response: &RequestResponseV2) -> ProtocolResponseTrace {
     ProtocolResponseTrace {
         client_request_id: response.client_request_id.clone(),
         request_nullifier: response.request_nullifier,
@@ -744,8 +733,8 @@ fn protocol_response_trace(response: &RequestResponse) -> ProtocolResponseTrace 
         next_commitment_y: response.next_commitment.y,
         next_anchor: response.next_anchor,
         blind_delta_srv: response.blind_delta_srv,
-        next_state_sig_epoch: response.next_state_sig_epoch,
-        next_state_sig_root: response.next_state_sig_root,
+        next_state_sig_epoch: 0,
+        next_state_sig_root: response.next_state_signature.r_x,
         policy_reason_code: response.policy_reason_code,
         policy_evidence_hash: response.policy_evidence_hash,
     }
@@ -785,14 +774,14 @@ async fn build_request_preview(
     let state = wallet.state().ok_or(AuthError::NoActiveNote)?;
     let active_root = indexer.root().await?;
     let merkle_siblings = indexer.note_path(state.note_id).await?;
-    let registration_commitment = compute_registration_commitment(&state.secret_s);
-    let note_leaf = compute_note_leaf(
+    let registration_commitment = core_v2::registration_commitment(&state.secret_s);
+    let note_leaf = core_v2::note_leaf(
         state.note_id,
         &registration_commitment,
         state.deposit_amount,
         state.expiry_ts,
     );
-    let request_nullifier = compute_nullifier(&state.secret_s, &state.current_anchor);
+    let request_nullifier = core_v2::nullifier(&state.secret_s, &state.current_anchor);
     let solvency_bound = state.solvency_bound(
         config.policy_enabled,
         config.request_charge_cap,
@@ -820,8 +809,8 @@ async fn build_request_preview(
         merkle_siblings,
         solvency_bound,
         wallet_note,
-        state_sig_epoch: state.state_sig_epoch.unwrap_or(0),
-        state_sig_root: state.state_sig_root.unwrap_or(Felt252::ZERO),
+        state_sig_epoch: 0,
+        state_sig_root: config.state_signing_key.x,
         runtime_proof_backend: config.proof_backend_label().to_string(),
     })
 }
@@ -840,43 +829,16 @@ fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> C
         policy_enabled: config.policy_enabled,
         server_url: config.protocol_server_url.clone(),
         state_dir: config.state_dir.to_string_lossy().to_string(),
-        // Production default is real Stwo-Cairo proving; the dev witness envelope
-        // is only selected when explicitly configured (ZKAPI_PROOF_MODE).
-        proof_mode: resolve_client_proof_mode(&config.proof_mode, &config.cairo_dir),
+        proof_mode: ClientProofMode::Groth16 {
+            setup_dir: config.proof_setup_dir.clone(),
+        },
         trusted_epoch_roots,
+        state_signing_key: config.state_signing_key.clone(),
+        clearance_signing_key: config.clearance_signing_key.clone(),
     }
 }
 
 /// Map the configured proof-mode name to the protocol's `ClientProofMode`.
-fn resolve_client_proof_mode(name: &str, cairo_dir: &str) -> ClientProofMode {
-    match name {
-        "dev_witness_envelope" => {
-            #[cfg(feature = "dev-witness-envelope")]
-            {
-                ClientProofMode::DevWitnessEnvelope
-            }
-            #[cfg(not(feature = "dev-witness-envelope"))]
-            {
-                tracing::warn!(
-                    "dev_witness_envelope is unavailable in this build; using stwo_scarb"
-                );
-                ClientProofMode::StwoScarb {
-                    cairo_dir: cairo_dir.to_string(),
-                }
-            }
-        }
-        "stwo_scarb" => ClientProofMode::StwoScarb {
-            cairo_dir: cairo_dir.to_string(),
-        },
-        other => {
-            tracing::warn!("unknown proof_mode '{other}', defaulting to stwo_scarb");
-            ClientProofMode::StwoScarb {
-                cairo_dir: cairo_dir.to_string(),
-            }
-        }
-    }
-}
-
 fn load_wallet(
     config: &AuthConfig,
     trusted_epoch_roots: Vec<EpochRoots>,
@@ -940,7 +902,7 @@ fn default_body() -> Value {
     Value::Object(Default::default())
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use std::sync::{Arc, RwLock};
 

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zkapi_types::{Felt252, NullifierStatus, XmssSignature};
+use zkapi_types::{Felt252, NullifierStatus, SchnorrSignature};
 
 use crate::error::ServerError;
 
@@ -29,7 +29,7 @@ pub struct TranscriptRecord {
     pub blind_delta_srv: Option<Felt252>,
     pub next_state_sig_epoch: Option<u32>,
     pub next_state_sig_root: Option<Felt252>,
-    pub next_state_sig: Option<XmssSignature>,
+    pub next_state_sig: Option<SchnorrSignature>,
     pub policy_reason_code: Option<u32>,
     pub policy_evidence_hash: Option<Felt252>,
     pub proof_blob: Option<Vec<u8>>,
@@ -357,7 +357,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> 
     let finalized_at: Option<i64> = row.get("finalized_at")?;
 
     let next_state_sig =
-        next_state_sig_json.and_then(|json| serde_json::from_str::<XmssSignature>(&json).ok());
+        next_state_sig_json.and_then(|json| serde_json::from_str::<SchnorrSignature>(&json).ok());
 
     Ok(TranscriptRecord {
         nullifier: Felt252::from_hex(&nullifier_hex).unwrap_or(Felt252::ZERO),

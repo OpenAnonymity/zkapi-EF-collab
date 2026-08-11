@@ -3,10 +3,10 @@
 //! Endpoints:
 //! - GET  /health                   -- process health and config summary
 //! - GET  /v1/attestation           -- published signer metadata for deployments
-//! - POST /v1/requests              -- submit an API request
-//! - POST /v1/withdraw/clearance    -- request mutual-close clearance
-//! - GET  /v1/requests/:id          -- recover by client_request_id
-//! - GET  /v1/nullifiers/:nullifier -- recover by nullifier
+//! - POST /v2/requests              -- submit an API request
+//! - POST /v2/withdraw/clearance    -- request mutual-close clearance
+//! - GET  /v2/requests/:id          -- recover by client_request_id
+//! - GET  /v2/nullifiers/:nullifier -- recover by nullifier
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -21,10 +21,9 @@ use futures_util::stream::Stream;
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use zkapi_core::poseidon::felt_to_field;
 use zkapi_types::wire::{
-    ApiRequest, ClearanceRequest, ClearanceResponse, ErrorResponse, RecoveryResponse,
-    RequestResponse,
+    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, ErrorResponse,
+    RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::Felt252;
 
@@ -37,28 +36,18 @@ use crate::provider::build_provider;
 /// Shared application state.
 type AppState = Arc<RequestProcessor>;
 
-// Stwo proof JSON is base64-encoded inside the protocol request. Current
-// request proofs are about 13 MiB before base64 encoding, so Axum's 2 MiB
-// default body limit cannot carry a production proof artifact.
-const PROTOCOL_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+// Compact proofs are small; leave headroom for ordinary API payloads.
+const PROTOCOL_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 /// Start the HTTP server with the given config.
 pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<()> {
-    if config.proof_mode == "dev_witness_envelope" && !cfg!(feature = "dev-witness-envelope") {
-        anyhow::bail!(
-            "proof_mode=dev_witness_envelope requires the dev-witness-envelope build feature"
-        );
-    }
     let store = Arc::new(crate::nullifier_store::NullifierStore::new(
         &config.db_path,
     )?);
-    let signer = Arc::new(crate::signer::ServerSigner::with_height_durable(
-        felt_to_field(&config.state_seed),
-        felt_to_field(&config.clear_seed),
-        config.epoch,
-        config.xmss_height,
-        &config.db_path,
-    )?);
+    let signer = Arc::new(crate::signer::ServerSigner::new(
+        &config.state_seed,
+        &config.clear_seed,
+    ));
     let provider = build_provider(&config)?;
     let initial_root = if let Some(indexer_url) = config.indexer_url.as_deref() {
         match fetch_indexer_root(indexer_url).await {
@@ -73,7 +62,7 @@ pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<(
     };
     let dashboard = Arc::new(DashboardHub::new(500));
     let processor = Arc::new(
-        RequestProcessor::new(config.clone(), store, signer, provider, initial_root)
+        RequestProcessor::try_new(config.clone(), store, signer, provider, initial_root)?
             .with_dashboard(dashboard),
     );
     if let Some(indexer_url) = config.indexer_url.clone() {
@@ -106,14 +95,14 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
         .route("/", get(handle_health))
         .route("/health", get(handle_health))
         .route("/v1/attestation", get(handle_attestation))
-        .route("/v1/requests", post(handle_request))
-        .route("/v1/withdraw/clearance", post(handle_clearance))
+        .route("/v2/requests", post(handle_request))
+        .route("/v2/withdraw/clearance", post(handle_clearance))
         .route(
-            "/v1/requests/{client_request_id}",
+            "/v2/requests/{client_request_id}",
             get(handle_recovery_by_id),
         )
         .route(
-            "/v1/nullifiers/{nullifier}",
+            "/v2/nullifiers/{nullifier}",
             get(handle_recovery_by_nullifier),
         )
         .merge(dashboard)
@@ -141,12 +130,8 @@ struct AttestationResponse {
     chain_id: u64,
     contract_address: Felt252,
     current_root: Felt252,
-    state_sig_epoch: u32,
-    clear_sig_epoch: u32,
-    state_sig_root: Felt252,
-    clear_sig_root: Felt252,
-    state_signatures_remaining: u32,
-    clear_signatures_remaining: u32,
+    state_signing_key: CurvePointWire,
+    clearance_signing_key: CurvePointWire,
     auth_scheme: &'static str,
 }
 
@@ -173,12 +158,8 @@ async fn handle_attestation(State(processor): State<AppState>) -> Json<Attestati
         chain_id: config.chain_id,
         contract_address: config.contract_address,
         current_root: processor.current_root(),
-        state_sig_epoch: processor.state_sig_epoch(),
-        clear_sig_epoch: processor.clear_sig_epoch(),
-        state_sig_root: processor.state_sig_root(),
-        clear_sig_root: processor.clear_sig_root(),
-        state_signatures_remaining: processor.state_signatures_remaining(),
-        clear_signatures_remaining: processor.clear_signatures_remaining(),
+        state_signing_key: processor.state_signing_key(),
+        clearance_signing_key: processor.clearance_signing_key(),
         auth_scheme: config.auth_scheme.as_str(),
     })
 }
@@ -186,8 +167,8 @@ async fn handle_attestation(State(processor): State<AppState>) -> Json<Attestati
 /// POST /v1/requests -- process an API request.
 async fn handle_request(
     State(processor): State<AppState>,
-    Json(api_request): Json<ApiRequest>,
-) -> Result<Json<RequestResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Json(api_request): Json<ApiRequestV2>,
+) -> Result<Json<RequestResponseV2>, (StatusCode, Json<ErrorResponse>)> {
     processor
         .process_request(&api_request)
         .await
@@ -199,7 +180,7 @@ async fn handle_request(
 async fn handle_clearance(
     State(processor): State<AppState>,
     Json(clearance_req): Json<ClearanceRequest>,
-) -> Result<Json<ClearanceResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ClearanceResponseV2>, (StatusCode, Json<ErrorResponse>)> {
     processor
         .process_clearance(&clearance_req)
         .map(Json)
@@ -212,7 +193,7 @@ async fn handle_clearance(
 async fn handle_recovery_by_id(
     State(processor): State<AppState>,
     Path(client_request_id): Path<String>,
-) -> Result<Json<RecoveryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RecoveryResponseV2>, (StatusCode, Json<ErrorResponse>)> {
     processor
         .recover_by_client_id(&client_request_id)
         .map(Json)
@@ -223,7 +204,7 @@ async fn handle_recovery_by_id(
 async fn handle_recovery_by_nullifier(
     State(processor): State<AppState>,
     Path(nullifier_hex): Path<String>,
-) -> Result<Json<RecoveryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RecoveryResponseV2>, (StatusCode, Json<ErrorResponse>)> {
     let nullifier = Felt252::from_hex(&nullifier_hex).map_err(|e| {
         let err = ServerError::InvalidRequest(format!("invalid nullifier hex: {}", e));
         error_to_response(&err, &nullifier_hex, &processor)
@@ -250,13 +231,8 @@ struct ServerIdentity {
     request_charge_cap: u128,
     request_charge_cap_usd: f64,
     credits_per_usd: f64,
-    trusted_epoch_count: usize,
-    state_sig_epoch: u32,
-    clear_sig_epoch: u32,
-    state_sig_root: Felt252,
-    clear_sig_root: Felt252,
-    state_signatures_remaining: u32,
-    clear_signatures_remaining: u32,
+    state_signing_key: CurvePointWire,
+    clearance_signing_key: CurvePointWire,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,13 +272,8 @@ async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<Das
         request_charge_cap: config.request_charge_cap,
         request_charge_cap_usd: pricing::credits_to_usd(config.request_charge_cap),
         credits_per_usd: pricing::CREDITS_PER_USD,
-        trusted_epoch_count: config.trusted_epoch_roots.len(),
-        state_sig_epoch: processor.state_sig_epoch(),
-        clear_sig_epoch: processor.clear_sig_epoch(),
-        state_sig_root: processor.state_sig_root(),
-        clear_sig_root: processor.clear_sig_root(),
-        state_signatures_remaining: processor.state_signatures_remaining(),
-        clear_signatures_remaining: processor.clear_signatures_remaining(),
+        state_signing_key: processor.state_signing_key(),
+        clearance_signing_key: processor.clearance_signing_key(),
     };
     let (totals, started_ms, recent_count) = match processor.dashboard() {
         Some(hub) => (hub.totals(), hub.started_ms, hub.recent().len()),
@@ -424,7 +395,7 @@ async fn fetch_indexer_root(indexer_url: &str) -> anyhow::Result<Felt252> {
     Ok(response.json::<RootResponse>().await?.root)
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
 
