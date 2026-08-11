@@ -679,7 +679,16 @@ async fn fund_public_demo(
         )
     })?;
     let address = match requested_address {
-        Some(address) => normalize_address(address)?,
+        Some(address) => {
+            let requested = normalize_address(address)?;
+            let signer = cast_interactive_address()?;
+            if signer != requested {
+                anyhow::bail!(
+                    "--address {requested} does not match the private key's address {signer}"
+                );
+            }
+            requested
+        }
         None => cast_interactive_address()?,
     };
     let plan = service.prepare_deposit(amount).await?;

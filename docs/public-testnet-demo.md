@@ -39,6 +39,9 @@ To choose the funded address explicitly:
   --address 0xYOUR_PUBLIC_TESTNET_ADDRESS
 ```
 
+The first private-key prompt verifies that the supplied address belongs to that
+key before any funding transaction is sent.
+
 If `--address` is omitted, `cast wallet address --interactive` derives it from
 the private key entered at the terminal. Use a different public v2 deployment
 manifest with `--deployment <URL_OR_PATH>`. The public public testnet manifest is the

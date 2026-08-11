@@ -53,10 +53,10 @@ It then serves standard APIs on `127.0.0.1:11434`:
 - OpenAI Responses: `/v1/responses`
 - Ollama chat: `/api/chat`
 
-Choose an address with `--address`, use a different deployment manifest with
-`--deployment`, or start without funding via `--no-fund`. The public public testnet
-vault accepts its configured demo ERC-20; native-ETH funding requires a
-separate native-asset vault deployment.
+Choose an address with `--address` (the first key prompt verifies it), use a
+different deployment manifest with `--deployment`, or start without funding via
+`--no-fund`. The public public testnet vault accepts its configured demo ERC-20;
+native-ETH funding requires a separate native-asset vault deployment.
 
 For example, with `zkapi client` running:
 
