@@ -44,13 +44,15 @@ below in its client manifest:
 ```bash
 export ZKAPI_BASE='https://DEPLOYMENT_HOST'
 export ZKAPI_VAULT='0x...'
+export ZKAPI_TOKEN='0x...'
 export ZKAPI_STATE_SIGNING_KEY_X='0x...'
 export ZKAPI_STATE_SIGNING_KEY_Y='0x...'
 export ZKAPI_CLEARANCE_SIGNING_KEY_X='0x...'
 export ZKAPI_CLEARANCE_SIGNING_KEY_Y='0x...'
+export ZKAPI_STATE_DIR="$PWD/.zkapi-public-testnet"
 
 ZKAPI_ARGS=(
-  --state-dir "$PWD/.zkapi-public-testnet"
+  --state-dir "$ZKAPI_STATE_DIR"
   --protocol-server-url "$ZKAPI_BASE"
   --indexer-url "$ZKAPI_BASE"
   --protocol-version 2
@@ -67,18 +69,54 @@ ZKAPI_ARGS=(
 ```
 
 Generate deposit parameters, submit the returned commitment and Merkle path to
-the vault, then confirm the mined note locally:
+the vault, then confirm the mined note locally. The commands below use Foundry's
+`cast`, `curl`, and `jq` and keep the note secret in the private state directory:
 
 ```bash
-./target/release/zkapi "${ZKAPI_ARGS[@]}" prepare-deposit --amount 5000000
+export PUBLIC_TESTNET_RPC_URL='https://...'
+export PUBLIC_TESTNET_PRIVATE_KEY='0x...'
+export ZKAPI_DEPOSITOR="$(cast wallet address --private-key "$PUBLIC_TESTNET_PRIVATE_KEY")"
+
+install -d -m 700 "$ZKAPI_STATE_DIR"
+umask 077
+ZKAPI_PLAN="$ZKAPI_STATE_DIR/deposit-plan.json"
+./target/release/zkapi "${ZKAPI_ARGS[@]}" prepare-deposit \
+  --amount 5000000 > "$ZKAPI_PLAN"
+
+ZKAPI_NOTE_ID="$(jq -r '.next_note_id' "$ZKAPI_PLAN")"
+ZKAPI_AMOUNT="$(jq -r '.amount' "$ZKAPI_PLAN")"
+ZKAPI_COMMITMENT="$(jq -r '.commitment' "$ZKAPI_PLAN")"
+ZKAPI_SIBLINGS="$(jq -jr '"[" + (.zero_path | join(",")) + "]"' "$ZKAPI_PLAN")"
+
+# The public testnet demo token has a public faucet-style mint. Skip this transaction
+# when the depositor already has enough credits.
+cast send --rpc-url "$PUBLIC_TESTNET_RPC_URL" --private-key "$PUBLIC_TESTNET_PRIVATE_KEY" \
+  "$ZKAPI_TOKEN" 'mint(address,uint256)' "$ZKAPI_DEPOSITOR" "$ZKAPI_AMOUNT"
+cast send --rpc-url "$PUBLIC_TESTNET_RPC_URL" --private-key "$PUBLIC_TESTNET_PRIVATE_KEY" \
+  "$ZKAPI_TOKEN" 'approve(address,uint256)' "$ZKAPI_VAULT" "$ZKAPI_AMOUNT"
+cast send --rpc-url "$PUBLIC_TESTNET_RPC_URL" --private-key "$PUBLIC_TESTNET_PRIVATE_KEY" \
+  "$ZKAPI_VAULT" 'deposit(bytes32,uint128,uint256[32])' \
+  "$ZKAPI_COMMITMENT" "$ZKAPI_AMOUNT" "$ZKAPI_SIBLINGS"
+
+ZKAPI_EXPIRY_TS="$(cast call --rpc-url "$PUBLIC_TESTNET_RPC_URL" "$ZKAPI_VAULT" \
+  'notes(uint32)(bytes32,uint128,uint64,uint8)' "$ZKAPI_NOTE_ID" | \
+  awk 'NR == 3 { print $1 }')"
+
+until [ "$(curl -fsS "$ZKAPI_BASE/v1/tree/next-note-id" | \
+  jq -r '.next_note_id')" -gt "$ZKAPI_NOTE_ID" ]; do
+  sleep 3
+done
 
 ./target/release/zkapi "${ZKAPI_ARGS[@]}" confirm-deposit \
-  --secret 0x... --note-id 0 --amount 5000000 \
-  --expiry-ts <EXPIRY_TS_FROM_NOTE_DEPOSITED_EVENT>
+  --secret "$(jq -r '.secret' "$ZKAPI_PLAN")" \
+  --note-id "$ZKAPI_NOTE_ID" --amount "$ZKAPI_AMOUNT" \
+  --expiry-ts "$ZKAPI_EXPIRY_TS"
 ```
 
-Use the actual bucketed `expiryTs` from the `NoteDeposited` event in the confirm
-step. Once confirmed, a chat request is entirely command-line driven:
+`cast send` waits for the transaction receipt. The confirmation uses the actual
+bucketed `expiryTs` stored by the vault and waits until the public indexer has
+observed the note. Once confirmed, a chat request is entirely command-line
+driven:
 
 ```bash
 ./target/release/zkapi "${ZKAPI_ARGS[@]}" request \
