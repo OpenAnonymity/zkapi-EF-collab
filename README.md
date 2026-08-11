@@ -20,8 +20,9 @@ even though a STARK is not.
 ## Build and test
 
 ```bash
-git clone --recurse-submodules git@github.com:OpenAnonymity/zkapi-ef.git
+git clone git@github.com:OpenAnonymity/zkapi-ef.git
 cd zkapi-ef
+git submodule update --init --recursive
 cargo build --release --bin zkapi
 cargo test --workspace
 (cd protocol/contracts && forge test)
