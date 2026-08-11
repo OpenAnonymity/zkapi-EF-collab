@@ -55,6 +55,14 @@ is useful when the selected wallet already has enough demo credits:
 ./target/release/zkapi client --skip-mint --initial-credits 10000000
 ```
 
+An explicit `--initial-credits` value must be at least twice the deployment's
+per-request proof bound. This keeps the note usable after a maximum-cost first
+request; the public demo's 5,000,000-credit default is five times its bound.
+If an existing note eventually falls to or below the bound, the launcher
+reports its balance and asks for a fresh `--state-dir` instead of starting a
+gateway that would become unusable after at most one more paid request. Keep
+the old directory if you intend to withdraw that note's remaining balance.
+
 The public vault accepts its configured test ERC-20 billing token, not native
 ETH. Native ETH payments require a separate native-asset vault deployment and
 are deliberately not silently substituted by this client.

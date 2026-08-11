@@ -534,7 +534,8 @@ async fn run_one_command_client(
     ensure_private_state_dir(&state_dir)?;
     let service = auth_service_from_manifest(&manifest, state_dir.clone(), listen)?;
 
-    if !service.status().await?.has_note {
+    let status = service.status().await?;
+    if !status.has_note {
         if no_fund {
             eprintln!(
                 "No active zkAPI note in {}. Starting without funding; requests will return 402 until funded.",
@@ -554,6 +555,23 @@ async fn run_one_command_client(
                 skip_mint,
             )
             .await?;
+        }
+    } else if let Some(note) = status.note {
+        if note.current_balance <= manifest.request_charge_cap {
+            if no_fund {
+                eprintln!(
+                    "Warning: active note {} has {} credits and no reserve beyond this deployment's {}-credit per-request proof bound. Paid requests may return 402.",
+                    note.note_id, note.current_balance, manifest.request_charge_cap
+                );
+            } else {
+                anyhow::bail!(
+                    "active note {} in {} has {} credits and no reserve beyond this deployment's {}-credit per-request proof bound. Preserve that state for withdrawal, then start a fresh demo note with --state-dir <NEW_DIRECTORY>",
+                    note.note_id,
+                    state_dir.display(),
+                    note.current_balance,
+                    manifest.request_charge_cap
+                );
+            }
         }
     }
 
@@ -666,10 +684,11 @@ async fn fund_public_demo(
     amount: u128,
     skip_mint: bool,
 ) -> anyhow::Result<()> {
-    if amount < manifest.request_charge_cap {
+    let minimum = minimum_initial_credits(manifest.request_charge_cap)?;
+    if amount < minimum {
         anyhow::bail!(
-            "initial credits {amount} are below this deployment's per-request proof bound {}; choose --initial-credits at least that large",
-            manifest.request_charge_cap
+            "initial credits {amount} leave no safe balance after one maximum-cost request; choose --initial-credits at least {minimum} (twice this deployment's {}-credit per-request proof bound)",
+            manifest.request_charge_cap,
         );
     }
     let token = manifest.billing_token_address.as_deref().ok_or_else(|| {
@@ -749,6 +768,15 @@ async fn fund_public_demo(
     Ok(())
 }
 
+fn minimum_initial_credits(request_charge_cap: u128) -> anyhow::Result<u128> {
+    if request_charge_cap == 0 {
+        anyhow::bail!("deployment request charge cap must be greater than zero");
+    }
+    request_charge_cap.checked_mul(2).ok_or_else(|| {
+        anyhow::anyhow!("deployment request charge cap {request_charge_cap} is too large")
+    })
+}
+
 async fn wait_for_indexed_note(indexer_url: &str, note_id: u32) -> anyhow::Result<()> {
     let target = note_id.saturating_add(1);
     let url = format!("{}/v1/tree/next-note-id", indexer_url.trim_end_matches('/'));
@@ -798,7 +826,7 @@ fn read_note_expiry(manifest: &DeploymentManifest, note_id: u32) -> anyhow::Resu
 }
 
 fn cast_interactive_address() -> anyhow::Result<String> {
-    eprintln!("No --address supplied. cast will prompt for the depositor private key to derive its address.");
+    eprintln!("cast will prompt for the depositor private key to derive and verify its address.");
     let output = Command::new("cast")
         .args(["wallet", "address", "--interactive"])
         .stdin(Stdio::inherit())
@@ -1187,6 +1215,13 @@ mod tests {
             "0x0000000000000000000000000000000000000000000000000000000000000001"
         );
         assert_eq!(felt_array_argument(&[felt]), "[0x1]");
+    }
+
+    #[test]
+    fn initial_deposit_reserves_one_maximum_cost_request() {
+        assert_eq!(minimum_initial_credits(1_000_000).unwrap(), 2_000_000);
+        assert!(minimum_initial_credits(0).is_err());
+        assert!(minimum_initial_credits(u128::MAX).is_err());
     }
 
     #[test]
