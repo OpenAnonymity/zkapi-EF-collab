@@ -1,7 +1,10 @@
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 use serde_json::Value;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
@@ -12,6 +15,8 @@ use zkapi_clientd::{
 use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
+
+const PUBLIC_SEPOLIA_MANIFEST: &str = "https://d33l4w2z2nh4cg.cloudfront.net/config.json";
 
 #[derive(Debug, Parser)]
 #[command(name = "zkapi", about = "App-layer CLI for zkAPI")]
@@ -90,6 +95,34 @@ enum Commands {
     Clientd {
         #[arg(long, default_value = "127.0.0.1:11434")]
         listen: String,
+    },
+    /// Start a ready-to-use local OpenAI/Ollama-compatible client.
+    ///
+    /// By default this loads the public Sepolia deployment, funds a new demo
+    /// note only when the selected local state directory has no active note,
+    /// then listens on 127.0.0.1:11434.
+    Client {
+        /// Deployment manifest URL or local JSON path.
+        #[arg(long, default_value = PUBLIC_SEPOLIA_MANIFEST)]
+        deployment: String,
+        /// Depositor address to fund. Omit to let cast derive it interactively.
+        #[arg(long)]
+        address: Option<String>,
+        /// Local HTTP address for OpenAI, Responses, and Ollama-compatible APIs.
+        #[arg(long, default_value = "127.0.0.1:11434")]
+        listen: String,
+        /// Private wallet state directory. Defaults to a deployment-specific user state path.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Credits to mint and deposit when the client has no active note.
+        #[arg(long, default_value_t = 5_000_000)]
+        initial_credits: u128,
+        /// Start without funding when no active note exists.
+        #[arg(long)]
+        no_fund: bool,
+        /// Do not call the public demo token's faucet-style mint method.
+        #[arg(long)]
+        skip_mint: bool,
     },
     #[command(name = "serverd", alias = "server")]
     Serverd {
@@ -192,6 +225,38 @@ enum ProviderArg {
     Metered,
 }
 
+/// Public client parameters published by a v2 deployment. The one-command
+/// client reads this manifest instead of requiring callers to copy contract
+/// addresses and public signing keys into shell variables.
+#[derive(Debug, Deserialize)]
+struct DeploymentManifest {
+    deployment_id: String,
+    protocol_version: u16,
+    chain_id: u64,
+    rpc_url: String,
+    contract_address: String,
+    billing_token_address: Option<String>,
+    protocol_server_url: String,
+    indexer_url: String,
+    request_charge_cap: u128,
+    proof_backend: String,
+    state_signing_key: DeploymentCurvePoint,
+    clearance_signing_key: DeploymentCurvePoint,
+    #[serde(default)]
+    models: Vec<ModelDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeploymentCurvePoint {
+    x: String,
+    y: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NextNoteIdResponse {
+    next_note_id: u32,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -240,6 +305,26 @@ async fn main() -> anyhow::Result<()> {
         Commands::Clientd { listen } => {
             let service = build_auth_service(&cli)?;
             run(service, &listen).await?
+        }
+        Commands::Client {
+            deployment,
+            address,
+            listen,
+            state_dir,
+            initial_credits,
+            no_fund,
+            skip_mint,
+        } => {
+            run_one_command_client(
+                &deployment,
+                address.as_deref(),
+                &listen,
+                state_dir,
+                initial_credits,
+                no_fund,
+                skip_mint,
+            )
+            .await?
         }
         Commands::Serverd {
             listen,
@@ -429,6 +514,372 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
     .map_err(Into::into)
 }
 
+/// Start the local compatibility daemon from a published public deployment
+/// manifest. This is the low-friction entrypoint: no caller has to repeat the
+/// deployment's addresses, chain parameters, proving setup, or server keys.
+async fn run_one_command_client(
+    deployment: &str,
+    requested_address: Option<&str>,
+    listen: &str,
+    requested_state_dir: Option<PathBuf>,
+    initial_credits: u128,
+    no_fund: bool,
+    skip_mint: bool,
+) -> anyhow::Result<()> {
+    let manifest = load_deployment_manifest(deployment).await?;
+    validate_deployment_manifest(&manifest)?;
+
+    let state_dir =
+        requested_state_dir.unwrap_or_else(|| default_client_state_dir(&manifest.deployment_id));
+    ensure_private_state_dir(&state_dir)?;
+    let service = auth_service_from_manifest(&manifest, state_dir.clone(), listen)?;
+
+    if !service.status().await?.has_note {
+        if no_fund {
+            eprintln!(
+                "No active zkAPI note in {}. Starting without funding; requests will return 402 until funded.",
+                state_dir.display()
+            );
+        } else {
+            eprintln!(
+                "No active zkAPI note in {}. Funding {} demo credits now; cast will securely prompt for the wallet key.",
+                state_dir.display(),
+                initial_credits
+            );
+            fund_public_demo(
+                &service,
+                &manifest,
+                requested_address,
+                initial_credits,
+                skip_mint,
+            )
+            .await?;
+        }
+    }
+
+    println!("zkAPI local gateway: http://{listen}");
+    println!("  OpenAI Chat Completions: http://{listen}/v1/chat/completions");
+    println!("  OpenAI Responses:        http://{listen}/v1/responses");
+    println!("  Ollama Chat:              http://{listen}/api/chat");
+    println!("  Models:                   http://{listen}/v1/models");
+
+    run(service, listen).await
+}
+
+async fn load_deployment_manifest(source: &str) -> anyhow::Result<DeploymentManifest> {
+    let bytes = if source.starts_with("https://") || source.starts_with("http://") {
+        reqwest::get(source)
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to fetch deployment manifest {source}: {err}"))?
+            .error_for_status()
+            .map_err(|err| {
+                anyhow::anyhow!("deployment manifest {source} returned an error: {err}")
+            })?
+            .bytes()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to read deployment manifest {source}: {err}"))?
+            .to_vec()
+    } else {
+        std::fs::read(source)
+            .map_err(|err| anyhow::anyhow!("failed to read deployment manifest {source}: {err}"))?
+    };
+
+    serde_json::from_slice(&bytes)
+        .map_err(|err| anyhow::anyhow!("invalid deployment manifest {source}: {err}"))
+}
+
+fn validate_deployment_manifest(manifest: &DeploymentManifest) -> anyhow::Result<()> {
+    if manifest.protocol_version != 2 {
+        anyhow::bail!(
+            "deployment {} uses unsupported protocol version {}; expected v2",
+            manifest.deployment_id,
+            manifest.protocol_version
+        );
+    }
+    if manifest.proof_backend != "groth16_bn254" {
+        anyhow::bail!(
+            "deployment {} uses unsupported proof backend {}; expected groth16_bn254",
+            manifest.deployment_id,
+            manifest.proof_backend
+        );
+    }
+    if manifest.protocol_server_url.is_empty() || manifest.indexer_url.is_empty() {
+        anyhow::bail!(
+            "deployment {} is missing public service URLs",
+            manifest.deployment_id
+        );
+    }
+    Ok(())
+}
+
+fn auth_service_from_manifest(
+    manifest: &DeploymentManifest,
+    state_dir: PathBuf,
+    listen: &str,
+) -> anyhow::Result<Arc<AuthService>> {
+    let models = if manifest.models.is_empty() {
+        vec![ModelDescriptor::new("openai/gpt-4o-mini")]
+    } else {
+        manifest.models.clone()
+    };
+    AuthService::new(AuthConfig {
+        protocol_version: manifest.protocol_version,
+        chain_id: manifest.chain_id,
+        contract_address: parse_felt("deployment contract address", &manifest.contract_address)?,
+        request_charge_cap: manifest.request_charge_cap,
+        policy_charge_cap: 10_000_000,
+        policy_enabled: false,
+        auth_scheme: zkapi_auth::AuthSchemeKind::StateAnchor,
+        protocol_server_url: manifest.protocol_server_url.clone(),
+        indexer_url: manifest.indexer_url.clone(),
+        listen_addr: listen.to_string(),
+        state_dir,
+        models,
+        demo_rpc_url: Some(manifest.rpc_url.clone()),
+        demo_billing_token_address: manifest.billing_token_address.clone(),
+        demo_private_key: None,
+        demo_note_ttl_seconds: None,
+        proof_mode: "groth16_bn254".to_string(),
+        cairo_dir: String::new(),
+        trusted_epoch_roots: Vec::new(),
+        proof_setup_dir: "protocol/setup/v2".to_string(),
+        state_signing_key: parse_curve_point(
+            "deployment state signing key",
+            &manifest.state_signing_key.x,
+            &manifest.state_signing_key.y,
+        )?,
+        clearance_signing_key: parse_curve_point(
+            "deployment clearance signing key",
+            &manifest.clearance_signing_key.x,
+            &manifest.clearance_signing_key.y,
+        )?,
+    })
+    .map_err(Into::into)
+}
+
+/// Create, submit, and confirm the first note with only terminal prompts from
+/// Foundry's `cast`. The key never enters our argument parser or state files.
+async fn fund_public_demo(
+    service: &Arc<AuthService>,
+    manifest: &DeploymentManifest,
+    requested_address: Option<&str>,
+    amount: u128,
+    skip_mint: bool,
+) -> anyhow::Result<()> {
+    if amount < manifest.request_charge_cap {
+        anyhow::bail!(
+            "initial credits {amount} are below this deployment's per-request proof bound {}; choose --initial-credits at least that large",
+            manifest.request_charge_cap
+        );
+    }
+    let token = manifest.billing_token_address.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "deployment {} has no billing token. Native ETH funding requires a separate native-asset vault deployment; this v2 vault accepts its configured ERC-20 token.",
+            manifest.deployment_id
+        )
+    })?;
+    let address = match requested_address {
+        Some(address) => normalize_address(address)?,
+        None => cast_interactive_address()?,
+    };
+    let plan = service.prepare_deposit(amount).await?;
+    let amount = plan.amount.to_string();
+    let commitment = felt_as_bytes32(&plan.commitment);
+    let siblings = felt_array_argument(&plan.zero_path);
+    let note_id = plan.next_note_id;
+
+    if !skip_mint {
+        run_cast_interactive(&[
+            "send".to_string(),
+            "--rpc-url".to_string(),
+            manifest.rpc_url.clone(),
+            "--interactive".to_string(),
+            token.to_string(),
+            "mint(address,uint256)".to_string(),
+            address.clone(),
+            amount.clone(),
+        ])?;
+    }
+    run_cast_interactive(&[
+        "send".to_string(),
+        "--rpc-url".to_string(),
+        manifest.rpc_url.clone(),
+        "--interactive".to_string(),
+        token.to_string(),
+        "approve(address,uint256)".to_string(),
+        manifest.contract_address.clone(),
+        amount.clone(),
+    ])?;
+    run_cast_interactive(&[
+        "send".to_string(),
+        "--rpc-url".to_string(),
+        manifest.rpc_url.clone(),
+        "--interactive".to_string(),
+        manifest.contract_address.clone(),
+        "deposit(bytes32,uint128,uint256[32])".to_string(),
+        commitment,
+        amount.clone(),
+        siblings,
+    ])?;
+
+    wait_for_indexed_note(&manifest.indexer_url, note_id).await?;
+    let expiry_ts = read_note_expiry(manifest, note_id)?;
+    service
+        .confirm_deposit(ConfirmDepositRequest {
+            secret: plan.secret,
+            note_id,
+            amount: plan.amount,
+            expiry_ts,
+        })
+        .await?;
+
+    println!(
+        "Funded note {note_id} with {} credits for {address}.",
+        plan.amount
+    );
+    Ok(())
+}
+
+async fn wait_for_indexed_note(indexer_url: &str, note_id: u32) -> anyhow::Result<()> {
+    let target = note_id.saturating_add(1);
+    let url = format!("{}/v1/tree/next-note-id", indexer_url.trim_end_matches('/'));
+    for _ in 0..40 {
+        if let Ok(response) = reqwest::get(&url).await {
+            if let Ok(response) = response.error_for_status() {
+                if let Ok(body) = response.json::<NextNoteIdResponse>().await {
+                    if body.next_note_id >= target {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    anyhow::bail!("timed out waiting for the public indexer to observe note {note_id}")
+}
+
+fn read_note_expiry(manifest: &DeploymentManifest, note_id: u32) -> anyhow::Result<u64> {
+    let note_id = note_id.to_string();
+    let output = Command::new("cast")
+        .args([
+            "call",
+            "--rpc-url",
+            &manifest.rpc_url,
+            "--json",
+            &manifest.contract_address,
+            "notes(uint32)(bytes32,uint128,uint64,uint8)",
+            &note_id,
+        ])
+        .output()
+        .map_err(|err| {
+            anyhow::anyhow!("failed to run cast; install Foundry's cast command: {err}")
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cast could not read the deposited note: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let values: Vec<Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|err| anyhow::anyhow!("cast returned invalid note JSON: {err}"))?;
+    values
+        .get(2)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("vault note getter returned no expiry timestamp"))
+}
+
+fn cast_interactive_address() -> anyhow::Result<String> {
+    eprintln!("No --address supplied. cast will prompt for the depositor private key to derive its address.");
+    let output = Command::new("cast")
+        .args(["wallet", "address", "--interactive"])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|err| {
+            anyhow::anyhow!("failed to run cast; install Foundry's cast command: {err}")
+        })?;
+    if !output.status.success() {
+        anyhow::bail!("cast could not derive a wallet address")
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| anyhow::anyhow!("cast returned a non-UTF-8 address: {err}"))?;
+    let address = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("cast did not return a wallet address"))?;
+    normalize_address(address)
+}
+
+fn run_cast_interactive(args: &[String]) -> anyhow::Result<()> {
+    let status = Command::new("cast")
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| {
+            anyhow::anyhow!("failed to run cast; install Foundry's cast command: {err}")
+        })?;
+    if !status.success() {
+        anyhow::bail!("cast transaction failed")
+    }
+    Ok(())
+}
+
+fn normalize_address(value: &str) -> anyhow::Result<String> {
+    Ok(format!("0x{}", hex::encode(parse_destination(value)?)))
+}
+
+fn felt_as_bytes32(value: &Felt252) -> String {
+    format!("0x{:0>64}", value.to_string().trim_start_matches("0x"))
+}
+
+fn felt_array_argument(values: &[Felt252]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn default_client_state_dir(deployment_id: &str) -> PathBuf {
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".local").join("state"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    let safe_id: String = deployment_id
+        .chars()
+        .map(|character| match character {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => character,
+            _ => '_',
+        })
+        .collect();
+    state_root.join("zkapi").join(safe_id)
+}
+
+fn ensure_private_state_dir(path: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path).map_err(|err| {
+        anyhow::anyhow!("failed to create state directory {}: {err}", path.display())
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|err| {
+            anyhow::anyhow!("failed to secure state directory {}: {err}", path.display())
+        })?;
+    }
+    Ok(())
+}
+
 fn client_config(cli: &Cli) -> anyhow::Result<ClientConfig> {
     Ok(ClientConfig {
         protocol_version: cli.protocol_version,
@@ -589,6 +1040,50 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_one_command_client_options() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "client",
+            "--deployment",
+            "https://example.test/config.json",
+            "--address",
+            "0x1111111111111111111111111111111111111111",
+            "--state-dir",
+            "/tmp/one-command-wallet",
+            "--listen",
+            "127.0.0.1:11499",
+            "--initial-credits",
+            "42",
+            "--skip-mint",
+        ])
+        .expect("client parse");
+
+        match cli.command {
+            Commands::Client {
+                deployment,
+                address,
+                state_dir,
+                listen,
+                initial_credits,
+                no_fund,
+                skip_mint,
+            } => {
+                assert_eq!(deployment, "https://example.test/config.json");
+                assert_eq!(
+                    address.as_deref(),
+                    Some("0x1111111111111111111111111111111111111111")
+                );
+                assert_eq!(state_dir, Some(PathBuf::from("/tmp/one-command-wallet")));
+                assert_eq!(listen, "127.0.0.1:11499");
+                assert_eq!(initial_credits, 42);
+                assert!(!no_fund);
+                assert!(skip_mint);
+            }
+            other => panic!("expected client command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cli_parses_server_and_indexer_subcommands() {
         let server = Cli::try_parse_from([
             "zkapi",
@@ -673,5 +1168,41 @@ mod tests {
         assert_eq!(prefixed, [0x11; 20]);
         assert_eq!(bare, [0x22; 20]);
         assert!(parse_destination("0x1234").is_err());
+    }
+
+    #[test]
+    fn bytes32_and_array_arguments_are_cast_compatible() {
+        let felt = Felt252::from_hex("0x1").unwrap();
+        assert_eq!(
+            felt_as_bytes32(&felt),
+            "0x0000000000000000000000000000000000000000000000000000000000000001"
+        );
+        assert_eq!(felt_array_argument(&[felt]), "[0x1]");
+    }
+
+    #[test]
+    fn deployment_manifest_rejects_non_v2_backends() {
+        let manifest = DeploymentManifest {
+            deployment_id: "test".to_string(),
+            protocol_version: 1,
+            chain_id: 11155111,
+            rpc_url: "https://rpc.example".to_string(),
+            contract_address: "0x1".to_string(),
+            billing_token_address: Some("0x2".to_string()),
+            protocol_server_url: "https://server.example".to_string(),
+            indexer_url: "https://indexer.example".to_string(),
+            request_charge_cap: 1,
+            proof_backend: "stwo_scarb".to_string(),
+            state_signing_key: DeploymentCurvePoint {
+                x: "0x1".to_string(),
+                y: "0x2".to_string(),
+            },
+            clearance_signing_key: DeploymentCurvePoint {
+                x: "0x3".to_string(),
+                y: "0x4".to_string(),
+            },
+            models: Vec::new(),
+        };
+        assert!(validate_deployment_manifest(&manifest).is_err());
     }
 }

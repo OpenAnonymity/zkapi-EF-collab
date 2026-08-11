@@ -3137,6 +3137,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
