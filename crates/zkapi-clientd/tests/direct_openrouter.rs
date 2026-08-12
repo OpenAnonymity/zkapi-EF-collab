@@ -1,0 +1,412 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::extract::{Path, State};
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::{json, Value};
+use tokio::net::TcpListener;
+use zkapi_client::config::{ClientConfig, ClientProofMode};
+use zkapi_client::wallet::Wallet;
+use zkapi_clientd::{AuthConfig, AuthService, CoreRequest, ModelDescriptor, RequestMode};
+use zkapi_core::merkle::MerkleTree;
+use zkapi_core::v2 as core;
+use zkapi_serverd::config::{OpenRouterLeaseConfig, ProviderKind, ServerConfig};
+use zkapi_serverd::nullifier_store::NullifierStore;
+use zkapi_serverd::processor::RequestProcessor;
+use zkapi_serverd::provider::EchoProvider;
+use zkapi_serverd::routes::create_router;
+use zkapi_serverd::signer::ServerSigner;
+use zkapi_types::Felt252;
+
+#[derive(Clone)]
+struct IndexerState {
+    tree: Arc<RwLock<MerkleTree>>,
+}
+
+#[derive(Clone, Default)]
+struct OpenRouterState {
+    prompts: Arc<Mutex<Vec<String>>>,
+    create_bodies: Arc<Mutex<Vec<Value>>>,
+    deletes: Arc<Mutex<usize>>,
+}
+
+async fn spawn(router: Router) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://{address}")
+}
+
+fn indexer_router(tree: Arc<RwLock<MerkleTree>>) -> Router {
+    async fn root(State(state): State<IndexerState>) -> Json<Value> {
+        Json(json!({ "root": state.tree.read().unwrap().root() }))
+    }
+    async fn path(State(state): State<IndexerState>, Path(note_id): Path<u32>) -> Json<Value> {
+        let tree = state.tree.read().unwrap();
+        Json(json!({
+            "note_id": note_id,
+            "leaf": tree.get_leaf(note_id),
+            "siblings": tree.get_siblings(note_id),
+        }))
+    }
+    async fn next_note_id(State(state): State<IndexerState>) -> Json<Value> {
+        Json(json!({ "next_note_id": state.tree.read().unwrap().next_index() }))
+    }
+    Router::new()
+        .route("/v1/tree/root", get(root))
+        .route("/v1/tree/next-note-id", get(next_note_id))
+        .route("/v1/tree/notes/{note_id}/path", get(path))
+        .route("/v1/tree/notes/{note_id}/zero-path", get(path))
+        .with_state(IndexerState { tree })
+}
+
+fn openrouter_router(state: OpenRouterState) -> Router {
+    async fn create_key(
+        State(state): State<OpenRouterState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer management-test-key")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        state.create_bodies.lock().unwrap().push(body.clone());
+        Ok(Json(json!({
+            "key": "sk-or-v1-runtime-test",
+            "data": {
+                "hash": "runtime-hash",
+                "usage": 0.0,
+                "limit": body["limit"],
+                "expires_at": body["expires_at"],
+                "include_byok_in_limit": body["include_byok_in_limit"]
+            }
+        })))
+    }
+    async fn infer(
+        State(state): State<OpenRouterState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer sk-or-v1-runtime-test")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let prompt = body["messages"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        state.prompts.lock().unwrap().push(prompt.clone());
+        Ok(Json(json!({
+            "id": "chatcmpl-direct",
+            "object": "chat.completion",
+            "model": body["model"],
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": format!("answer: {prompt}") },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4 }
+        })))
+    }
+    async fn get_key(
+        State(state): State<OpenRouterState>,
+        Path(hash): Path<String>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, StatusCode> {
+        if hash != "runtime-hash"
+            || headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer management-test-key")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let calls = state.prompts.lock().unwrap().len();
+        Ok(Json(json!({
+            "data": { "hash": hash, "usage": 0.000006 * calls as f64, "limit": 0.001 }
+        })))
+    }
+    async fn delete_key(
+        State(state): State<OpenRouterState>,
+        Path(hash): Path<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        if hash != "runtime-hash"
+            || headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer management-test-key")
+        {
+            return StatusCode::UNAUTHORIZED;
+        }
+        *state.deletes.lock().unwrap() += 1;
+        StatusCode::NO_CONTENT
+    }
+    Router::new()
+        .route("/api/v1/keys", post(create_key))
+        .route("/api/v1/keys/{hash}", get(get_key).delete(delete_key))
+        .route("/api/v1/chat/completions", post(infer))
+        .with_state(state)
+}
+
+fn test_directory() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("zkapi-direct-openrouter-{nonce}"));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn setup_directory() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../protocol/setup/v2")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_request() {
+    let directory = test_directory();
+    let wallet_directory = directory.join("wallet");
+    let contract = Felt252::from_u64(0xdeadbeef);
+    let deposit = 10_000u128;
+    let request_cap = 1_000u128;
+    let expiry = 4_000_000_000u64;
+    let setup_directory = setup_directory();
+
+    let state_seed = Felt252::from_u64(11);
+    let clear_seed = Felt252::from_u64(12);
+    let signer = Arc::new(ServerSigner::new(&state_seed, &clear_seed));
+    let state_key = signer.state_public_key();
+    let clearance_key = signer.clearance_public_key();
+
+    let mut seed_wallet = Wallet::new(ClientConfig {
+        protocol_version: 2,
+        chain_id: 1,
+        contract_address: contract,
+        request_charge_cap: request_cap,
+        policy_charge_cap: request_cap,
+        policy_enabled: false,
+        server_url: "http://127.0.0.1:1".to_string(),
+        state_dir: wallet_directory.to_string_lossy().to_string(),
+        trusted_epoch_roots: Vec::new(),
+        proof_mode: ClientProofMode::Groth16 {
+            setup_dir: setup_directory.clone(),
+        },
+        state_signing_key: state_key.clone(),
+        clearance_signing_key: clearance_key.clone(),
+    })
+    .unwrap();
+    let (secret, registration) = seed_wallet.generate_deposit_params();
+    seed_wallet
+        .confirm_deposit(secret, 0, deposit, expiry)
+        .unwrap();
+
+    let mut tree = MerkleTree::new();
+    tree.insert(core::note_leaf(0, &registration, deposit, expiry));
+    let tree = Arc::new(RwLock::new(tree));
+    let root = tree.read().unwrap().root();
+    let indexer_url = spawn(indexer_router(tree.clone())).await;
+
+    let openrouter_state = OpenRouterState::default();
+    let openrouter_url = spawn(openrouter_router(openrouter_state.clone())).await;
+    let store = Arc::new(NullifierStore::new(directory.join("server.db")).unwrap());
+    let processor = Arc::new(
+        RequestProcessor::try_new(
+            ServerConfig {
+                protocol_version: 2,
+                chain_id: 1,
+                contract_address: contract,
+                request_charge_cap: request_cap,
+                policy_charge_cap: request_cap,
+                policy_enabled: false,
+                provider_kind: ProviderKind::Echo,
+                echo_fixed_charge: 1,
+                db_path: directory.join("server.db").to_string_lossy().to_string(),
+                state_seed,
+                clear_seed,
+                initial_root: root,
+                proof_setup_dir: setup_directory.clone(),
+                openrouter_leases: Some(OpenRouterLeaseConfig {
+                    management_key: "management-test-key".to_string(),
+                    api_base: format!("{openrouter_url}/api"),
+                    ttl_seconds: 3,
+                    settlement_grace_seconds: 0,
+                    settlement_poll_seconds: 1,
+                }),
+                ..Default::default()
+            },
+            store.clone(),
+            signer,
+            Arc::new(EchoProvider::new(1)),
+            root,
+        )
+        .unwrap(),
+    );
+    let protocol_server_url = spawn(create_router(processor.clone())).await;
+    let service = AuthService::new(AuthConfig {
+        protocol_version: 2,
+        chain_id: 1,
+        contract_address: contract,
+        request_charge_cap: request_cap,
+        policy_charge_cap: request_cap,
+        policy_enabled: false,
+        protocol_server_url: protocol_server_url.clone(),
+        indexer_url,
+        state_dir: wallet_directory.clone(),
+        models: vec![ModelDescriptor::new("openai/gpt-4o-mini")],
+        proof_setup_dir: setup_directory.clone(),
+        state_signing_key: state_key.clone(),
+        clearance_signing_key: clearance_key.clone(),
+        request_mode: RequestMode::DirectOpenrouter,
+        ..Default::default()
+    })
+    .unwrap();
+    service.ensure_request_mode_available().await.unwrap();
+    let health: Value = reqwest::get(format!("{protocol_server_url}/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        health["request_modes"],
+        json!(["proxy", "direct_openrouter"])
+    );
+
+    let first = service
+        .execute_request(CoreRequest::post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "private prompt one"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    let second = service
+        .execute_request(CoreRequest::post_json(
+            "/v1/responses",
+            json!({"model": "openai/gpt-4o-mini", "input": "private prompt two"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(first.client_request_id, second.client_request_id);
+    assert_eq!(
+        first.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
+        "answer: private prompt one"
+    );
+    assert_eq!(
+        second.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
+        "answer: private prompt two"
+    );
+    assert_eq!(
+        openrouter_state.prompts.lock().unwrap().as_slice(),
+        ["private prompt one", "private prompt two"]
+    );
+    assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
+    let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
+    assert_eq!(create_body["limit"], 0.001);
+    assert_eq!(create_body["include_byok_in_limit"], true);
+    assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
+
+    let lease = store
+        .lookup_openrouter_lease(&first.client_request_id)
+        .unwrap();
+    assert_eq!(lease.status, "active");
+    assert!(!lease.api_request.payload.contains("private prompt"));
+    assert!(!serde_json::to_string(&lease.api_request)
+        .unwrap()
+        .contains("sk-or-v1-runtime-test"));
+    let cross_mode_replay = reqwest::Client::new()
+        .post(format!("{protocol_server_url}/v2/requests"))
+        .json(&lease.api_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_mode_replay.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        store
+            .lookup_by_client_id(&first.client_request_id)
+            .unwrap()
+            .status,
+        zkapi_types::NullifierStatus::Reserved
+    );
+    let sleep_seconds = lease.expires_at.saturating_sub(now_seconds()) + 1;
+    tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
+    processor.settle_due_openrouter_leases().await;
+
+    let recovered = service.recover().await.unwrap();
+    assert!(recovered.recovered);
+    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000012);
+    assert_eq!(
+        recovered.wallet.note.unwrap().current_balance,
+        deposit - expected_charge
+    );
+    assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
+    let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
+    assert_eq!(transcript.charge_applied, Some(expected_charge));
+    assert!(!transcript
+        .response_payload
+        .as_deref()
+        .unwrap_or_default()
+        .contains("private prompt"));
+
+    // The ordinary proxy route remains live on the same server. It consumes a
+    // second zkAPI request and, unlike direct mode, EchoProvider sees/echoes it.
+    let mut proxy_wallet = Wallet::new(ClientConfig {
+        protocol_version: 2,
+        chain_id: 1,
+        contract_address: contract,
+        request_charge_cap: request_cap,
+        policy_charge_cap: request_cap,
+        policy_enabled: false,
+        server_url: protocol_server_url,
+        state_dir: wallet_directory.to_string_lossy().to_string(),
+        trusted_epoch_roots: Vec::new(),
+        proof_mode: ClientProofMode::Groth16 {
+            setup_dir: setup_directory,
+        },
+        state_signing_key: state_key,
+        clearance_signing_key: clearance_key,
+    })
+    .unwrap();
+    let proxy_payload = serde_json::to_string(&CoreRequest::post_json(
+        "/v1/chat/completions",
+        json!({"model": "demo", "messages": [{"role": "user", "content": "proxy prompt"}]}),
+    ))
+    .unwrap();
+    let proxy_siblings = tree.read().unwrap().get_siblings(0).to_vec();
+    let proxy_response = proxy_wallet
+        .request_flow(
+            &proxy_payload,
+            zkapi_types::canonical_payload_hash(proxy_payload.as_bytes()),
+            root,
+            proxy_siblings,
+        )
+        .await
+        .unwrap();
+    assert!(proxy_response.response_payload.contains("proxy prompt"));
+    assert_eq!(proxy_response.charge_applied, 1);
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}

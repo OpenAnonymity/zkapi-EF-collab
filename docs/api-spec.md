@@ -24,6 +24,8 @@ The local wallet talks to `zkapi-serverd` through:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v2/requests` | verify proof, execute provider, sign next state |
+| POST | `/v2/openrouter/leases` | reserve one prompt-free request and return a bounded runtime key once |
+| GET | `/v2/openrouter/leases/{client_request_id}` | recover non-secret lease timing/status metadata |
 | POST | `/v2/withdraw/clearance` | sign a mutual-close nullifier |
 | GET | `/v2/requests/{client_request_id}` | recover a finalized request |
 | GET | `/v2/nullifiers/{nullifier}` | recover by nullifier |
@@ -62,6 +64,35 @@ blind delta, and next Schnorr state signature.
 The base64 proof decodes to exactly 256 bytes: `A.x, A.y, B.x.c0, B.x.c1,
 B.y.c0, B.y.c1, C.x, C.y`, each as a canonical 32-byte big-endian BN254
 base-field coordinate.
+
+### Prompt-private OpenRouter lease
+
+`POST /v2/openrouter/leases` receives the same `ApiRequestV2`, but its exact
+payload is only:
+
+```json
+{"mode":"openrouter_ephemeral_lease","version":1}
+```
+
+Unknown fields are rejected, so a prompt cannot accidentally enter this
+protocol message. After verifying the proof and reserving its nullifier, the
+server creates an OpenRouter child key whose USD limit equals the deployment's
+request charge cap and whose `expires_at` equals the returned UNIX expiry. A
+successful `201` response contains `api_key`, `openrouter_api_base`,
+`issued_at`, `expires_at`, `valid_for_seconds`, `settle_after`, and
+`spending_limit_usd`. The plaintext key is returned once and is not persisted.
+
+The nullifier remains `reserved` for the whole lease. After expiry plus the
+configured usage-propagation grace period, the server reads aggregate `usage`
+through OpenRouter's Management API, converts USD to credits, finalizes the
+original request, and deletes the expired key. The existing
+`GET /v2/requests/{client_request_id}` recovery response then supplies the
+signed next state. Thus key issuance, direct inference calls, usage polling,
+and state recovery are several HTTP operations but one zkAPI request and one
+nullifier. The lease-status GET never returns the plaintext key.
+
+This mode is disabled when server-side prompt policy is enabled: a server
+cannot enforce a prompt policy while also being excluded from the prompt path.
 
 ## Indexer
 

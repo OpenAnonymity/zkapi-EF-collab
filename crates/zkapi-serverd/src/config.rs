@@ -36,7 +36,7 @@ impl UpstreamKind {
 /// (`openai/…`, `anthropic/…`) goes to OpenRouter (billed at the provider's
 /// exact reported cost), a bare id (`gpt-4o-mini`) goes to OpenAI (billed from
 /// the built-in price table).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MeteredConfig {
     /// Base URL for OpenAI pass-through (`https://api.openai.com`).
     pub openai_api_base: String,
@@ -46,6 +46,58 @@ pub struct MeteredConfig {
     pub openrouter_api_base: String,
     /// OpenRouter API key for server-side pass-through inference.
     pub openrouter_inference_key: Option<String>,
+}
+
+impl std::fmt::Debug for MeteredConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MeteredConfig")
+            .field("openai_api_base", &self.openai_api_base)
+            .field(
+                "openai_api_key",
+                &self.openai_api_key.as_ref().map(|_| "[configured]"),
+            )
+            .field("openrouter_api_base", &self.openrouter_api_base)
+            .field(
+                "openrouter_inference_key",
+                &self
+                    .openrouter_inference_key
+                    .as_ref()
+                    .map(|_| "[configured]"),
+            )
+            .finish()
+    }
+}
+
+/// OpenRouter management-key configuration for prompt-private, short-lived
+/// client leases. This is independent from the metered pass-through provider,
+/// so a server can expose both modes at the same time.
+#[derive(Clone)]
+pub struct OpenRouterLeaseConfig {
+    /// OpenRouter Management API key. This key is never returned to clients.
+    pub management_key: String,
+    /// OpenRouter API base without `/v1`, normally `https://openrouter.ai/api`.
+    pub api_base: String,
+    /// Runtime-key validity window.
+    pub ttl_seconds: u64,
+    /// Delay after key expiry before reading aggregate usage, allowing the
+    /// provider's usage counters to become consistent.
+    pub settlement_grace_seconds: u64,
+    /// Background settlement scan interval.
+    pub settlement_poll_seconds: u64,
+}
+
+impl std::fmt::Debug for OpenRouterLeaseConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenRouterLeaseConfig")
+            .field("management_key", &"[configured]")
+            .field("api_base", &self.api_base)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("settlement_grace_seconds", &self.settlement_grace_seconds)
+            .field("settlement_poll_seconds", &self.settlement_poll_seconds)
+            .finish()
+    }
 }
 
 impl Default for MeteredConfig {
@@ -129,6 +181,9 @@ pub struct ServerConfig {
     /// Configuration for the metered upstream provider (when
     /// `provider_kind == Metered`).
     pub metered: Option<MeteredConfig>,
+    /// Prompt-private OpenRouter lease mode. `None` disables only this mode;
+    /// ordinary provider proxying remains available.
+    pub openrouter_leases: Option<OpenRouterLeaseConfig>,
     /// Retired v1 compatibility field; v2 always uses Groth16 BN254.
     pub proof_mode: String,
     /// Retired v1 compatibility field; ignored by the v2 processor.
@@ -171,6 +226,7 @@ impl Default for ServerConfig {
             root_poll_interval_ms: 1_000,
             trusted_epoch_roots: Vec::new(),
             metered: None,
+            openrouter_leases: None,
             proof_mode: "groth16_bn254".to_string(),
             cairo_dir: "protocol/cairo".to_string(),
             proof_setup_dir: "protocol/setup/v2".to_string(),

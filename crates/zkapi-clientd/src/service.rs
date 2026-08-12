@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -25,7 +25,10 @@ use serde_json::Value;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_core::v2 as core_v2;
-use zkapi_types::wire::{Groth16ProofWire, RequestResponseV2};
+use zkapi_types::wire::{
+    ApiRequestV2, ErrorResponse, Groth16ProofWire, OpenRouterLeaseAuthorization,
+    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RequestResponseV2,
+};
 use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputsV2};
 
 fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
@@ -35,7 +38,7 @@ fn compute_payload_hash(payload: impl AsRef<[u8]>) -> Felt252 {
     zkapi_types::canonical_payload_hash(payload.as_ref())
 }
 
-use crate::config::{AuthConfig, ModelDescriptor};
+use crate::config::{AuthConfig, ModelDescriptor, RequestMode};
 use crate::error::AuthError;
 use crate::indexer::IndexerClient;
 
@@ -118,6 +121,7 @@ pub struct ZkapiConfig {
     pub funding: FundingConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_kind: Option<String>,
+    pub direct_openrouter_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,6 +168,8 @@ pub struct ServerHealthSnapshot {
     pub policy_enabled: bool,
     #[serde(default)]
     pub auth_scheme: String,
+    #[serde(default)]
+    pub request_modes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -249,6 +255,15 @@ pub struct RecoverResult {
     pub wallet: WalletStatus,
 }
 
+#[derive(Clone)]
+struct ActiveOpenRouterLease {
+    client_request_id: String,
+    api_key: String,
+    openrouter_api_base: String,
+    expires_at: u64,
+    settle_after: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WithdrawalMode {
@@ -267,11 +282,12 @@ pub struct WithdrawalPlan {
     pub proof: Groth16ProofWire,
 }
 
-#[derive(Debug)]
 pub struct AuthService {
     config: AuthConfig,
     wallet_mutex: Arc<Mutex<()>>,
     indexer: IndexerClient,
+    http: reqwest::Client,
+    direct_lease: tokio::sync::Mutex<Option<ActiveOpenRouterLease>>,
 }
 
 impl AuthService {
@@ -282,6 +298,11 @@ impl AuthService {
             indexer: IndexerClient::new(config.indexer_url.clone()),
             config,
             wallet_mutex: Arc::new(Mutex::new(())),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(180))
+                .build()
+                .map_err(|error| AuthError::Wallet(error.to_string()))?,
+            direct_lease: tokio::sync::Mutex::new(None),
         }))
     }
 
@@ -410,6 +431,9 @@ impl AuthService {
             .and_then(|s| s["credits_per_usd"].as_f64())
             .filter(|v| *v > 0.0)
             .unwrap_or(CREDITS_PER_USD);
+        let direct_openrouter_available = server
+            .and_then(|server| server["openrouter_leases_enabled"].as_bool())
+            .unwrap_or(false);
 
         ZkapiConfig {
             credits_per_usd,
@@ -419,6 +443,34 @@ impl AuthService {
             policy_enabled: self.config.policy_enabled,
             funding: self.funding_config(),
             upstream_kind,
+            direct_openrouter_available,
+        }
+    }
+
+    /// Fail before funding or listening when a requested transport is not
+    /// advertised by the selected server deployment.
+    pub async fn ensure_request_mode_available(&self) -> Result<(), AuthError> {
+        if self.config.request_mode == RequestMode::Proxy {
+            return Ok(());
+        }
+        let health_url = format!(
+            "{}/health",
+            self.config.protocol_server_url.trim_end_matches('/')
+        );
+        let health = fetch_json::<ServerHealthSnapshot>(&health_url)
+            .await
+            .map_err(AuthError::Wallet)?;
+        if health
+            .request_modes
+            .iter()
+            .any(|mode| mode == "direct_openrouter")
+        {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidInput(format!(
+                "server {} does not advertise direct_openrouter mode",
+                self.config.protocol_server_url
+            )))
         }
     }
 
@@ -468,7 +520,261 @@ impl AuthService {
     }
 
     pub async fn execute_request(&self, request: CoreRequest) -> Result<CoreResponse, AuthError> {
-        Ok(self.execute_request_demo(request).await?.response)
+        match self.config.request_mode {
+            RequestMode::Proxy => Ok(self.execute_request_demo(request).await?.response),
+            RequestMode::DirectOpenrouter => self.execute_direct_openrouter(request).await,
+        }
+    }
+
+    /// Reconcile a pending direct-mode lease with the server. `run()` calls
+    /// this periodically so the wallet advances soon after authoritative usage
+    /// settlement even if no new LLM request arrives.
+    pub async fn reconcile_direct_openrouter(&self) {
+        if self.config.request_mode != RequestMode::DirectOpenrouter {
+            return;
+        }
+        if self
+            .direct_lease
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|lease| now_seconds() < lease.expires_at)
+        {
+            return;
+        }
+        match self.recover().await {
+            Ok(result) if result.recovered => {
+                let mut lease = self.direct_lease.lock().await;
+                *lease = None;
+                tracing::info!("installed settled OpenRouter lease state");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(error = %error, "OpenRouter lease is not settled yet"),
+        }
+    }
+
+    async fn execute_direct_openrouter(
+        &self,
+        request: CoreRequest,
+    ) -> Result<CoreResponse, AuthError> {
+        self.ensure_scheme_agreement().await?;
+        let mut lease_guard = self.direct_lease.lock().await;
+
+        if let Some(lease) = lease_guard.as_ref() {
+            // Leave a small margin so a key cannot expire while a request is
+            // being transmitted to OpenRouter.
+            if now_seconds().saturating_add(1) >= lease.expires_at {
+                let settle_deadline = lease.settle_after.saturating_add(60);
+                loop {
+                    if self.recover().await?.recovered {
+                        *lease_guard = None;
+                        break;
+                    }
+                    if now_seconds() >= settle_deadline {
+                        return Err(AuthError::LeasePending(format!(
+                            "lease {} expired but authoritative usage has not settled yet",
+                            lease.client_request_id
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        if lease_guard.is_none() {
+            // Recover any state finalized since daemon startup before proving a
+            // new lease request.
+            let _ = self.recover().await?;
+            *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
+        }
+        let lease = lease_guard
+            .as_ref()
+            .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+        let (upstream_path, upstream_body) =
+            crate::compat::openrouter_request(&request.path, request.body);
+        let url = format!(
+            "{}{}",
+            lease.openrouter_api_base.trim_end_matches('/'),
+            upstream_path
+        );
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&lease.api_key)
+            .header("content-type", "application/json")
+            .json(&upstream_body)
+            .send()
+            .await
+            .map_err(|error| AuthError::Upstream(error.to_string()))?;
+        let status = response.status();
+        let response_code = status.as_u16();
+        let raw_payload = response
+            .text()
+            .await
+            .map_err(|error| AuthError::Upstream(error.to_string()))?;
+        if !status.is_success() {
+            return Err(AuthError::Upstream(format!(
+                "OpenRouter returned {status}: {}",
+                truncate_for_error(&raw_payload, 500)
+            )));
+        }
+        let wallet = self.status().await?;
+        let (remaining_balance, next_anchor) = wallet
+            .note
+            .map(|note| (Some(note.current_balance), note.current_anchor))
+            .unwrap_or((None, Felt252::ZERO));
+        Ok(CoreResponse {
+            client_request_id: lease.client_request_id.clone(),
+            response_code,
+            payload: serde_json::from_str(&raw_payload).ok(),
+            raw_payload,
+            // The authoritative charge is intentionally unknown until the
+            // whole lease settles. Zero here means "not yet applied".
+            charge_applied: 0,
+            next_anchor,
+            remaining_balance,
+        })
+    }
+
+    async fn issue_direct_openrouter_lease(&self) -> Result<ActiveOpenRouterLease, AuthError> {
+        for attempt in 0..2 {
+            let request = self.prepare_direct_lease_request().await?;
+            let response = self
+                .http
+                .post(format!(
+                    "{}/v2/openrouter/leases",
+                    self.config.protocol_server_url.trim_end_matches('/')
+                ))
+                .json(&request)
+                .send()
+                .await
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            if status.is_success() {
+                let lease: OpenRouterLeaseResponse = serde_json::from_str(&body)
+                    .map_err(|error| AuthError::Serialization(error.to_string()))?;
+                if lease.api_key.is_empty() || lease.expires_at <= now_seconds() {
+                    return Err(AuthError::Wallet(
+                        "server returned an unusable OpenRouter lease".to_string(),
+                    ));
+                }
+                tracing::info!(
+                    client_request_id = %lease.client_request_id,
+                    expires_at = lease.expires_at,
+                    "opened prompt-private OpenRouter lease"
+                );
+                return Ok(ActiveOpenRouterLease {
+                    client_request_id: lease.client_request_id,
+                    api_key: lease.api_key,
+                    openrouter_api_base: lease.openrouter_api_base,
+                    expires_at: lease.expires_at,
+                    settle_after: lease.settle_after,
+                });
+            }
+            if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
+                if error.error_code == "stale_root" && attempt == 0 {
+                    self.clear_pending_request().await?;
+                    continue;
+                }
+                if error.error_code == "lease_pending" {
+                    let status = self
+                        .fetch_direct_lease_status(&request.client_request_id)
+                        .await?;
+                    return Err(AuthError::LeasePending(format!(
+                        "lease {} is {}; key expiry {}, settlement after {}",
+                        status.client_request_id,
+                        status.status,
+                        status.expires_at,
+                        status.settle_after
+                    )));
+                }
+                return Err(AuthError::Wallet(format!(
+                    "{}: {}",
+                    error.error_code, error.error_message
+                )));
+            }
+            return Err(AuthError::Wallet(format!("HTTP {status}: {body}")));
+        }
+        Err(AuthError::Wallet(
+            "lease request failed after retrying a stale indexer root".to_string(),
+        ))
+    }
+
+    async fn prepare_direct_lease_request(&self) -> Result<ApiRequestV2, AuthError> {
+        let config = self.config.clone();
+        let wallet_mutex = self.wallet_mutex.clone();
+        let indexer = self.indexer.clone();
+        spawn_blocking(move || {
+            let _guard = wallet_mutex
+                .lock()
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            let _lockfile = acquire_wallet_lock(&config.state_dir)?;
+            let mut wallet = load_wallet(&config, Vec::new())?;
+            let authorization = serde_json::to_string(&OpenRouterLeaseAuthorization::default())
+                .map_err(|error| AuthError::Serialization(error.to_string()))?;
+            if wallet.has_pending_request() {
+                let request = wallet.pending_api_request()?.ok_or_else(|| {
+                    AuthError::LeasePending(
+                        "an older pending request has no retryable request body".to_string(),
+                    )
+                })?;
+                if request.payload != authorization {
+                    return Err(AuthError::LeasePending(
+                        "a non-lease zkAPI request is still pending".to_string(),
+                    ));
+                }
+                return Ok(request);
+            }
+            let state = wallet.state().ok_or(AuthError::NoActiveNote)?;
+            let note_id = state.note_id;
+            let runtime = current_thread_runtime()?;
+            let (active_root, siblings) = runtime.block_on(async move {
+                Ok::<_, AuthError>((indexer.root().await?, indexer.note_path(note_id).await?))
+            })?;
+            let payload_hash = compute_payload_hash(authorization.as_bytes());
+            wallet
+                .prepare_request(&authorization, payload_hash, active_root, siblings)
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn clear_pending_request(&self) -> Result<(), AuthError> {
+        let config = self.config.clone();
+        let wallet_mutex = self.wallet_mutex.clone();
+        spawn_blocking(move || {
+            let _guard = wallet_mutex
+                .lock()
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            let _lockfile = acquire_wallet_lock(&config.state_dir)?;
+            let wallet = load_wallet(&config, Vec::new())?;
+            wallet.clear_pending_request()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn fetch_direct_lease_status(
+        &self,
+        client_request_id: &str,
+    ) -> Result<OpenRouterLeaseStatusResponse, AuthError> {
+        self.http
+            .get(format!(
+                "{}/v2/openrouter/leases/{client_request_id}",
+                self.config.protocol_server_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| AuthError::Serialization(error.to_string()))
     }
 
     pub async fn demo_overview(&self) -> Result<DemoOverview, AuthError> {
@@ -782,6 +1088,26 @@ fn wallet_status(wallet: &Wallet) -> WalletStatus {
 
 fn hash_payload(payload: &str) -> Felt252 {
     compute_payload_hash(payload.as_bytes())
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn truncate_for_error(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        return value.to_string();
+    }
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", &value[..end])
 }
 
 async fn build_request_preview(

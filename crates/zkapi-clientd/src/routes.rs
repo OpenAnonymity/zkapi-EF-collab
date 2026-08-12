@@ -98,6 +98,15 @@ fn local_cors_layer() -> CorsLayer {
 }
 
 pub async fn run(service: Arc<AuthService>, listen_addr: &str) -> anyhow::Result<()> {
+    let reconciler = service.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            reconciler.reconcile_direct_openrouter().await;
+        }
+    });
     let router = build_router(service);
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     tracing::info!("zkapi-clientd listening on {}", listen_addr);

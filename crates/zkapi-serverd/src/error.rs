@@ -34,6 +34,9 @@ pub enum ServerError {
 
     #[error("protocol mismatch: {0}")]
     ProtocolMismatch(String),
+
+    #[error("OpenRouter lease is already active or awaiting settlement")]
+    LeasePending,
 }
 
 impl ServerError {
@@ -50,6 +53,7 @@ impl ServerError {
             ServerError::Database(_) => "database_error",
             ServerError::InvalidRequest(_) => "invalid_request",
             ServerError::ProtocolMismatch(_) => "protocol_mismatch",
+            ServerError::LeasePending => "lease_pending",
         }
     }
 
@@ -66,6 +70,7 @@ impl ServerError {
             ServerError::NullifierUsed => false,
             ServerError::InvalidRequest(_) => false,
             ServerError::ProtocolMismatch(_) => false,
+            ServerError::LeasePending => true,
         }
     }
 }

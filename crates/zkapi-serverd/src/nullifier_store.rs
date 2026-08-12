@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use zkapi_types::wire::ApiRequestV2;
 use zkapi_types::{Felt252, NullifierStatus, SchnorrSignature};
 
 use crate::error::ServerError;
@@ -17,6 +18,7 @@ use crate::error::ServerError;
 pub struct TranscriptRecord {
     pub nullifier: Felt252,
     pub status: NullifierStatus,
+    pub reservation_kind: String,
     pub client_request_id: Option<String>,
     pub payload_hash: Option<Felt252>,
     pub charge_applied: Option<u128>,
@@ -38,6 +40,24 @@ pub struct TranscriptRecord {
     pub finalized_at: Option<u64>,
 }
 
+/// Durable metadata for one prompt-private OpenRouter lease. The plaintext
+/// runtime key is deliberately never stored.
+#[derive(Debug, Clone)]
+pub struct OpenRouterLeaseRecord {
+    pub client_request_id: String,
+    pub request_nullifier: Felt252,
+    pub api_request: ApiRequestV2,
+    pub key_hash: Option<String>,
+    pub status: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub settle_after: u64,
+    pub spending_limit_usd: f64,
+    pub usage_usd: Option<f64>,
+    pub charge_applied: Option<u128>,
+    pub last_error: Option<String>,
+}
+
 /// SQLite-backed nullifier store.
 pub struct NullifierStore {
     conn: Mutex<Connection>,
@@ -53,6 +73,7 @@ impl NullifierStore {
             "CREATE TABLE IF NOT EXISTS nullifiers (
                 nullifier TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
+                reservation_kind TEXT NOT NULL DEFAULT 'proxy',
                 client_request_id TEXT,
                 payload_hash TEXT,
                 charge_applied INTEGER,
@@ -72,6 +93,21 @@ impl NullifierStore {
                 request_inputs_json TEXT,
                 created_at INTEGER NOT NULL,
                 finalized_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS openrouter_leases (
+                client_request_id TEXT PRIMARY KEY,
+                request_nullifier TEXT NOT NULL UNIQUE,
+                api_request_json TEXT NOT NULL,
+                key_hash TEXT UNIQUE,
+                status TEXT NOT NULL,
+                issued_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                settle_after INTEGER NOT NULL,
+                spending_limit_usd REAL NOT NULL,
+                usage_usd REAL,
+                charge_applied INTEGER,
+                last_error TEXT,
+                updated_at INTEGER NOT NULL
             );",
         )
         .map_err(|e| ServerError::Database(format!("failed to create table: {}", e)))?;
@@ -82,6 +118,10 @@ impl NullifierStore {
         );
         let _ = conn.execute(
             "ALTER TABLE nullifiers ADD COLUMN response_payload TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nullifiers ADD COLUMN reservation_kind TEXT NOT NULL DEFAULT 'proxy'",
             [],
         );
 
@@ -103,6 +143,30 @@ impl NullifierStore {
         client_request_id: &str,
         payload_hash: &Felt252,
     ) -> Result<(), ServerError> {
+        self.reserve_with_kind(nullifier, client_request_id, payload_hash, "proxy")
+    }
+
+    pub fn reserve_openrouter_lease(
+        &self,
+        nullifier: &Felt252,
+        client_request_id: &str,
+        payload_hash: &Felt252,
+    ) -> Result<(), ServerError> {
+        self.reserve_with_kind(
+            nullifier,
+            client_request_id,
+            payload_hash,
+            "openrouter_lease",
+        )
+    }
+
+    fn reserve_with_kind(
+        &self,
+        nullifier: &Felt252,
+        client_request_id: &str,
+        payload_hash: &Felt252,
+        reservation_kind: &str,
+    ) -> Result<(), ServerError> {
         let conn = self
             .conn
             .lock()
@@ -111,11 +175,13 @@ impl NullifierStore {
         let null_hex = nullifier.to_hex();
 
         conn.execute(
-            "INSERT INTO nullifiers (nullifier, status, client_request_id, payload_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO nullifiers (
+                nullifier, status, reservation_kind, client_request_id, payload_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 null_hex,
                 status_to_str(NullifierStatus::Reserved),
+                reservation_kind,
                 client_request_id,
                 payload_hash.to_hex(),
                 now as i64,
@@ -306,6 +372,164 @@ impl NullifierStore {
 
         rows.filter_map(|r| r.ok()).collect()
     }
+
+    /// Persist a lease before contacting OpenRouter, closing the normal crash
+    /// window between nullifier reservation and external key provisioning.
+    pub fn create_openrouter_lease(
+        &self,
+        request: &ApiRequestV2,
+        issued_at: u64,
+        expires_at: u64,
+        settle_after: u64,
+        spending_limit_usd: f64,
+    ) -> Result<(), ServerError> {
+        let request_json = serde_json::to_string(request).map_err(|error| {
+            ServerError::Database(format!("lease serialization failed: {error}"))
+        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
+        conn.execute(
+            "INSERT INTO openrouter_leases (
+                client_request_id, request_nullifier, api_request_json, status,
+                issued_at, expires_at, settle_after, spending_limit_usd, updated_at
+             ) VALUES (?1, ?2, ?3, 'provisioning', ?4, ?5, ?6, ?7, ?8)",
+            params![
+                request.client_request_id,
+                request.public_inputs.request_nullifier.to_hex(),
+                request_json,
+                issued_at as i64,
+                expires_at as i64,
+                settle_after as i64,
+                spending_limit_usd,
+                current_timestamp() as i64,
+            ],
+        )
+        .map_err(|error| ServerError::Database(format!("lease insert failed: {error}")))?;
+        Ok(())
+    }
+
+    pub fn activate_openrouter_lease(
+        &self,
+        client_request_id: &str,
+        key_hash: &str,
+    ) -> Result<(), ServerError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
+        let rows = conn
+            .execute(
+                "UPDATE openrouter_leases
+                 SET status = 'active', key_hash = ?1, updated_at = ?2
+                 WHERE client_request_id = ?3 AND status = 'provisioning'",
+                params![key_hash, current_timestamp() as i64, client_request_id],
+            )
+            .map_err(|error| ServerError::Database(format!("lease activation failed: {error}")))?;
+        if rows != 1 {
+            return Err(ServerError::Internal(
+                "lease was not in provisioning state".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn remove_failed_openrouter_lease(
+        &self,
+        client_request_id: &str,
+    ) -> Result<(), ServerError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
+        conn.execute(
+            "DELETE FROM openrouter_leases
+             WHERE client_request_id = ?1 AND status = 'provisioning' AND key_hash IS NULL",
+            params![client_request_id],
+        )
+        .map_err(|error| ServerError::Database(format!("lease cleanup failed: {error}")))?;
+        Ok(())
+    }
+
+    pub fn lookup_openrouter_lease(
+        &self,
+        client_request_id: &str,
+    ) -> Option<OpenRouterLeaseRecord> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT * FROM openrouter_leases WHERE client_request_id = ?1",
+            params![client_request_id],
+            row_to_openrouter_lease,
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn due_openrouter_leases(&self, now: u64) -> Vec<OpenRouterLeaseRecord> {
+        let conn = match self.conn.lock() {
+            Ok(conn) => conn,
+            Err(_) => return Vec::new(),
+        };
+        let mut statement = match conn.prepare(
+            "SELECT * FROM openrouter_leases
+             WHERE status = 'active' AND settle_after <= ?1
+             ORDER BY settle_after ASC",
+        ) {
+            Ok(statement) => statement,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match statement.query_map(params![now as i64], row_to_openrouter_lease) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    pub fn record_openrouter_lease_error(
+        &self,
+        client_request_id: &str,
+        error: &str,
+    ) -> Result<(), ServerError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|cause| ServerError::Database(format!("lock poisoned: {cause}")))?;
+        conn.execute(
+            "UPDATE openrouter_leases SET last_error = ?1, updated_at = ?2
+             WHERE client_request_id = ?3 AND status = 'active'",
+            params![error, current_timestamp() as i64, client_request_id],
+        )
+        .map_err(|cause| ServerError::Database(format!("lease error update failed: {cause}")))?;
+        Ok(())
+    }
+
+    pub fn finalize_openrouter_lease(
+        &self,
+        client_request_id: &str,
+        usage_usd: f64,
+        charge_applied: u128,
+    ) -> Result<(), ServerError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
+        conn.execute(
+            "UPDATE openrouter_leases SET
+                status = 'finalized', usage_usd = ?1, charge_applied = ?2,
+                last_error = NULL, updated_at = ?3
+             WHERE client_request_id = ?4",
+            params![
+                usage_usd,
+                charge_applied as i64,
+                current_timestamp() as i64,
+                client_request_id,
+            ],
+        )
+        .map_err(|error| ServerError::Database(format!("lease finalize failed: {error}")))?;
+        Ok(())
+    }
 }
 
 /// Convert a NullifierStatus to its string representation for storage.
@@ -336,6 +560,7 @@ fn parse_opt_felt(s: Option<String>) -> Option<Felt252> {
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> {
     let nullifier_hex: String = row.get("nullifier")?;
     let status_str: String = row.get("status")?;
+    let reservation_kind: String = row.get("reservation_kind")?;
     let client_request_id: Option<String> = row.get("client_request_id")?;
     let payload_hash: Option<String> = row.get("payload_hash")?;
     let charge_applied: Option<i64> = row.get("charge_applied")?;
@@ -362,6 +587,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> 
     Ok(TranscriptRecord {
         nullifier: Felt252::from_hex(&nullifier_hex).unwrap_or(Felt252::ZERO),
         status: str_to_status(&status_str),
+        reservation_kind,
         client_request_id,
         payload_hash: parse_opt_felt(payload_hash),
         charge_applied: charge_applied.map(|c| c as u128),
@@ -381,6 +607,34 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> 
         request_inputs_json,
         created_at: created_at as u64,
         finalized_at: finalized_at.map(|t| t as u64),
+    })
+}
+
+fn row_to_openrouter_lease(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenRouterLeaseRecord> {
+    let request_json: String = row.get("api_request_json")?;
+    let api_request = serde_json::from_str(&request_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            request_json.len(),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+    let nullifier: String = row.get("request_nullifier")?;
+    Ok(OpenRouterLeaseRecord {
+        client_request_id: row.get("client_request_id")?,
+        request_nullifier: Felt252::from_hex(&nullifier).unwrap_or(Felt252::ZERO),
+        api_request,
+        key_hash: row.get("key_hash")?,
+        status: row.get("status")?,
+        issued_at: row.get::<_, i64>("issued_at")? as u64,
+        expires_at: row.get::<_, i64>("expires_at")? as u64,
+        settle_after: row.get::<_, i64>("settle_after")? as u64,
+        spending_limit_usd: row.get("spending_limit_usd")?,
+        usage_usd: row.get("usage_usd")?,
+        charge_applied: row
+            .get::<_, Option<i64>>("charge_applied")?
+            .map(|value| value as u128),
+        last_error: row.get("last_error")?,
     })
 }
 
@@ -448,6 +702,7 @@ mod tests {
         let transcript = TranscriptRecord {
             nullifier,
             status: NullifierStatus::Finalized,
+            reservation_kind: "proxy".to_string(),
             client_request_id: Some("req-1".to_string()),
             payload_hash: Some(Felt252::from_u64(1)),
             charge_applied: Some(100),
@@ -501,5 +756,54 @@ mod tests {
 
         let reserved = store.get_reserved_entries();
         assert_eq!(reserved.len(), 2);
+    }
+
+    #[test]
+    fn openrouter_lease_never_persists_plaintext_key() {
+        use zkapi_types::wire::{ApiRequestV2, Groth16ProofWire, ProofBackendWire};
+        use zkapi_types::RequestPublicInputsV2;
+
+        let store = NullifierStore::in_memory().unwrap();
+        let nullifier = Felt252::from_u64(77);
+        let request = ApiRequestV2 {
+            client_request_id: "lease-1".to_string(),
+            payload: "{\"mode\":\"openrouter_ephemeral_lease\",\"version\":1}".to_string(),
+            payload_hash: Felt252::from_u64(88),
+            public_inputs: RequestPublicInputsV2 {
+                protocol_version: 2,
+                chain_id: 1,
+                contract_address: Felt252::from_u64(2),
+                active_root: Felt252::from_u64(3),
+                state_signing_key_x: Felt252::from_u64(4),
+                state_signing_key_y: Felt252::from_u64(5),
+                request_time: 6,
+                solvency_bound: 1_000,
+                request_nullifier: nullifier,
+                authorization_tag: Felt252::from_u64(7),
+                anonymous_commitment_x: Felt252::from_u64(8),
+                anonymous_commitment_y: Felt252::from_u64(9),
+            },
+            proof: Groth16ProofWire {
+                backend: ProofBackendWire::Groth16Bn254,
+                proof: "public-proof".to_string(),
+            },
+        };
+        store
+            .reserve(&nullifier, "lease-1", &request.payload_hash)
+            .unwrap();
+        store
+            .create_openrouter_lease(&request, 10, 20, 21, 0.001)
+            .unwrap();
+        store
+            .activate_openrouter_lease("lease-1", "safe-key-hash")
+            .unwrap();
+
+        let lease = store.lookup_openrouter_lease("lease-1").unwrap();
+        assert_eq!(lease.key_hash.as_deref(), Some("safe-key-hash"));
+        assert!(!serde_json::to_string(&lease.api_request)
+            .unwrap()
+            .contains("sk-or-"));
+        assert_eq!(store.due_openrouter_leases(20).len(), 0);
+        assert_eq!(store.due_openrouter_leases(21).len(), 1);
     }
 }

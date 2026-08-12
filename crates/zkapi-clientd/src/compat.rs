@@ -25,6 +25,58 @@ pub fn extract_model(body: &Value, fallback: &str) -> String {
         .to_string()
 }
 
+/// Normalize the local OpenAI/Responses/Ollama shims into an OpenRouter chat
+/// completion. This transformation runs only on the user's machine; the zkAPI
+/// server never receives the body.
+pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
+    const CHAT_PATH: &str = "/chat/completions";
+    let object = body.as_object().cloned().unwrap_or_default();
+    let messages = object.get("messages").cloned().or_else(|| {
+        object.get("input").map(|input| match input {
+            Value::String(text) => json!([{ "role": "user", "content": text }]),
+            value => value.clone(),
+        })
+    });
+    if path == "/v1/chat/completions" || path == CHAT_PATH {
+        let mut object = object;
+        object.insert("stream".to_string(), Value::Bool(false));
+        return (CHAT_PATH.to_string(), Value::Object(object));
+    }
+
+    let mut normalized = serde_json::Map::new();
+    for key in [
+        "model",
+        "temperature",
+        "max_tokens",
+        "top_p",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+    ] {
+        if let Some(value) = object.get(key) {
+            normalized.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(messages) = messages {
+        normalized.insert("messages".to_string(), messages);
+    }
+    if let Some(Value::Object(options)) = object.get("options") {
+        if let Some(value) = options.get("temperature") {
+            normalized
+                .entry("temperature")
+                .or_insert_with(|| value.clone());
+        }
+        if let Some(value) = options.get("num_predict") {
+            normalized
+                .entry("max_tokens")
+                .or_insert_with(|| value.clone());
+        }
+    }
+    normalized.insert("stream".to_string(), Value::Bool(false));
+    (CHAT_PATH.to_string(), Value::Object(normalized))
+}
+
 pub fn openai_models(models: &[ModelDescriptor]) -> Value {
     Value::Object(serde_json::Map::from_iter([
         ("object".to_string(), Value::String("list".to_string())),
@@ -286,5 +338,16 @@ mod tests {
     fn ollama_tags_render_models() {
         let tags = ollama_tags(&[ModelDescriptor::new("demo")]);
         assert_eq!(tags["models"][0]["name"], "demo");
+    }
+
+    #[test]
+    fn direct_openrouter_normalization_stays_local_and_non_streaming() {
+        let (path, body) = openrouter_request(
+            "/v1/responses",
+            json!({"model": "openai/gpt-4o-mini", "input": "secret prompt"}),
+        );
+        assert_eq!(path, "/chat/completions");
+        assert_eq!(body["messages"][0]["content"], "secret prompt");
+        assert_eq!(body["stream"], false);
     }
 }

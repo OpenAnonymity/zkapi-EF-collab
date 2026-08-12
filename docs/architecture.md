@@ -1,17 +1,18 @@
 # Architecture
 
 ```text
-OpenAI/Ollama client
-        |
-        v
-local zkapi-clientd ----> zkapi-indexerd ----> public testnet ZkApiVault
-        |                       ^                     |
-        | compact Groth16       | deposit events      | Groth16 verifier
-        v                       |                     |
-zkapi-serverd -----------------+---------------------+
-        |
-        v
-OpenRouter / OpenAI upstream
+OpenAI/Ollama app -> local zkapi-clientd -> zkapi-indexerd -> ZkApiVault
+                           |
+               compact Groth16 authorization
+                           |
+                           v
+                    zkapi-serverd
+                    /             \
+          proxy mode               direct-openrouter mode
+       prompt + response          prompt-free key request
+              |                    + aggregate usage later
+              v                             |
+       OpenRouter/OpenAI          local daemon -> OpenRouter
 ```
 
 `zkapi-clientd` is the user's trust boundary. It stores the note secret,
@@ -20,10 +21,17 @@ path, creates a request proof locally, checks the signed response transition,
 and persists the next state atomically.
 
 `zkapi-serverd` checks deployment binding, request freshness, payload binding,
-the active root, Groth16 proof, and nullifier before calling the paid upstream.
-It stores request transcripts for idempotency and crash recovery, updates the
-anonymous balance commitment, and signs the next state with the deployment's
-pinned Baby-JubJub key.
+the active root, Groth16 proof, and nullifier. In proxy mode it calls the paid
+upstream and therefore sees LLM traffic. In direct OpenRouter mode it sees only
+a fixed lease authorization, creates an expiring child key, and later reads the
+key's aggregate dollar usage. It stores durable reservations and non-secret
+lease metadata for crash recovery, updates the anonymous balance commitment,
+and signs the next state with the deployment's pinned Baby-JubJub key.
+
+One direct lease can cover several OpenRouter calls. The wallet cannot spend
+again while that lease's nullifier is reserved; it advances only after expiry
+and authoritative usage settlement. The key's provider-enforced limit bounds
+the interval's spend by the amount authorized in that single proof.
 
 `zkapi-indexerd` reconstructs the depth-32 active-note tree from vault events.
 It exposes the current root, next note ID, and paths. A future privacy hardening

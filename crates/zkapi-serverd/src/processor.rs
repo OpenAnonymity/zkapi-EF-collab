@@ -474,6 +474,7 @@ impl RequestProcessor {
         let transcript = TranscriptRecord {
             nullifier: pi.request_nullifier,
             status: NullifierStatus::Finalized,
+            reservation_kind: "proxy".to_string(),
             client_request_id: Some(api_request.client_request_id.clone()),
             payload_hash: Some(api_request.payload_hash),
             charge_applied: Some(charge),
@@ -821,6 +822,7 @@ mod tests {
                 &TranscriptRecord {
                     nullifier,
                     status: NullifierStatus::Finalized,
+                    reservation_kind: "proxy".to_string(),
                     client_request_id: Some("req-1".to_string()),
                     payload_hash: Some(Felt252::from_u64(7)),
                     charge_applied: Some(3),

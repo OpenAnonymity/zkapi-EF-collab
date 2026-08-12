@@ -9,10 +9,10 @@ use serde_json::Value;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
-    run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor,
+    run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor, RequestMode,
     WithdrawalMode,
 };
-use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
+use zkapi_serverd::config::{MeteredConfig, OpenRouterLeaseConfig, ProviderKind, ServerConfig};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
@@ -95,6 +95,8 @@ enum Commands {
     Clientd {
         #[arg(long, default_value = "127.0.0.1:11434")]
         listen: String,
+        #[arg(long, value_enum, default_value_t = ClientModeArg::Proxy)]
+        mode: ClientModeArg,
     },
     /// Start a ready-to-use local OpenAI/Ollama-compatible client.
     ///
@@ -123,6 +125,9 @@ enum Commands {
         /// Do not call a test deployment's optional faucet-style mint method.
         #[arg(long)]
         skip_mint: bool,
+        /// Request transport: server-side proxying, or prompt-private direct OpenRouter leases.
+        #[arg(long, value_enum, default_value_t = ClientModeArg::Proxy)]
+        mode: ClientModeArg,
     },
     #[command(name = "serverd", alias = "server")]
     Serverd {
@@ -148,6 +153,17 @@ enum Commands {
         /// Metered provider: OpenRouter base URL.
         #[arg(long, default_value = "https://openrouter.ai/api")]
         openrouter_api_base: String,
+        /// OpenRouter Management API key used only to mint bounded runtime leases.
+        #[arg(long)]
+        openrouter_management_key: Option<String>,
+        /// Validity of each prompt-private runtime key.
+        #[arg(long, default_value_t = 300)]
+        openrouter_lease_ttl_seconds: u64,
+        /// Usage propagation delay after key expiry before settlement.
+        #[arg(long, default_value_t = 5)]
+        openrouter_settlement_grace_seconds: u64,
+        #[arg(long, default_value_t = 2)]
+        openrouter_settlement_poll_seconds: u64,
         #[arg(long, default_value = "zkapi-server.db")]
         db_path: String,
         /// State-signing secret seed. Falls back to ZKAPI_STATE_SEED, then 0x1.
@@ -215,6 +231,12 @@ enum Commands {
 enum WithdrawalModeArg {
     Mutual,
     Escape,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ClientModeArg {
+    Proxy,
+    DirectOpenrouter,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -302,8 +324,9 @@ async fn main() -> anyhow::Result<()> {
                 "commitment": commitment,
             }))?;
         }
-        Commands::Clientd { listen } => {
-            let service = build_auth_service(&cli)?;
+        Commands::Clientd { listen, mode } => {
+            let service = build_auth_service_with_mode(&cli, mode.into())?;
+            service.ensure_request_mode_available().await?;
             run(service, &listen).await?
         }
         Commands::Client {
@@ -314,17 +337,19 @@ async fn main() -> anyhow::Result<()> {
             initial_credits,
             no_fund,
             skip_mint,
+            mode,
         } => {
             configure_client_prover_threads()?;
-            run_one_command_client(
-                &deployment,
-                address.as_deref(),
-                &listen,
-                state_dir,
+            run_one_command_client(OneCommandClientOptions {
+                deployment: &deployment,
+                requested_address: address.as_deref(),
+                listen: &listen,
+                requested_state_dir: state_dir,
                 initial_credits,
                 no_fund,
                 skip_mint,
-            )
+                request_mode: mode.into(),
+            })
             .await?
         }
         Commands::Serverd {
@@ -337,6 +362,10 @@ async fn main() -> anyhow::Result<()> {
             openai_api_base,
             openrouter_inference_key,
             openrouter_api_base,
+            openrouter_management_key,
+            openrouter_lease_ttl_seconds,
+            openrouter_settlement_grace_seconds,
+            openrouter_settlement_poll_seconds,
             db_path,
             state_seed,
             clear_seed,
@@ -348,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "0x1".to_string());
             let clear_seed = resolve_secret(clear_seed, std::env::var("ZKAPI_CLEAR_SEED").ok())
                 .unwrap_or_else(|| "0x2".to_string());
+            let openrouter_api_base_for_leases = openrouter_api_base.clone();
             let metered = if matches!(provider, ProviderArg::Metered) {
                 Some(MeteredConfig {
                     openai_api_base,
@@ -364,6 +394,17 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            let openrouter_leases = resolve_secret(
+                openrouter_management_key,
+                std::env::var("ZKAPI_OPENROUTER_MANAGEMENT_KEY").ok(),
+            )
+            .map(|management_key| OpenRouterLeaseConfig {
+                management_key,
+                api_base: openrouter_api_base_for_leases,
+                ttl_seconds: openrouter_lease_ttl_seconds,
+                settlement_grace_seconds: openrouter_settlement_grace_seconds,
+                settlement_poll_seconds: openrouter_settlement_poll_seconds,
+            });
             let config = ServerConfig {
                 protocol_version: cli.protocol_version,
                 chain_id: cli.chain_id,
@@ -390,6 +431,7 @@ async fn main() -> anyhow::Result<()> {
                 root_poll_interval_ms,
                 trusted_epoch_roots: load_trusted_epoch_roots(cli.trusted_epoch_roots.as_deref())?,
                 metered,
+                openrouter_leases,
                 proof_setup_dir: cli.proof_setup_dir.clone(),
                 ..Default::default()
             };
@@ -513,6 +555,13 @@ fn configure_client_prover_threads() -> anyhow::Result<()> {
 }
 
 fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
+    build_auth_service_with_mode(cli, RequestMode::Proxy)
+}
+
+fn build_auth_service_with_mode(
+    cli: &Cli,
+    request_mode: RequestMode,
+) -> anyhow::Result<Arc<AuthService>> {
     AuthService::new(AuthConfig {
         protocol_version: cli.protocol_version,
         chain_id: cli.chain_id,
@@ -549,6 +598,7 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
             &cli.clearance_signing_key_x,
             &cli.clearance_signing_key_y,
         )?,
+        request_mode,
     })
     .map_err(Into::into)
 }
@@ -556,22 +606,36 @@ fn build_auth_service(cli: &Cli) -> anyhow::Result<Arc<AuthService>> {
 /// Start the local compatibility daemon from a published public deployment
 /// manifest. This is the low-friction entrypoint: no caller has to repeat the
 /// deployment's addresses, chain parameters, proving setup, or server keys.
-async fn run_one_command_client(
-    deployment: &str,
-    requested_address: Option<&str>,
-    listen: &str,
+struct OneCommandClientOptions<'a> {
+    deployment: &'a str,
+    requested_address: Option<&'a str>,
+    listen: &'a str,
     requested_state_dir: Option<PathBuf>,
     initial_credits: u128,
     no_fund: bool,
     skip_mint: bool,
-) -> anyhow::Result<()> {
+    request_mode: RequestMode,
+}
+
+async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow::Result<()> {
+    let OneCommandClientOptions {
+        deployment,
+        requested_address,
+        listen,
+        requested_state_dir,
+        initial_credits,
+        no_fund,
+        skip_mint,
+        request_mode,
+    } = options;
     let manifest = load_deployment_manifest(deployment).await?;
     validate_deployment_manifest(&manifest)?;
 
     let state_dir =
         requested_state_dir.unwrap_or_else(|| default_client_state_dir(&manifest.deployment_id));
     ensure_private_state_dir(&state_dir)?;
-    let service = auth_service_from_manifest(&manifest, state_dir.clone(), listen)?;
+    let service = auth_service_from_manifest(&manifest, state_dir.clone(), listen, request_mode)?;
+    service.ensure_request_mode_available().await?;
 
     let status = service.status().await?;
     if !status.has_note {
@@ -624,6 +688,12 @@ async fn run_one_command_client(
     println!("  OpenAI Responses:        http://{listen}/v1/responses");
     println!("  Ollama Chat:              http://{listen}/api/chat");
     println!("  Models:                   http://{listen}/v1/models");
+    match request_mode {
+        RequestMode::Proxy => println!("  Privacy mode:             server proxy"),
+        RequestMode::DirectOpenrouter => println!(
+            "  Privacy mode:             direct OpenRouter (zkAPI server receives no prompts or responses)"
+        ),
+    }
 
     run(service, listen).await
 }
@@ -678,6 +748,7 @@ fn auth_service_from_manifest(
     manifest: &DeploymentManifest,
     state_dir: PathBuf,
     listen: &str,
+    request_mode: RequestMode,
 ) -> anyhow::Result<Arc<AuthService>> {
     let models = if manifest.models.is_empty() {
         vec![ModelDescriptor::new("openai/gpt-4o-mini")]
@@ -715,6 +786,7 @@ fn auth_service_from_manifest(
             &manifest.clearance_signing_key.x,
             &manifest.clearance_signing_key.y,
         )?,
+        request_mode,
     })
     .map_err(Into::into)
 }
@@ -1115,6 +1187,15 @@ impl From<WithdrawalModeArg> for WithdrawalMode {
     }
 }
 
+impl From<ClientModeArg> for RequestMode {
+    fn from(value: ClientModeArg) -> Self {
+        match value {
+            ClientModeArg::Proxy => RequestMode::Proxy,
+            ClientModeArg::DirectOpenrouter => RequestMode::DirectOpenrouter,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,7 +1248,7 @@ mod tests {
         );
 
         match cli.command {
-            Commands::Clientd { listen } => assert_eq!(listen, "127.0.0.1:11435"),
+            Commands::Clientd { listen, .. } => assert_eq!(listen, "127.0.0.1:11435"),
             other => panic!("expected clientd command, got {other:?}"),
         }
     }
@@ -1200,6 +1281,7 @@ mod tests {
                 initial_credits,
                 no_fund,
                 skip_mint,
+                mode,
             } => {
                 assert_eq!(deployment, "https://example.test/config.json");
                 assert_eq!(
@@ -1211,6 +1293,7 @@ mod tests {
                 assert_eq!(initial_credits, 42);
                 assert!(!no_fund);
                 assert!(skip_mint);
+                assert!(matches!(mode, ClientModeArg::Proxy));
             }
             other => panic!("expected client command, got {other:?}"),
         }
@@ -1231,6 +1314,46 @@ mod tests {
             }
             other => panic!("expected client command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_accepts_prompt_private_openrouter_mode() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "client",
+            "--mode",
+            "direct-openrouter",
+            "--no-fund",
+        ])
+        .expect("direct mode parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Client {
+                mode: ClientModeArg::DirectOpenrouter,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_accepts_independent_openrouter_management_key() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "serverd",
+            "--openrouter-management-key",
+            "management-secret",
+            "--openrouter-lease-ttl-seconds",
+            "120",
+        ])
+        .expect("lease config parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Serverd {
+                openrouter_management_key: Some(_),
+                openrouter_lease_ttl_seconds: 120,
+                ..
+            }
+        ));
     }
 
     #[test]

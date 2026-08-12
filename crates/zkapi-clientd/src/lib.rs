@@ -5,7 +5,7 @@ pub mod indexer;
 pub mod routes;
 pub mod service;
 
-pub use config::{AuthConfig, ModelDescriptor};
+pub use config::{AuthConfig, ModelDescriptor, RequestMode};
 pub use routes::{build_router, run};
 pub use service::{
     AuthService, ConfirmDepositRequest, CoreRequest, CoreResponse, DemoOverview, DepositPlan,

@@ -40,6 +40,33 @@ paths:
         "200": {description: Provider result and signed next state}
         "400": {description: Invalid request or proof}
         "409": {description: Replayed nullifier}
+  /v2/openrouter/leases:
+    post:
+      summary: Open a prompt-private, spending-limited OpenRouter lease
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ApiRequestV2"}
+      responses:
+        "201":
+          description: One-time plaintext runtime key and lease timing
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OpenRouterLease"}
+        "400": {description: Invalid request, proof, or disabled lease mode}
+        "409": {description: Existing active or settling lease}
+  /v2/openrouter/leases/{client_request_id}:
+    get:
+      summary: Read non-secret lease state; never returns the runtime key
+      parameters:
+        - in: path
+          name: client_request_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Lease timing, status, and finalized aggregate usage}
+        "404": {description: Unknown lease}
   /v2/withdraw/clearance:
     post:
       summary: Request a mutual-close clearance signature
@@ -73,3 +100,16 @@ components:
         payload_hash: {type: string, pattern: "^0x[0-9a-f]+$"}
         public_inputs: {type: object, additionalProperties: true}
         proof: {$ref: "#/components/schemas/Groth16Proof"}
+    OpenRouterLease:
+      type: object
+      required: [status, client_request_id, api_key, openrouter_api_base, issued_at, expires_at, valid_for_seconds, settle_after, spending_limit_usd]
+      properties:
+        status: {const: active}
+        client_request_id: {type: string}
+        api_key: {type: string, description: Returned once and never persisted by zkapi-serverd}
+        openrouter_api_base: {type: string, format: uri}
+        issued_at: {type: integer}
+        expires_at: {type: integer}
+        valid_for_seconds: {type: integer}
+        settle_after: {type: integer}
+        spending_limit_usd: {type: number}

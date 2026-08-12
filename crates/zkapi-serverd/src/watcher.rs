@@ -110,6 +110,7 @@ mod tests {
                 &TranscriptRecord {
                     nullifier,
                     status: NullifierStatus::Finalized,
+                    reservation_kind: "proxy".to_string(),
                     client_request_id: Some("req-1".into()),
                     payload_hash: Some(Felt252::from_u64(9)),
                     charge_applied: Some(1),

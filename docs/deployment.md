@@ -81,6 +81,8 @@ public keys are pinned in the vault:
 
 ```bash
 export ZKAPI_OPENROUTER_INFERENCE_KEY='...'
+# Separate OpenRouter Management API key; required only for direct leases.
+export ZKAPI_OPENROUTER_MANAGEMENT_KEY='...'
 export ZKAPI_STATE_SEED='0x...'
 export ZKAPI_CLEAR_SEED='0x...'
 
@@ -92,13 +94,23 @@ export ZKAPI_CLEAR_SEED='0x...'
   --proof-setup-dir "$PWD/protocol/setup/v2" \
   serverd --listen 0.0.0.0:3000 --provider metered \
   --indexer-url http://127.0.0.1:3001 \
+  --openrouter-lease-ttl-seconds 300 \
+  --openrouter-settlement-grace-seconds 5 \
   --db-path /data/zkapi-server.db
 ```
+
+The inference and management keys are different credentials. OpenRouter
+management keys cannot perform completions; they create, inspect, and revoke
+the short-lived runtime keys used by direct mode. Omitting
+`ZKAPI_OPENROUTER_MANAGEMENT_KEY` disables only direct leases: the configured
+proxy provider continues to run. Both `/v2/requests` and
+`/v2/openrouter/leases` are served by the same process when it is present.
 
 Put TLS/reverse-proxy routing in front of the services. Route `/v2/*`,
 `/health`, `/v1/attestation`, and dashboard requests to serverd; route
 `/v1/tree/*` to indexerd. Do not expose the OpenRouter key or signing seeds in
-the client manifest, image, shell history, or repository.
+the client manifest, image, shell history, or repository. The management key
+must have permission to create, list, inspect, and delete OpenRouter API keys.
 
 ## 4. Publish client parameters
 

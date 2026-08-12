@@ -7,8 +7,9 @@ use base64::Engine;
 use zkapi_core::v2 as core;
 use zkapi_proof::compact::{random_field, random_scalar, server_update, RequestVerifier};
 use zkapi_types::wire::{
-    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, RecoveryResponseV2,
-    RequestResponseV2,
+    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire,
+    OpenRouterLeaseAuthorization, OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse,
+    RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::{
     canonical_payload_hash, canonical_request_context, canonical_response_hash, Felt252,
@@ -21,12 +22,28 @@ use crate::dashboard::{
 };
 use crate::error::ServerError;
 use crate::nullifier_store::{NullifierStore, TranscriptRecord};
+use crate::openrouter::OpenRouterProvisioner;
 use crate::pricing;
-use crate::provider::ApiProvider;
+use crate::provider::{ApiProvider, ProviderResponse, UsageInfo};
 use crate::signer::ServerSigner;
 
 const MAX_REQUEST_AGE_SECONDS: u64 = 300;
 const MAX_FUTURE_SKEW_SECONDS: u64 = 30;
+
+#[derive(Clone, Copy)]
+enum ReservationKind {
+    Proxy,
+    OpenRouterLease,
+}
+
+impl ReservationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::OpenRouterLease => "openrouter_lease",
+        }
+    }
+}
 
 pub struct RequestProcessor {
     config: ServerConfig,
@@ -36,6 +53,8 @@ pub struct RequestProcessor {
     provider: Arc<dyn ApiProvider>,
     current_root: Arc<RwLock<Felt252>>,
     dashboard: Option<Arc<DashboardHub>>,
+    openrouter: Option<Arc<OpenRouterProvisioner>>,
+    lease_issue_lock: tokio::sync::Mutex<()>,
 }
 
 impl RequestProcessor {
@@ -46,7 +65,25 @@ impl RequestProcessor {
         provider: Arc<dyn ApiProvider>,
         current_root: Felt252,
     ) -> anyhow::Result<Self> {
+        if let Some(lease) = config.openrouter_leases.as_ref() {
+            anyhow::ensure!(
+                !lease.management_key.is_empty(),
+                "OpenRouter management key cannot be empty"
+            );
+            anyhow::ensure!(
+                lease.ttl_seconds > 0,
+                "OpenRouter lease TTL must be positive"
+            );
+        }
         let verifier = RequestVerifier::load(&config.proof_setup_dir)?;
+        let openrouter = config
+            .openrouter_leases
+            .as_ref()
+            .map(|lease| {
+                OpenRouterProvisioner::new(lease.management_key.clone(), lease.api_base.clone())
+                    .map(Arc::new)
+            })
+            .transpose()?;
         Ok(Self {
             config,
             store,
@@ -55,6 +92,8 @@ impl RequestProcessor {
             provider,
             current_root: Arc::new(RwLock::new(current_root)),
             dashboard: None,
+            openrouter,
+            lease_issue_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -93,6 +132,224 @@ impl RequestProcessor {
         request: &ApiRequestV2,
     ) -> Result<RequestResponseV2, ServerError> {
         let started = Instant::now();
+        if let Some(response) = self.validate_and_reserve(request, ReservationKind::Proxy)? {
+            return Ok(response);
+        }
+        let upstream_started = Instant::now();
+        let provider_response = self
+            .provider
+            .execute(
+                &request.client_request_id,
+                &request.payload,
+                &request.payload_hash,
+            )
+            .await?;
+        self.finalize_request(
+            request,
+            provider_response,
+            upstream_started.elapsed().as_millis() as u64,
+            started.elapsed().as_millis() as u64,
+        )
+    }
+
+    /// Reserve one prompt-free zkAPI request and mint its bounded OpenRouter
+    /// runtime key. Ordinary proxied requests continue to use `/v2/requests`.
+    pub async fn issue_openrouter_lease(
+        &self,
+        request: &ApiRequestV2,
+    ) -> Result<OpenRouterLeaseResponse, ServerError> {
+        let authorization: OpenRouterLeaseAuthorization = serde_json::from_str(&request.payload)
+            .map_err(|error| {
+                ServerError::InvalidRequest(format!(
+                    "invalid prompt-free OpenRouter lease authorization: {error}"
+                ))
+            })?;
+        if authorization != OpenRouterLeaseAuthorization::default() {
+            return Err(ServerError::InvalidRequest(
+                "unsupported OpenRouter lease authorization".to_string(),
+            ));
+        }
+        let lease_config = self.config.openrouter_leases.as_ref().ok_or_else(|| {
+            ServerError::InvalidRequest(
+                "prompt-private OpenRouter leases are not enabled on this server".to_string(),
+            )
+        })?;
+        if self.config.policy_enabled {
+            return Err(ServerError::InvalidRequest(
+                "prompt-private leases cannot enforce server-side prompt policy".to_string(),
+            ));
+        }
+        let provisioner = self.openrouter.as_ref().ok_or_else(|| {
+            ServerError::Internal("OpenRouter lease provider is unavailable".to_string())
+        })?;
+        let _issue_guard = self.lease_issue_lock.lock().await;
+
+        if self
+            .validate_and_reserve(request, ReservationKind::OpenRouterLease)?
+            .is_some()
+        {
+            return Err(ServerError::Replay);
+        }
+        let key_name = format!("zkapi-{}", request.client_request_id);
+        if let Some(existing) = self
+            .store
+            .lookup_openrouter_lease(&request.client_request_id)
+        {
+            if existing.status != "provisioning" || existing.key_hash.is_some() {
+                return Err(ServerError::LeasePending);
+            }
+            provisioner.delete_keys_named(&key_name).await?;
+            self.store
+                .remove_failed_openrouter_lease(&request.client_request_id)?;
+        }
+        let issued_at = current_timestamp();
+        let expires_at = issued_at.saturating_add(lease_config.ttl_seconds);
+        let settle_after = expires_at.saturating_add(lease_config.settlement_grace_seconds);
+        let spending_limit_usd = pricing::credits_to_usd(self.config.request_charge_cap);
+        if !spending_limit_usd.is_finite() || spending_limit_usd <= 0.0 {
+            return Err(ServerError::InvalidRequest(
+                "lease spending limit must be positive".to_string(),
+            ));
+        }
+        self.store.create_openrouter_lease(
+            request,
+            issued_at,
+            expires_at,
+            settle_after,
+            spending_limit_usd,
+        )?;
+        let created = match provisioner
+            .create_key(&key_name, spending_limit_usd, expires_at)
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = self
+                    .store
+                    .remove_failed_openrouter_lease(&request.client_request_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .store
+            .activate_openrouter_lease(&request.client_request_id, &created.hash)
+        {
+            let _ = provisioner.delete_key(&created.hash).await;
+            return Err(error);
+        }
+        Ok(OpenRouterLeaseResponse {
+            status: "active".to_string(),
+            client_request_id: request.client_request_id.clone(),
+            api_key: created.key,
+            openrouter_api_base: provisioner.inference_base(),
+            issued_at,
+            expires_at,
+            valid_for_seconds: lease_config.ttl_seconds,
+            settle_after,
+            spending_limit_usd,
+        })
+    }
+
+    /// Settle every expired lease from OpenRouter's authoritative aggregate
+    /// usage. Failures are retained and retried by the next background scan.
+    pub async fn settle_due_openrouter_leases(&self) {
+        let Some(provisioner) = &self.openrouter else {
+            return;
+        };
+        for lease in self.store.due_openrouter_leases(current_timestamp()) {
+            if let Err(error) = self.settle_openrouter_lease(&lease, provisioner).await {
+                tracing::warn!(
+                    client_request_id = %lease.client_request_id,
+                    error = %error,
+                    "OpenRouter lease settlement will be retried"
+                );
+                let _ = self
+                    .store
+                    .record_openrouter_lease_error(&lease.client_request_id, &error.to_string());
+            }
+        }
+    }
+
+    async fn settle_openrouter_lease(
+        &self,
+        lease: &crate::nullifier_store::OpenRouterLeaseRecord,
+        provisioner: &OpenRouterProvisioner,
+    ) -> Result<(), ServerError> {
+        if let Some(record) = self
+            .store
+            .lookup_by_nullifier(&lease.request_nullifier)
+            .filter(|record| record.status == NullifierStatus::Finalized)
+        {
+            let usage_usd = record
+                .response_payload
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| payload["usage_usd"].as_f64())
+                .unwrap_or_default();
+            self.store.finalize_openrouter_lease(
+                &lease.client_request_id,
+                usage_usd,
+                record.charge_applied.unwrap_or_default(),
+            )?;
+            return Ok(());
+        }
+        let key_hash = lease.key_hash.as_deref().ok_or_else(|| {
+            ServerError::Internal("active OpenRouter lease has no key hash".to_string())
+        })?;
+        let usage = provisioner.get_key_usage(key_hash).await?;
+        let raw_charge = pricing::usd_to_credits(usage.usage_usd);
+        let charge = raw_charge.min(self.config.request_charge_cap);
+        if charge != raw_charge {
+            tracing::warn!(
+                client_request_id = %lease.client_request_id,
+                raw_charge,
+                charge,
+                "OpenRouter usage exceeded the proof-bound lease limit; clamped charge"
+            );
+        }
+        let payload = serde_json::json!({
+            "type": "openrouter_ephemeral_lease_settlement",
+            "issued_at": lease.issued_at,
+            "expires_at": lease.expires_at,
+            "usage_usd": usage.usage_usd,
+        })
+        .to_string();
+        let provider_response = ProviderResponse {
+            status_code: 200,
+            payload,
+            charge_applied: charge,
+            policy_reason_code: None,
+            policy_evidence_hash: None,
+            usage: Some(UsageInfo {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cost_usd: usage.usage_usd,
+                cost_source: "openrouter_key_aggregate".to_string(),
+            }),
+            upstream_model: None,
+            billing_label: "direct:openrouter-ephemeral".to_string(),
+        };
+        self.finalize_request(&lease.api_request, provider_response, 0, 0)?;
+        self.store
+            .finalize_openrouter_lease(&lease.client_request_id, usage.usage_usd, charge)?;
+        if let Err(error) = provisioner.delete_key(key_hash).await {
+            tracing::warn!(
+                client_request_id = %lease.client_request_id,
+                error = %error,
+                "expired OpenRouter key could not be deleted"
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate proof/deployment bindings and reserve the request nullifier.
+    /// Returns a prior finalized response for an idempotent replay.
+    fn validate_and_reserve(
+        &self,
+        request: &ApiRequestV2,
+        reservation_kind: ReservationKind,
+    ) -> Result<Option<RequestResponseV2>, ServerError> {
         let public = &request.public_inputs;
         let payload_hash = canonical_payload_hash(request.payload.as_bytes());
         if payload_hash != request.payload_hash {
@@ -107,6 +364,26 @@ impl RequestProcessor {
             return Err(ServerError::ProtocolMismatch(
                 "version, chain, or contract mismatch".to_string(),
             ));
+        }
+        // A byte-identical request already reserved by this endpoint passed
+        // all checks on its first attempt. Resume it before root/freshness
+        // checks so a transport retry remains possible after those values move.
+        // A different endpoint kind can never claim the reservation.
+        if let Some(existing) = self.store.lookup_by_nullifier(&public.request_nullifier) {
+            let same_request = existing.client_request_id.as_deref()
+                == Some(&request.client_request_id)
+                && existing.payload_hash == Some(request.payload_hash)
+                && existing.reservation_kind == reservation_kind.as_str();
+            if !same_request {
+                return Err(ServerError::Replay);
+            }
+            return match existing.status {
+                NullifierStatus::Finalized => {
+                    response_from_record(&existing, &request.client_request_id).map(Some)
+                }
+                NullifierStatus::Reserved => Ok(None),
+                NullifierStatus::ClearanceReserved => Err(ServerError::Replay),
+            };
         }
         let root = self.current_root();
         if public.active_root != root {
@@ -156,36 +433,30 @@ impl RequestProcessor {
             ));
         }
 
-        match self.store.lookup_by_nullifier(&public.request_nullifier) {
-            Some(existing)
-                if existing.client_request_id.as_deref() == Some(&request.client_request_id)
-                    && existing.payload_hash == Some(request.payload_hash)
-                    && existing.status == NullifierStatus::Finalized =>
-            {
-                return response_from_record(&existing, &request.client_request_id)
-            }
-            Some(existing)
-                if existing.client_request_id.as_deref() == Some(&request.client_request_id)
-                    && existing.payload_hash == Some(request.payload_hash)
-                    && existing.status == NullifierStatus::Reserved => {}
-            Some(_) => return Err(ServerError::Replay),
-            None => self.store.reserve(
+        match reservation_kind {
+            ReservationKind::Proxy => self.store.reserve(
+                &public.request_nullifier,
+                &request.client_request_id,
+                &request.payload_hash,
+            )?,
+            ReservationKind::OpenRouterLease => self.store.reserve_openrouter_lease(
                 &public.request_nullifier,
                 &request.client_request_id,
                 &request.payload_hash,
             )?,
         }
+        Ok(None)
+    }
 
-        let upstream_started = Instant::now();
-        let provider_response = self
-            .provider
-            .execute(
-                &request.client_request_id,
-                &request.payload,
-                &request.payload_hash,
-            )
-            .await?;
-        let upstream_ms = upstream_started.elapsed().as_millis() as u64;
+    fn finalize_request(
+        &self,
+        request: &ApiRequestV2,
+        provider_response: ProviderResponse,
+        upstream_ms: u64,
+        total_ms: u64,
+    ) -> Result<RequestResponseV2, ServerError> {
+        let public = &request.public_inputs;
+        let state_key = self.state_signing_key();
         let policy_charged =
             self.config.policy_enabled && provider_response.policy_reason_code.is_some();
         let charge_cap = if policy_charged {
@@ -227,10 +498,18 @@ impl RequestProcessor {
         let proof_bytes = base64::engine::general_purpose::STANDARD
             .decode(&request.proof.proof)
             .map_err(|error| ServerError::InvalidProof(error.to_string()))?;
+        let reservation_kind = self
+            .store
+            .lookup_by_nullifier(&public.request_nullifier)
+            .ok_or_else(|| {
+                ServerError::Internal("request nullifier is no longer reserved".to_string())
+            })?
+            .reservation_kind;
 
         let transcript = TranscriptRecord {
             nullifier: public.request_nullifier,
             status: NullifierStatus::Finalized,
+            reservation_kind,
             client_request_id: Some(request.client_request_id.clone()),
             payload_hash: Some(request.payload_hash),
             charge_applied: Some(provider_response.charge_applied),
@@ -248,7 +527,7 @@ impl RequestProcessor {
             policy_evidence_hash: provider_response.policy_evidence_hash,
             proof_blob: Some(proof_bytes.clone()),
             request_inputs_json: serde_json::to_string(public).ok(),
-            created_at: now,
+            created_at: current_timestamp(),
             finalized_at: Some(current_timestamp()),
         };
         self.store
@@ -290,7 +569,7 @@ impl RequestProcessor {
                 next_state_sig_leaf_index: 0,
                 next_state_sig_root: state_key.x,
                 upstream_ms,
-                total_ms: started.elapsed().as_millis() as u64,
+                total_ms,
             });
         }
 
@@ -309,6 +588,29 @@ impl RequestProcessor {
             policy_reason_code: provider_response.policy_reason_code,
             policy_evidence_hash: provider_response.policy_evidence_hash,
         })
+    }
+
+    pub fn openrouter_leases_enabled(&self) -> bool {
+        self.openrouter.is_some()
+    }
+
+    pub fn openrouter_lease_status(
+        &self,
+        client_request_id: &str,
+    ) -> Option<OpenRouterLeaseStatusResponse> {
+        self.store
+            .lookup_openrouter_lease(client_request_id)
+            .map(|lease| OpenRouterLeaseStatusResponse {
+                status: lease.status,
+                client_request_id: lease.client_request_id,
+                issued_at: lease.issued_at,
+                expires_at: lease.expires_at,
+                settle_after: lease.settle_after,
+                spending_limit_usd: lease.spending_limit_usd,
+                usage_usd: lease.usage_usd,
+                charge_applied: lease.charge_applied,
+                last_error: lease.last_error,
+            })
     }
 
     pub fn process_clearance(

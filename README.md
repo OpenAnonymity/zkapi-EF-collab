@@ -2,8 +2,9 @@
 
 zkAPI is a private, prepaid API client. A user deposits billing credits into an
 Ethereum vault, then proves locally that an unlinkable private note can pay for
-each request. The server verifies a compact proof, calls the configured API
-provider, applies the charge, and signs the next private state.
+each request. It supports the existing server-proxy mode and a prompt-private
+OpenRouter mode in which the server issues a short-lived, spending-limited key,
+sees only aggregate cost after expiry, and never receives prompts or responses.
 
 Version 2 uses:
 
@@ -67,6 +68,23 @@ explicitly:
 Both vaults accept their configured ERC-20 billing token. The Mainnet vault
 uses real USDC; native ETH is used for transaction gas, not request credits.
 
+The default `--mode proxy` sends each request through `zkapi-serverd`. On a
+deployment that advertises `direct_openrouter`, opt into the prompt-private
+mode with:
+
+```bash
+./target/release/zkapi client --mode direct-openrouter
+```
+
+The first local LLM call creates one Groth16 authorization and receives a
+short-lived OpenRouter runtime key. The local daemon then calls OpenRouter
+directly and reuses that key for sequential chats until it expires. After
+expiry, `zkapi-serverd` reads the key's authoritative aggregate USD usage,
+applies one zkAPI state transition, and the local daemon recovers it before
+opening the next lease. OpenRouter still sees the LLM traffic; the zkAPI server
+does not. The runtime key is held only in local process memory and is never
+stored by the server.
+
 For example, with `zkapi client` running:
 
 ```bash
@@ -81,7 +99,7 @@ equivalent OpenAI Responses and Ollama examples.
 ## Components
 
 - `zkapi-clientd`: local wallet, proof generation, recovery, and OpenAI/Ollama compatibility.
-- `zkapi-serverd`: proof verification, nullifier DB, provider execution, billing, and next-state signing.
+- `zkapi-serverd`: proof verification, nullifier/lease DB, proxy execution or aggregate lease billing, and next-state signing.
 - `zkapi-indexerd`: Ethereum event indexer and Merkle-path service.
 - `protocol/rust`: shared v2 primitives, circuits, proof code, and wallet SDK.
 - `protocol/contracts`: the real Groth16 adapter and Ethereum settlement vault.

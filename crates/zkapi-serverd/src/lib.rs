@@ -8,6 +8,7 @@ pub mod dashboard;
 pub mod error;
 pub mod metered_provider;
 pub mod nullifier_store;
+pub mod openrouter;
 pub mod pricing;
 #[path = "processor_v2.rs"]
 pub mod processor;

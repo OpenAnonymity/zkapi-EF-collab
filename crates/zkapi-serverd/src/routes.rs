@@ -4,6 +4,7 @@
 //! - GET  /health                   -- process health and config summary
 //! - GET  /v1/attestation           -- published signer metadata for deployments
 //! - POST /v2/requests              -- submit an API request
+//! - POST /v2/openrouter/leases     -- open a prompt-private runtime-key lease
 //! - POST /v2/withdraw/clearance    -- request mutual-close clearance
 //! - GET  /v2/requests/:id          -- recover by client_request_id
 //! - GET  /v2/nullifiers/:nullifier -- recover by nullifier
@@ -23,7 +24,7 @@ use tower_http::cors::CorsLayer;
 
 use zkapi_types::wire::{
     ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, ErrorResponse,
-    RecoveryResponseV2, RequestResponseV2,
+    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::Felt252;
 
@@ -72,6 +73,12 @@ pub async fn run_server(config: crate::config::ServerConfig) -> anyhow::Result<(
             Duration::from_millis(config.root_poll_interval_ms),
         );
     }
+    if let Some(lease) = config.openrouter_leases.as_ref() {
+        spawn_openrouter_lease_settler(
+            processor.clone(),
+            Duration::from_secs(lease.settlement_poll_seconds.max(1)),
+        );
+    }
     let router = create_router(processor);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Server listening on {}", config.listen_addr);
@@ -96,6 +103,11 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
         .route("/health", get(handle_health))
         .route("/v1/attestation", get(handle_attestation))
         .route("/v2/requests", post(handle_request))
+        .route("/v2/openrouter/leases", post(handle_openrouter_lease))
+        .route(
+            "/v2/openrouter/leases/{client_request_id}",
+            get(handle_openrouter_lease_status),
+        )
         .route("/v2/withdraw/clearance", post(handle_clearance))
         .route(
             "/v2/requests/{client_request_id}",
@@ -121,6 +133,7 @@ struct HealthResponse {
     indexer_url: Option<String>,
     policy_enabled: bool,
     auth_scheme: &'static str,
+    request_modes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +160,11 @@ async fn handle_health(State(processor): State<AppState>) -> Json<HealthResponse
         indexer_url: config.indexer_url.clone(),
         policy_enabled: config.policy_enabled,
         auth_scheme: config.auth_scheme.as_str(),
+        request_modes: if processor.openrouter_leases_enabled() {
+            vec!["proxy", "direct_openrouter"]
+        } else {
+            vec!["proxy"]
+        },
     })
 }
 
@@ -174,6 +192,27 @@ async fn handle_request(
         .await
         .map(Json)
         .map_err(|e| error_to_response(&e, &api_request.client_request_id, &processor))
+}
+
+async fn handle_openrouter_lease(
+    State(processor): State<AppState>,
+    Json(api_request): Json<ApiRequestV2>,
+) -> Result<(StatusCode, Json<OpenRouterLeaseResponse>), (StatusCode, Json<ErrorResponse>)> {
+    processor
+        .issue_openrouter_lease(&api_request)
+        .await
+        .map(|response| (StatusCode::CREATED, Json(response)))
+        .map_err(|error| error_to_response(&error, &api_request.client_request_id, &processor))
+}
+
+async fn handle_openrouter_lease_status(
+    State(processor): State<AppState>,
+    Path(client_request_id): Path<String>,
+) -> Result<Json<OpenRouterLeaseStatusResponse>, StatusCode> {
+    processor
+        .openrouter_lease_status(&client_request_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 /// POST /v1/withdraw/clearance -- request a clearance signature.
@@ -233,6 +272,7 @@ struct ServerIdentity {
     credits_per_usd: f64,
     state_signing_key: CurvePointWire,
     clearance_signing_key: CurvePointWire,
+    openrouter_leases_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +314,7 @@ async fn handle_dashboard_summary(State(processor): State<AppState>) -> Json<Das
         credits_per_usd: pricing::CREDITS_PER_USD,
         state_signing_key: processor.state_signing_key(),
         clearance_signing_key: processor.clearance_signing_key(),
+        openrouter_leases_enabled: processor.openrouter_leases_enabled(),
     };
     let (totals, started_ms, recent_count) = match processor.dashboard() {
         Some(hub) => (hub.totals(), hub.started_ms, hub.recent().len()),
@@ -330,6 +371,7 @@ fn error_to_response(
         | ServerError::ProtocolMismatch(_) => StatusCode::BAD_REQUEST,
         ServerError::StaleRoot { .. } => StatusCode::CONFLICT,
         ServerError::Replay | ServerError::NullifierUsed => StatusCode::CONFLICT,
+        ServerError::LeasePending => StatusCode::CONFLICT,
         ServerError::NoteExpired => StatusCode::GONE,
         ServerError::CapacityExhausted => StatusCode::SERVICE_UNAVAILABLE,
         ServerError::Internal(_) | ServerError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -357,6 +399,17 @@ fn error_to_response(
     };
 
     (status_code, Json(body))
+}
+
+fn spawn_openrouter_lease_settler(processor: Arc<RequestProcessor>, interval: Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            processor.settle_due_openrouter_leases().await;
+        }
+    });
 }
 
 fn spawn_root_poller(processor: Arc<RequestProcessor>, indexer_url: String, interval: Duration) {

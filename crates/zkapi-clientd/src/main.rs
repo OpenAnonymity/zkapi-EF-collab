@@ -4,8 +4,8 @@
 //! protocol parameters, advertised models, and demo settings), builds an
 //! [`AuthService`], and serves the HTTP API on the configured address.
 
-use clap::Parser;
-use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor};
+use clap::{Parser, ValueEnum};
+use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor, RequestMode};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::Felt252;
 
@@ -17,6 +17,8 @@ use zkapi_types::Felt252;
 struct Args {
     #[arg(long, default_value = "127.0.0.1:11434")]
     listen: String,
+    #[arg(long, value_enum, default_value_t = ModeArg::Proxy)]
+    mode: ModeArg,
     #[arg(long, default_value = ".zkapi")]
     state_dir: std::path::PathBuf,
     #[arg(long, default_value = "http://127.0.0.1:3000")]
@@ -65,6 +67,12 @@ struct Args {
     clearance_signing_key_x: String,
     #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_Y", default_value = "0x1")]
     clearance_signing_key_y: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModeArg {
+    Proxy,
+    DirectOpenrouter,
 }
 
 #[tokio::main]
@@ -125,8 +133,13 @@ async fn main() -> anyhow::Result<()> {
             y: Felt252::from_hex(&args.clearance_signing_key_y)
                 .map_err(|err| anyhow::anyhow!("invalid clearance signing key y: {err}"))?,
         },
+        request_mode: match args.mode {
+            ModeArg::Proxy => RequestMode::Proxy,
+            ModeArg::DirectOpenrouter => RequestMode::DirectOpenrouter,
+        },
     })?;
 
+    service.ensure_request_mode_available().await?;
     run(service, &args.listen).await
 }
 

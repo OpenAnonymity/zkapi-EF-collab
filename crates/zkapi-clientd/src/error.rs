@@ -12,6 +12,10 @@ pub enum AuthError {
     InsufficientBalance,
     #[error("wallet has a pending request; recover it before spending again")]
     PendingRequest,
+    #[error("OpenRouter lease pending: {0}")]
+    LeasePending(String),
+    #[error("upstream error: {0}")]
+    Upstream(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("wallet error: {0}")]
@@ -27,9 +31,9 @@ impl AuthError {
         match self {
             Self::WalletBusy => StatusCode::CONFLICT,
             Self::NoActiveNote | Self::InsufficientBalance => StatusCode::PAYMENT_REQUIRED,
-            Self::PendingRequest => StatusCode::CONFLICT,
+            Self::PendingRequest | Self::LeasePending(_) => StatusCode::CONFLICT,
             Self::InvalidInput(_) | Self::Serialization(_) => StatusCode::BAD_REQUEST,
-            Self::Wallet(_) | Self::Indexer(_) => StatusCode::BAD_GATEWAY,
+            Self::Wallet(_) | Self::Indexer(_) | Self::Upstream(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -39,6 +43,8 @@ impl AuthError {
             Self::NoActiveNote => "no_active_note",
             Self::InsufficientBalance => "insufficient_balance",
             Self::PendingRequest => "pending_request",
+            Self::LeasePending(_) => "lease_pending",
+            Self::Upstream(_) => "upstream_error",
             Self::InvalidInput(_) => "invalid_input",
             Self::Wallet(_) => "wallet_error",
             Self::Indexer(_) => "indexer_error",

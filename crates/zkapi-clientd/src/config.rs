@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestMode {
+    /// The zkAPI server forwards each LLM request to its configured provider.
+    #[default]
+    Proxy,
+    /// The local daemon leases a bounded OpenRouter key and sends prompts
+    /// directly to OpenRouter; the zkAPI server sees only aggregate usage.
+    DirectOpenrouter,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelDescriptor {
     pub id: String,
@@ -52,6 +63,7 @@ pub struct AuthConfig {
     /// Deployment-pinned proof-friendly signing keys.
     pub state_signing_key: CurvePointWire,
     pub clearance_signing_key: CurvePointWire,
+    pub request_mode: RequestMode,
 }
 
 impl AuthConfig {
@@ -92,6 +104,7 @@ impl Default for AuthConfig {
                 x: Felt252::ZERO,
                 y: Felt252::ONE,
             },
+            request_mode: RequestMode::Proxy,
         }
     }
 }

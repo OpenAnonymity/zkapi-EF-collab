@@ -15,7 +15,8 @@ git submodule update --init --recursive
 cargo build --release --bin zkapi
 
 ./target/release/zkapi client \
-  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --mode direct-openrouter
 ```
 
 That one command:
@@ -28,12 +29,25 @@ That one command:
 4. reuses the existing active note, if one exists; otherwise it uses `cast` to
    derive an address and securely prompt for the same wallet key while it mints,
    approves, and deposits 2 demo credits; and
-5. starts a local gateway on `127.0.0.1:11434`.
+5. starts a local gateway on `127.0.0.1:11434`; and
+6. in `direct-openrouter` mode, proves once to open an expiring runtime-key
+   lease and sends subsequent LLM traffic from the local daemon straight to
+   OpenRouter until that lease expires.
 
 The gateway prints a progress line while it creates each local Groth16 proof
 and another line with the total request time when the response arrives. Proof
 generation uses two CPU workers by default. Set `RAYON_NUM_THREADS` before the
 command only if you intentionally want a different local CPU limit.
+
+Check that the selected deployment has direct mode enabled before starting:
+
+```bash
+curl -fsS https://d33l4w2z2nh4cg.cloudfront.net/health | jq .request_modes
+```
+
+The result must include `"direct_openrouter"`. Otherwise use the default
+`--mode proxy`; enabling direct mode is an operator-side change requiring an
+OpenRouter Management API key.
 
 `cast` owns the private-key prompts; zkAPI does not write the key into its
 configuration or wallet state. Use the same wallet key for the funding prompts.
@@ -43,6 +57,7 @@ To choose the funded address explicitly:
 ```bash
 ./target/release/zkapi client \
   --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --mode direct-openrouter \
   --address 0xYOUR_PUBLIC_TESTNET_ADDRESS
 ```
 
@@ -119,9 +134,13 @@ a funding hint rather than reaching the paid upstream.
 
 ## Security and limits
 
-The deployment is public testnet-only. Each request uses a Groth16 BN254 proof; the
-server verifies it before it calls the OpenRouter-backed upstream. Withdrawal
-settlement uses the real immutable Groth16 adapter in the public testnet vault.
+The deployment is public testnet-only. In proxy mode each LLM call uses a Groth16
+BN254 proof and passes through the server. In direct mode one proof authorizes
+an expiring, spending-limited lease that can carry several sequential LLM
+calls. The server never receives those prompts or responses; OpenRouter does.
+At expiry the server reads aggregate key usage and finalizes that one zkAPI
+request. Withdrawal settlement uses the real immutable Groth16 adapter in the
+public testnet vault.
 Stwo-Cairo, XMSS, and `dev_witness_envelope` are not part of the v2 runtime.
 
 The demo token is freely mintable and has no value. The operator-funded
