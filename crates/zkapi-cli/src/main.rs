@@ -120,7 +120,7 @@ enum Commands {
         /// Start without funding when no active note exists.
         #[arg(long)]
         no_fund: bool,
-        /// Do not call the public demo token's faucet-style mint method.
+        /// Do not call a test deployment's optional faucet-style mint method.
         #[arg(long)]
         skip_mint: bool,
     },
@@ -236,6 +236,8 @@ struct DeploymentManifest {
     rpc_url: String,
     contract_address: String,
     billing_token_address: Option<String>,
+    #[serde(default)]
+    demo_mint_enabled: bool,
     protocol_server_url: String,
     indexer_url: String,
     request_charge_cap: u128,
@@ -580,7 +582,7 @@ async fn run_one_command_client(
             );
         } else {
             eprintln!(
-                "No active zkAPI note in {}. Funding {} demo credits now; cast will securely prompt for the wallet key.",
+                "No active zkAPI note in {}. Funding {} billing credits now; cast will securely prompt for the wallet key.",
                 state_dir.display(),
                 initial_credits
             );
@@ -753,7 +755,7 @@ async fn fund_public_demo(
     let siblings = felt_array_argument(&plan.zero_path);
     let note_id = plan.next_note_id;
 
-    if !skip_mint {
+    if !skip_mint && manifest.demo_mint_enabled {
         run_cast_interactive(&[
             "send".to_string(),
             "--rpc-url".to_string(),
@@ -764,6 +766,29 @@ async fn fund_public_demo(
             address.clone(),
             amount.clone(),
         ])?;
+    } else if !skip_mint {
+        eprintln!(
+            "This deployment uses a real billing token and has no faucet mint. The selected address must already hold at least {amount} token base units."
+        );
+    }
+    let decimals = read_erc20_u128(&manifest.rpc_url, token, "decimals()(uint8)", &[])?;
+    if decimals != 6 {
+        anyhow::bail!(
+            "billing token {token} reports {decimals} decimals; zkAPI credits require a 6-decimal billing token"
+        );
+    }
+    let balance = read_erc20_u128(
+        &manifest.rpc_url,
+        token,
+        "balanceOf(address)(uint256)",
+        std::slice::from_ref(&address),
+    )?;
+    if balance < plan.amount {
+        anyhow::bail!(
+            "address {address} has {balance} billing-token base units but this deposit needs {}; fund it with at least {} more before retrying",
+            plan.amount,
+            plan.amount - balance
+        );
     }
     run_cast_interactive(&[
         "send".to_string(),
@@ -803,6 +828,35 @@ async fn fund_public_demo(
         plan.amount
     );
     Ok(())
+}
+
+fn read_erc20_u128(
+    rpc_url: &str,
+    token: &str,
+    signature: &str,
+    arguments: &[String],
+) -> anyhow::Result<u128> {
+    let mut command = Command::new("cast");
+    command.args(["call", "--rpc-url", rpc_url, token, signature]);
+    command.args(arguments);
+    let output = command.output().map_err(|err| {
+        anyhow::anyhow!("failed to run cast; install Foundry's cast command: {err}")
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cast could not read billing token {token}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| anyhow::anyhow!("cast returned non-UTF-8 token data: {err}"))?;
+    let value = stdout
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("cast returned no value for {signature}"))?;
+    value
+        .parse()
+        .map_err(|err| anyhow::anyhow!("cast returned invalid {signature} value {value}: {err}"))
 }
 
 fn minimum_initial_credits(request_charge_cap: u128) -> anyhow::Result<u128> {
@@ -1283,6 +1337,7 @@ mod tests {
             rpc_url: "https://rpc.example".to_string(),
             contract_address: "0x1".to_string(),
             billing_token_address: Some("0x2".to_string()),
+            demo_mint_enabled: false,
             protocol_server_url: "https://server.example".to_string(),
             indexer_url: "https://indexer.example".to_string(),
             request_charge_cap: 1,
@@ -1298,5 +1353,30 @@ mod tests {
             models: Vec::new(),
         };
         assert!(validate_deployment_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn deployment_manifest_requires_an_explicit_demo_mint_flag() {
+        let base = serde_json::json!({
+            "deployment_id": "mainnet-test",
+            "protocol_version": 2,
+            "chain_id": 1,
+            "rpc_url": "https://rpc.example",
+            "contract_address": "0x1",
+            "billing_token_address": "0x2",
+            "protocol_server_url": "https://server.example",
+            "indexer_url": "https://indexer.example",
+            "request_charge_cap": 1_000_000,
+            "proof_backend": "groth16_bn254",
+            "state_signing_key": {"x": "0x1", "y": "0x2"},
+            "clearance_signing_key": {"x": "0x3", "y": "0x4"}
+        });
+        let production: DeploymentManifest = serde_json::from_value(base.clone()).unwrap();
+        assert!(!production.demo_mint_enabled);
+
+        let mut demo = base;
+        demo["demo_mint_enabled"] = serde_json::Value::Bool(true);
+        let demo: DeploymentManifest = serde_json::from_value(demo).unwrap();
+        assert!(demo.demo_mint_enabled);
     }
 }

@@ -38,6 +38,7 @@ contract DemoBillingToken is ERC20 {
 ///           OUTPUT_PATH – absolute path for the deployment manifest JSON.
 ///           STATE_SIGNING_KEY_X/Y – deployment-pinned Baby-JubJub key.
 ///           CLEARANCE_SIGNING_KEY_X/Y – deployment-pinned Baby-JubJub key.
+///           BILLING_TOKEN – existing 6-decimal token; required on Mainnet.
 contract DeployScript is Script {
     uint64 internal constant NOTE_TTL = 30 days;
     uint128 internal constant REQUEST_CHARGE_CAP = 1_000_000;
@@ -51,6 +52,7 @@ contract DeployScript is Script {
         uint256 stateKeyY = vm.envUint("STATE_SIGNING_KEY_Y");
         uint256 clearanceKeyX = vm.envUint("CLEARANCE_SIGNING_KEY_X");
         uint256 clearanceKeyY = vm.envUint("CLEARANCE_SIGNING_KEY_Y");
+        address billingTokenAddress = vm.envOr("BILLING_TOKEN", address(0));
         address poseidonLibrary = vm.envOr("POSEIDON_ADDRESS", address(0));
         // Treasury receives the operator's consumed amount on settlement. Keep
         // it separate from the depositor so consumption is visible in the demo.
@@ -58,15 +60,21 @@ contract DeployScript is Script {
 
         vm.startBroadcast(deployerKey);
 
-        DemoBillingToken billingToken = new DemoBillingToken();
-        if (mintAmount > 0) {
-            billingToken.mint(deployer, mintAmount);
+        if (billingTokenAddress == address(0)) {
+            require(block.chainid != 1, "BILLING_TOKEN is required on Mainnet");
+            DemoBillingToken demoToken = new DemoBillingToken();
+            billingTokenAddress = address(demoToken);
+            if (mintAmount > 0) {
+                demoToken.mint(deployer, mintAmount);
+            }
+        } else {
+            require(mintAmount == 0, "cannot mint an existing billing token");
         }
 
         Groth16ProofAdapter proofAdapter = new Groth16ProofAdapter();
 
         ZkApiVault vault = new ZkApiVault(
-            address(billingToken),
+            billingTokenAddress,
             treasury,
             NOTE_TTL,
             REQUEST_CHARGE_CAP,
@@ -82,7 +90,7 @@ contract DeployScript is Script {
 
         string memory manifest = "deployment";
         vm.serializeAddress(manifest, "vault", address(vault));
-        vm.serializeAddress(manifest, "billingToken", address(billingToken));
+        vm.serializeAddress(manifest, "billingToken", billingTokenAddress);
         vm.serializeAddress(manifest, "proofAdapter", address(proofAdapter));
         vm.serializeAddress(manifest, "poseidonLibrary", poseidonLibrary);
         vm.serializeAddress(manifest, "treasury", treasury);
@@ -95,7 +103,7 @@ contract DeployScript is Script {
         vm.writeJson(serialized, outputPath);
 
         console2.log("vault       ", address(vault));
-        console2.log("billingToken", address(billingToken));
+        console2.log("billingToken", billingTokenAddress);
         console2.log("treasury    ", treasury);
         console2.log("proofAdapter", address(proofAdapter));
         console2.log("noteTtl     ", uint256(NOTE_TTL));
