@@ -15,8 +15,7 @@ git submodule update --init --recursive
 cargo build --release --bin zkapi
 
 ./target/release/zkapi client \
-  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
-  --mode direct-openrouter
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json
 ```
 
 That one command:
@@ -29,23 +28,33 @@ That one command:
 4. reuses the existing active note, if one exists; otherwise it uses `cast` to
    derive an address and securely prompt for the same wallet key while it mints,
    approves, and deposits 2 demo credits; and
-5. starts a local gateway on `127.0.0.1:11434`; and
-6. in `direct-openrouter` mode, proves once to open an expiring runtime-key
-   lease and sends subsequent LLM traffic from the local daemon straight to
-   OpenRouter until that lease expires.
+5. starts a local gateway on `127.0.0.1:11434`.
 
 The gateway prints a progress line while it creates each local Groth16 proof
 and another line with the total request time when the response arrives. Proof
 generation uses two CPU workers by default. Set `RAYON_NUM_THREADS` before the
 command only if you intentionally want a different local CPU limit.
 
-Check that the selected deployment has direct mode enabled before starting:
+The command above uses the currently available proxy mode. For prompt-private
+direct OpenRouter calls, first check that the selected deployment advertises
+the optional mode:
 
 ```bash
 curl -fsS https://d33l4w2z2nh4cg.cloudfront.net/health | jq .request_modes
 ```
 
-The result must include `"direct_openrouter"`. Otherwise use the default
+If the result includes `"direct_openrouter"`, start the same one-command client
+with:
+
+```bash
+./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --mode direct-openrouter
+```
+
+That mode proves once to open an expiring runtime-key lease and sends
+subsequent LLM traffic from the local daemon straight to OpenRouter until the
+lease expires. If the health result does not include the mode, keep the default
 `--mode proxy`; enabling direct mode is an operator-side change requiring an
 OpenRouter Management API key.
 
@@ -57,7 +66,6 @@ To choose the funded address explicitly:
 ```bash
 ./target/release/zkapi client \
   --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
-  --mode direct-openrouter \
   --address 0xYOUR_PUBLIC_TESTNET_ADDRESS
 ```
 
