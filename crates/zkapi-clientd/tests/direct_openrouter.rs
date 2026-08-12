@@ -77,13 +77,20 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             return Err(StatusCode::UNAUTHORIZED);
         }
         state.create_bodies.lock().unwrap().push(body.clone());
+        let canonical_expiry = format!(
+            "{}.000Z",
+            body["expires_at"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_end_matches('Z')
+        );
         Ok(Json(json!({
             "key": "sk-or-v1-runtime-test",
             "data": {
                 "hash": "runtime-hash",
                 "usage": 0.0,
                 "limit": body["limit"],
-                "expires_at": body["expires_at"],
+                "expires_at": canonical_expiry,
                 "include_byok_in_limit": body["include_byok_in_limit"]
             }
         })))
@@ -222,7 +229,15 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
     let indexer_url = spawn(indexer_router(tree.clone())).await;
 
     let openrouter_state = OpenRouterState::default();
-    let openrouter_url = spawn(openrouter_router(openrouter_state.clone())).await;
+    let live_management_key = std::env::var("ZKAPI_LIVE_OPENROUTER_MANAGEMENT_KEY")
+        .ok()
+        .filter(|key| !key.is_empty());
+    let live_openrouter = live_management_key.is_some();
+    let openrouter_url = if live_openrouter {
+        "https://openrouter.ai".to_string()
+    } else {
+        spawn(openrouter_router(openrouter_state.clone())).await
+    };
     let store = Arc::new(NullifierStore::new(directory.join("server.db")).unwrap());
     let processor = Arc::new(
         RequestProcessor::try_new(
@@ -241,10 +256,11 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
                 initial_root: root,
                 proof_setup_dir: setup_directory.clone(),
                 openrouter_leases: Some(OpenRouterLeaseConfig {
-                    management_key: "management-test-key".to_string(),
+                    management_key: live_management_key
+                        .unwrap_or_else(|| "management-test-key".to_string()),
                     api_base: format!("{openrouter_url}/api"),
-                    ttl_seconds: 3,
-                    settlement_grace_seconds: 0,
+                    ttl_seconds: if live_openrouter { 30 } else { 3 },
+                    settlement_grace_seconds: if live_openrouter { 20 } else { 0 },
                     settlement_poll_seconds: 1,
                 }),
                 ..Default::default()
@@ -292,6 +308,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             "/v1/chat/completions",
             json!({
                 "model": "openai/gpt-4o-mini",
+                "max_tokens": 16,
                 "messages": [{"role": "user", "content": "private prompt one"}]
             }),
         ))
@@ -300,29 +317,46 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
     let second = service
         .execute_request(CoreRequest::post_json(
             "/v1/responses",
-            json!({"model": "openai/gpt-4o-mini", "input": "private prompt two"}),
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "max_tokens": 16,
+                "input": "private prompt two"
+            }),
         ))
         .await
         .unwrap();
 
     assert_eq!(first.client_request_id, second.client_request_id);
-    assert_eq!(
-        first.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
-        "answer: private prompt one"
-    );
-    assert_eq!(
-        second.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
-        "answer: private prompt two"
-    );
-    assert_eq!(
-        openrouter_state.prompts.lock().unwrap().as_slice(),
-        ["private prompt one", "private prompt two"]
-    );
-    assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
-    let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
-    assert_eq!(create_body["limit"], 0.001);
-    assert_eq!(create_body["include_byok_in_limit"], true);
-    assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
+    if live_openrouter {
+        assert!(
+            first.payload.as_ref().unwrap()["choices"][0]["message"]["content"]
+                .as_str()
+                .is_some_and(|content| !content.is_empty())
+        );
+        assert!(
+            second.payload.as_ref().unwrap()["choices"][0]["message"]["content"]
+                .as_str()
+                .is_some_and(|content| !content.is_empty())
+        );
+    } else {
+        assert_eq!(
+            first.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
+            "answer: private prompt one"
+        );
+        assert_eq!(
+            second.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
+            "answer: private prompt two"
+        );
+        assert_eq!(
+            openrouter_state.prompts.lock().unwrap().as_slice(),
+            ["private prompt one", "private prompt two"]
+        );
+        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
+        let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
+        assert_eq!(create_body["limit"], 0.001);
+        assert_eq!(create_body["include_byok_in_limit"], true);
+        assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
+    }
 
     let lease = store
         .lookup_openrouter_lease(&first.client_request_id)
@@ -331,7 +365,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
     assert!(!lease.api_request.payload.contains("private prompt"));
     assert!(!serde_json::to_string(&lease.api_request)
         .unwrap()
-        .contains("sk-or-v1-runtime-test"));
+        .contains("sk-or-v1-"));
     let cross_mode_replay = reqwest::Client::new()
         .post(format!("{protocol_server_url}/v2/requests"))
         .json(&lease.api_request)
@@ -346,20 +380,26 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             .status,
         zkapi_types::NullifierStatus::Reserved
     );
-    let sleep_seconds = lease.expires_at.saturating_sub(now_seconds()) + 1;
+    let sleep_seconds = lease.settle_after.saturating_sub(now_seconds()) + 1;
     tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
     processor.settle_due_openrouter_leases().await;
 
     let recovered = service.recover().await.unwrap();
     assert!(recovered.recovered);
     let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000012);
-    assert_eq!(
-        recovered.wallet.note.unwrap().current_balance,
-        deposit - expected_charge
-    );
-    assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
+    let recovered_balance = recovered.wallet.note.unwrap().current_balance;
+    if live_openrouter {
+        assert!(recovered_balance < deposit);
+    } else {
+        assert_eq!(recovered_balance, deposit - expected_charge);
+        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
+    }
     let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
-    assert_eq!(transcript.charge_applied, Some(expected_charge));
+    if live_openrouter {
+        assert!(transcript.charge_applied.is_some_and(|charge| charge > 0));
+    } else {
+        assert_eq!(transcript.charge_applied, Some(expected_charge));
+    }
     assert!(!transcript
         .response_payload
         .as_deref()
