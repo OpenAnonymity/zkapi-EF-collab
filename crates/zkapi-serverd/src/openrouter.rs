@@ -132,7 +132,11 @@ impl OpenRouterProvisioner {
             .data
             .limit
             .is_some_and(|limit| (limit - limit_usd).abs() <= f64::EPSILON.max(limit_usd * 1e-9));
-        let expiry_matches = envelope.data.expires_at.as_deref() == Some(expires_at_iso.as_str());
+        let expiry_matches = envelope
+            .data
+            .expires_at
+            .as_deref()
+            .is_some_and(|actual| openrouter_expiry_matches(actual, &expires_at_iso));
         if !limit_matches || !expiry_matches || !envelope.data.include_byok_in_limit {
             let hash = envelope.data.hash.clone();
             let _ = self.delete_key(&hash).await;
@@ -271,6 +275,18 @@ pub fn unix_to_iso8601(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
+/// OpenRouter canonicalizes whole-second RFC 3339 timestamps with a `.000Z`
+/// suffix even when the create request used `Z`. Accept only those two
+/// equivalent representations so the provider cannot silently move expiry.
+fn openrouter_expiry_matches(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    expected
+        .strip_suffix('Z')
+        .is_some_and(|prefix| actual == format!("{prefix}.000Z"))
+}
+
 fn truncate(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_string();
@@ -293,6 +309,24 @@ mod tests {
         assert_eq!(unix_to_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_to_iso8601(1_700_000_000), "2023-11-14T22:13:20Z");
         assert_eq!(unix_to_iso8601(1_709_208_000), "2024-02-29T12:00:00Z");
+    }
+
+    #[test]
+    fn accepts_openrouter_zero_millisecond_expiry_without_accepting_a_time_change() {
+        let expected = "2026-08-12T20:23:54Z";
+        assert!(openrouter_expiry_matches(expected, expected));
+        assert!(openrouter_expiry_matches(
+            "2026-08-12T20:23:54.000Z",
+            expected
+        ));
+        assert!(!openrouter_expiry_matches(
+            "2026-08-12T20:23:55.000Z",
+            expected
+        ));
+        assert!(!openrouter_expiry_matches(
+            "2026-08-12T20:23:54.001Z",
+            expected
+        ));
     }
 
     #[test]
