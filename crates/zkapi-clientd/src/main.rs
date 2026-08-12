@@ -70,9 +70,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(log_filter())
         .init();
 
     let args = Args::parse();
@@ -130,4 +128,10 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     run(service, &args.listen).await
+}
+
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn,zkapi_clientd=info".into());
+    filter.add_directive("r1cs=warn".parse().expect("valid r1cs log directive"))
 }

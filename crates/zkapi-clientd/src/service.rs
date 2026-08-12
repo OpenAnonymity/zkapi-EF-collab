@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -529,6 +530,13 @@ impl AuthService {
                 }
 
                 let note_id = wallet.state().ok_or(AuthError::NoActiveNote)?.note_id;
+                let started = Instant::now();
+                tracing::info!(
+                    note_id,
+                    method = %request.method,
+                    path = %request.path,
+                    "preparing local Groth16 authorization proof"
+                );
                 for attempt in 0..2 {
                     let preview =
                         build_request_preview(&config, &indexer, &wallet, request.clone()).await?;
@@ -542,6 +550,12 @@ impl AuthService {
                         .await
                     {
                         Ok(response) => {
+                            tracing::info!(
+                                note_id,
+                                elapsed_ms = started.elapsed().as_millis(),
+                                charge_applied = response.charge_applied,
+                                "local proof and upstream request completed"
+                            );
                             let wallet_status = wallet_status(&wallet);
                             let core = core_response(
                                 &response,
@@ -558,7 +572,15 @@ impl AuthService {
                             let _ = note_id;
                             continue;
                         }
-                        Err(err) => return Err(err.into()),
+                        Err(err) => {
+                            tracing::warn!(
+                                note_id,
+                                elapsed_ms = started.elapsed().as_millis(),
+                                error = %err,
+                                "local proof or upstream request failed"
+                            );
+                            return Err(err.into());
+                        }
                     }
                 }
 

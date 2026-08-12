@@ -260,9 +260,7 @@ struct NextNoteIdResponse {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(log_filter())
         .init();
 
     let cli = Cli::parse();
@@ -315,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
             no_fund,
             skip_mint,
         } => {
+            configure_client_prover_threads()?;
             run_one_command_client(
                 &deployment,
                 address.as_deref(),
@@ -470,6 +469,44 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    const DEFAULT: &str =
+        "warn,zkapi=info,zkapi_clientd=info,zkapi_serverd=info,zkapi_indexerd=info";
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT.into());
+
+    // ark-r1cs-std instruments fine-grained field operations at INFO under the
+    // `r1cs` target. Enabling those spans while proving debug-formats growing
+    // constraint systems, turning a ~3-second proof into multi-gigabyte work.
+    // Keep them disabled even when a caller uses a broad `RUST_LOG=info`.
+    suppress_r1cs_info(filter)
+}
+
+fn suppress_r1cs_info(filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    filter.add_directive("r1cs=warn".parse().expect("valid r1cs log directive"))
+}
+
+/// Keep local Groth16 generation responsive without allowing arkworks' global
+/// Rayon pool to saturate every logical CPU. Advanced callers can override the
+/// default before launch with the standard `RAYON_NUM_THREADS` variable.
+fn configure_client_prover_threads() -> anyhow::Result<()> {
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        tracing::info!("using RAYON_NUM_THREADS for local proof generation");
+        return Ok(());
+    }
+
+    const DEFAULT_PROVER_THREADS: usize = 2;
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(DEFAULT_PROVER_THREADS)
+        .build_global()
+        .map_err(|error| anyhow::anyhow!("failed to configure prover worker threads: {error}"))?;
+    tracing::info!(
+        prover_threads = DEFAULT_PROVER_THREADS,
+        "configured local proof generation"
+    );
     Ok(())
 }
 
@@ -1222,6 +1259,19 @@ mod tests {
         assert_eq!(minimum_initial_credits(1_000_000).unwrap(), 2_000_000);
         assert!(minimum_initial_credits(0).is_err());
         assert!(minimum_initial_credits(u128::MAX).is_err());
+    }
+
+    #[test]
+    fn broad_info_logging_does_not_enable_r1cs_spans() {
+        use tracing_subscriber::prelude::*;
+
+        let subscriber = tracing_subscriber::registry().with(suppress_r1cs_info(
+            tracing_subscriber::EnvFilter::new("info"),
+        ));
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!tracing::enabled!(target: "r1cs", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "zkapi", tracing::Level::INFO));
+        });
     }
 
     #[test]

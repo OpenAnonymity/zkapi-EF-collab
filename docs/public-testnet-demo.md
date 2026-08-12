@@ -29,6 +29,11 @@ That one command:
    approves, and deposits 5 demo credits; and
 5. starts a local gateway on `127.0.0.1:11434`.
 
+The gateway prints a progress line while it creates each local Groth16 proof
+and another line with the total request time when the response arrives. Proof
+generation uses two CPU workers by default. Set `RAYON_NUM_THREADS` before the
+command only if you intentionally want a different local CPU limit.
+
 `cast` owns the private-key prompts; zkAPI does not write the key into its
 configuration or wallet state. Use the same wallet key for the funding prompts.
 
