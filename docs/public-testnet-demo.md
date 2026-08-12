@@ -14,7 +14,8 @@ cd zkapi-ef
 git submodule update --init --recursive
 cargo build --release --bin zkapi
 
-./target/release/zkapi client
+./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json
 ```
 
 That one command:
@@ -26,7 +27,7 @@ That one command:
    user's local state directory;
 4. reuses the existing active note, if one exists; otherwise it uses `cast` to
    derive an address and securely prompt for the same wallet key while it mints,
-   approves, and deposits 5 demo credits; and
+   approves, and deposits 2 demo credits; and
 5. starts a local gateway on `127.0.0.1:11434`.
 
 The gateway prints a progress line while it creates each local Groth16 proof
@@ -41,6 +42,7 @@ To choose the funded address explicitly:
 
 ```bash
 ./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
   --address 0xYOUR_PUBLIC_TESTNET_ADDRESS
 ```
 
@@ -48,21 +50,25 @@ The first private-key prompt verifies that the supplied address belongs to that
 key before any funding transaction is sent.
 
 If `--address` is omitted, `cast wallet address --interactive` derives it from
-the private key entered at the terminal. Use a different public v2 deployment
-manifest with `--deployment <URL_OR_PATH>`. The public public testnet manifest is the
-default, so no deployment argument is normally needed.
+the private key entered at the terminal. The default deployment is Ethereum
+Mainnet, so always pass the public testnet manifest URL shown above when following
+this testnet guide.
 
 `--no-fund` starts the local service without creating a note, and `--skip-mint`
 is useful when the selected wallet already has enough demo credits:
 
 ```bash
-./target/release/zkapi client --no-fund
-./target/release/zkapi client --skip-mint --initial-credits 10000000
+./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --no-fund
+./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --skip-mint --initial-credits 10000000
 ```
 
 An explicit `--initial-credits` value must be at least twice the deployment's
 per-request proof bound. This keeps the note usable after a maximum-cost first
-request; the public demo's 5,000,000-credit default is five times its bound.
+request; the public demo's 2,000,000-credit default is twice its bound.
 If an existing note eventually falls to or below the bound, the launcher
 reports its balance and asks for a fresh `--state-dir` instead of starting a
 gateway that would become unusable after at most one more paid request. Keep

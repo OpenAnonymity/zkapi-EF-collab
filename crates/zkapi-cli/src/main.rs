@@ -16,7 +16,7 @@ use zkapi_serverd::config::{MeteredConfig, ProviderKind, ServerConfig};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
-const PUBLIC_SEPOLIA_MANIFEST: &str = "https://d33l4w2z2nh4cg.cloudfront.net/config.json";
+const PUBLIC_MAINNET_MANIFEST: &str = "https://d27v1dvkaxfc09.cloudfront.net/config.json";
 
 #[derive(Debug, Parser)]
 #[command(name = "zkapi", about = "App-layer CLI for zkAPI")]
@@ -98,12 +98,12 @@ enum Commands {
     },
     /// Start a ready-to-use local OpenAI/Ollama-compatible client.
     ///
-    /// By default this loads the public Sepolia deployment, funds a new demo
-    /// note only when the selected local state directory has no active note,
-    /// then listens on 127.0.0.1:11434.
+    /// By default this loads the experimental Ethereum Mainnet deployment,
+    /// funds a new real-USDC note only when the selected local state directory
+    /// has no active note, then listens on 127.0.0.1:11434.
     Client {
         /// Deployment manifest URL or local JSON path.
-        #[arg(long, default_value = PUBLIC_SEPOLIA_MANIFEST)]
+        #[arg(long, default_value = PUBLIC_MAINNET_MANIFEST)]
         deployment: String,
         /// Depositor address to fund. Omit to let cast derive it interactively.
         #[arg(long)]
@@ -114,8 +114,8 @@ enum Commands {
         /// Private wallet state directory. Defaults to a deployment-specific user state path.
         #[arg(long)]
         state_dir: Option<PathBuf>,
-        /// Credits to mint and deposit when the client has no active note.
-        #[arg(long, default_value_t = 5_000_000)]
+        /// Billing-token base units to deposit when the client has no active note.
+        #[arg(long, default_value_t = 2_000_000)]
         initial_credits: u128,
         /// Start without funding when no active note exists.
         #[arg(long)]
@@ -581,12 +581,17 @@ async fn run_one_command_client(
                 state_dir.display()
             );
         } else {
+            if manifest.chain_id == 1 && !manifest.demo_mint_enabled {
+                eprintln!(
+                    "WARNING: this is Ethereum Mainnet. Funding will approve and deposit {initial_credits} real billing-token base units into unaudited experimental contracts."
+                );
+            }
             eprintln!(
                 "No active zkAPI note in {}. Funding {} billing credits now; cast will securely prompt for the wallet key.",
                 state_dir.display(),
                 initial_credits
             );
-            fund_public_demo(
+            fund_public_deployment(
                 &service,
                 &manifest,
                 requested_address,
@@ -604,7 +609,7 @@ async fn run_one_command_client(
                 );
             } else {
                 anyhow::bail!(
-                    "active note {} in {} has {} credits and no reserve beyond this deployment's {}-credit per-request proof bound. Preserve that state for withdrawal, then start a fresh demo note with --state-dir <NEW_DIRECTORY>",
+                    "active note {} in {} has {} credits and no reserve beyond this deployment's {}-credit per-request proof bound. Preserve that state for withdrawal, then start a fresh note with --state-dir <NEW_DIRECTORY>",
                     note.note_id,
                     state_dir.display(),
                     note.current_balance,
@@ -716,7 +721,7 @@ fn auth_service_from_manifest(
 
 /// Create, submit, and confirm the first note with only terminal prompts from
 /// Foundry's `cast`. The key never enters our argument parser or state files.
-async fn fund_public_demo(
+async fn fund_public_deployment(
     service: &Arc<AuthService>,
     manifest: &DeploymentManifest,
     requested_address: Option<&str>,
@@ -1206,6 +1211,23 @@ mod tests {
                 assert_eq!(initial_credits, 42);
                 assert!(!no_fund);
                 assert!(skip_mint);
+            }
+            other => panic!("expected client command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_command_client_defaults_to_mainnet_with_minimum_deposit() {
+        let cli = Cli::try_parse_from(["zkapi", "client"]).expect("client parse");
+
+        match cli.command {
+            Commands::Client {
+                deployment,
+                initial_credits,
+                ..
+            } => {
+                assert_eq!(deployment, PUBLIC_MAINNET_MANIFEST);
+                assert_eq!(initial_credits, 2_000_000);
             }
             other => panic!("expected client command, got {other:?}"),
         }

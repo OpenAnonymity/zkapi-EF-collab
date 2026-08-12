@@ -1,7 +1,7 @@
 # zkAPI EF
 
-zkAPI is a private, prepaid API client. A user deposits demo credits into a
-public testnet vault, then proves locally that an unlinkable private note can pay for
+zkAPI is a private, prepaid API client. A user deposits billing credits into an
+Ethereum vault, then proves locally that an unlinkable private note can pay for
 each request. The server verifies a compact proof, calls the configured API
 provider, applies the charge, and signs the next private state.
 
@@ -44,10 +44,11 @@ After building, start a ready-to-use local gateway with one command:
 ./target/release/zkapi client
 ```
 
-It loads the public public testnet manifest, stores private state outside the
-repository, reuses an existing note, and otherwise asks `cast` to securely
-derive the wallet address and sign the demo-token mint, approval, and deposit.
-It then serves standard APIs on `127.0.0.1:11434`:
+It loads the experimental Ethereum Mainnet manifest, stores private state
+outside the repository, reuses an existing note, and otherwise asks `cast` to
+securely derive the wallet address and sign the real-USDC approval and deposit.
+The default deposit is 2 USDC. The address must already hold that USDC and
+enough ETH for gas. It then serves standard APIs on `127.0.0.1:11434`:
 
 - OpenAI Chat Completions: `/v1/chat/completions`
 - OpenAI Responses: `/v1/responses`
@@ -55,8 +56,16 @@ It then serves standard APIs on `127.0.0.1:11434`:
 
 Choose an address with `--address` (the first key prompt verifies it), use a
 different deployment manifest with `--deployment`, or start without funding via
-`--no-fund`. The public public testnet vault accepts its configured demo ERC-20;
-native-ETH funding requires a separate native-asset vault deployment.
+`--no-fund`. To use the free public testnet deployment instead, pass its manifest
+explicitly:
+
+```bash
+./target/release/zkapi client \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json
+```
+
+Both vaults accept their configured ERC-20 billing token. The Mainnet vault
+uses real USDC; native ETH is used for transaction gas, not request credits.
 
 For example, with `zkapi client` running:
 
@@ -66,8 +75,8 @@ curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"explain HTTPS briefly"}]}' | jq .
 ```
 
-See [the public public testnet guide](docs/public-testnet-demo.md) for prerequisites,
-options, and equivalent OpenAI Responses and Ollama examples.
+See [the public public testnet guide](docs/public-testnet-demo.md) for testnet use and
+equivalent OpenAI Responses and Ollama examples.
 
 ## Components
 
@@ -75,8 +84,9 @@ options, and equivalent OpenAI Responses and Ollama examples.
 - `zkapi-serverd`: proof verification, nullifier DB, provider execution, billing, and next-state signing.
 - `zkapi-indexerd`: Ethereum event indexer and Merkle-path service.
 - `protocol/rust`: shared v2 primitives, circuits, proof code, and wallet SDK.
-- `protocol/contracts`: the real Groth16 adapter and public testnet settlement vault.
+- `protocol/contracts`: the real Groth16 adapter and Ethereum settlement vault.
 - `demo/contracts`: deploys the demo token, real adapter, and vault.
 
-This code and its current one-party Groth16 setup are unaudited. Use the public
-deployment for testnet experimentation only.
+This code and its current one-party Groth16 setup are unaudited. The default
+Mainnet deployment uses real assets but is only an experiment; use only funds
+you can afford to lose.
