@@ -738,10 +738,10 @@ impl AuthService {
                     continue;
                 }
             }
-            return Err(AuthError::Upstream(format!(
-                "OpenRouter returned {status}: {}",
-                truncate_for_error(&raw_payload, 500)
-            )));
+            return Err(AuthError::UpstreamResponse {
+                status,
+                message: truncate_for_error(&raw_payload, 500),
+            });
         }
         Err(AuthError::Upstream(
             "OpenRouter request exhausted its retry budget".to_string(),

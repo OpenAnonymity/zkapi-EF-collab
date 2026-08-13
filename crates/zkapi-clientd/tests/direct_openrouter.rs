@@ -140,6 +140,24 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             ));
         }
         drop(failures);
+        // A bounded child key eventually rejects requests whose model-default
+        // maximum completion could exceed the remaining credit, even when the
+        // preceding completions were short. Reproduce the quick-start failure
+        // after two unconstrained requests.
+        if body.get("max_tokens").is_none()
+            && body.get("max_completion_tokens").is_none()
+            && state.prompts.lock().unwrap().len() >= 2
+        {
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(json!({
+                    "error": {
+                        "code": 402,
+                        "message": "This request requires more credits than are available"
+                    }
+                })),
+            ));
+        }
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
@@ -470,7 +488,6 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             "/v1/chat/completions",
             json!({
                 "model": "openai/gpt-4o-mini",
-                "max_tokens": 16,
                 "messages": [{"role": "user", "content": "private prompt one"}]
             }),
         ))
@@ -490,12 +507,32 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             "/v1/responses",
             json!({
                 "model": "openai/gpt-4o-mini",
-                "max_tokens": 16,
                 "input": "private prompt two"
             }),
         ))
         .await
         .unwrap();
+
+    // Exercise the README usage pattern repeatedly. Before client-side output
+    // bounding, the mock's lease headroom check returns 402 on request three;
+    // the local route used to disguise that response as 502.
+    if !live_openrouter {
+        for number in 3..=8 {
+            service
+                .execute_request(CoreRequest::post_json(
+                    "/v1/chat/completions",
+                    json!({
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{
+                            "role": "user",
+                            "content": format!("private prompt {number}")
+                        }]
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+    }
 
     assert_eq!(first.client_request_id, second.client_request_id);
     if live_openrouter {
@@ -520,9 +557,18 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         );
         assert_eq!(
             openrouter_state.prompts.lock().unwrap().as_slice(),
-            ["private prompt one", "private prompt two"]
+            [
+                "private prompt one",
+                "private prompt two",
+                "private prompt 3",
+                "private prompt 4",
+                "private prompt 5",
+                "private prompt 6",
+                "private prompt 7",
+                "private prompt 8",
+            ]
         );
-        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 3);
+        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 9);
         assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
         assert_eq!(create_body["limit"], 0.001);
@@ -558,7 +604,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
 
     let recovered = service.recover().await.unwrap();
     assert!(recovered.recovered);
-    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000012);
+    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000048);
     let recovered_balance = recovered.wallet.note.unwrap().current_balance;
     if live_openrouter {
         assert!(recovered_balance < deposit);

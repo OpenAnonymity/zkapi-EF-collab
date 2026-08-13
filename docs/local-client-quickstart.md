@@ -31,5 +31,5 @@ local OpenAI-compatible API:
 ```bash
 curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"Explain HTTPS briefly."}]}' | jq .
+  -d '{"model":"openai/gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":"Explain HTTPS briefly."}]}' | jq .
 ```

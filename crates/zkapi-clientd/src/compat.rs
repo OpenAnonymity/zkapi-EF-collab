@@ -14,6 +14,12 @@ use serde_json::{json, Value};
 use crate::config::ModelDescriptor;
 use crate::service::{CoreRequest, CoreResponse};
 
+// Lease keys have a small proof-bound dollar limit. Leaving a model's output
+// unconstrained makes OpenRouter reserve headroom for its full model maximum
+// (16K tokens for the Sepolia quick-start model), so a key with plenty of
+// actual credit can start returning 402 after only a few short requests.
+const DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS: u64 = 1024;
+
 pub fn core_request(path: &str, body: Value) -> CoreRequest {
     CoreRequest::post_json(path, body)
 }
@@ -39,6 +45,7 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
     });
     if path == "/v1/chat/completions" || path == CHAT_PATH {
         let mut object = object;
+        ensure_direct_completion_limit(&mut object);
         object.insert("stream".to_string(), Value::Bool(false));
         return (CHAT_PATH.to_string(), Value::Object(object));
     }
@@ -48,6 +55,7 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
         "model",
         "temperature",
         "max_tokens",
+        "max_completion_tokens",
         "top_p",
         "stop",
         "tools",
@@ -73,8 +81,28 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
                 .or_insert_with(|| value.clone());
         }
     }
+    if !normalized.contains_key("max_tokens") && !normalized.contains_key("max_completion_tokens") {
+        if let Some(value) = object.get("max_output_tokens") {
+            normalized.insert("max_tokens".to_string(), value.clone());
+        } else {
+            normalized.insert(
+                "max_tokens".to_string(),
+                Value::from(DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS),
+            );
+        }
+    }
     normalized.insert("stream".to_string(), Value::Bool(false));
     (CHAT_PATH.to_string(), Value::Object(normalized))
+}
+
+fn ensure_direct_completion_limit(object: &mut serde_json::Map<String, Value>) {
+    if object.contains_key("max_tokens") || object.contains_key("max_completion_tokens") {
+        return;
+    }
+    let limit = object
+        .remove("max_output_tokens")
+        .unwrap_or_else(|| Value::from(DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS));
+    object.insert("max_tokens".to_string(), limit);
 }
 
 pub fn openai_models(models: &[ModelDescriptor]) -> Value {
@@ -348,6 +376,31 @@ mod tests {
         );
         assert_eq!(path, "/chat/completions");
         assert_eq!(body["messages"][0]["content"], "secret prompt");
+        assert_eq!(body["max_tokens"], DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS);
         assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn direct_openrouter_preserves_explicit_completion_limits() {
+        let (_, chat) = openrouter_request(
+            "/v1/chat/completions",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": 77
+            }),
+        );
+        assert_eq!(chat["max_completion_tokens"], 77);
+        assert!(chat.get("max_tokens").is_none());
+
+        let (_, responses) = openrouter_request(
+            "/v1/responses",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "input": "hello",
+                "max_output_tokens": 88
+            }),
+        );
+        assert_eq!(responses["max_tokens"], 88);
     }
 }

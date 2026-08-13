@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderValue, Method};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -328,11 +328,7 @@ fn static_asset(body: &'static str, content_type: &'static str) -> Response {
 
 fn generic_error(err: AuthError) -> Response {
     let status = err.status_code();
-    let funding_url = if status == StatusCode::PAYMENT_REQUIRED {
-        Some("/funding")
-    } else {
-        None
-    };
+    let funding_url = err.funding_url();
     (
         status,
         Json(json!({
@@ -348,11 +344,7 @@ fn generic_error(err: AuthError) -> Response {
 
 fn openai_error(err: AuthError) -> Response {
     let status = err.status_code();
-    let funding_url = if status == StatusCode::PAYMENT_REQUIRED {
-        Some("/funding")
-    } else {
-        None
-    };
+    let funding_url = err.funding_url();
     (
         status,
         Json(json!({
@@ -371,11 +363,25 @@ fn openai_error(err: AuthError) -> Response {
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
+    use axum::http::StatusCode;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     use super::*;
     use crate::config::{AuthConfig, ModelDescriptor};
+
+    #[tokio::test]
+    async fn openai_errors_preserve_upstream_status_without_wallet_funding_hint() {
+        let response = openai_error(AuthError::UpstreamResponse {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: "lease credit exhausted".to_string(),
+        });
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "upstream_error");
+        assert_eq!(value["error"]["funding_url"], Value::Null);
+    }
 
     #[tokio::test]
     async fn serves_funding_page_assets_and_model_lists() {
