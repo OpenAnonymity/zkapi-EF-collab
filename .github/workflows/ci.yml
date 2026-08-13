@@ -17,8 +17,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,8 +47,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Provision swap for the Stwo prover
         run: |
@@ -83,8 +79,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -105,8 +99,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Install Scarb
         uses: software-mansion/setup-scarb@v1
@@ -127,8 +119,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -153,8 +143,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-        with:
-          token: ${{ secrets.ZKAPI_SUBMODULE_TOKEN }}
 
       - name: Build Docker image
         run: docker build -f docker/Dockerfile -t zkapi/ef-collaboration:ci .
