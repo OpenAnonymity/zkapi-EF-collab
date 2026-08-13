@@ -30,6 +30,10 @@ use crate::signer::ServerSigner;
 
 const MAX_REQUEST_AGE_SECONDS: u64 = 300;
 const MAX_FUTURE_SKEW_SECONDS: u64 = 30;
+// OA's signed validity is an upstream upper bound, not a guarantee that the
+// child key remains usable until the final second. Stop advertising it as the
+// usable lease end and leave room for clock skew and in-flight requests.
+const OA_LEASE_EXPIRY_SAFETY_SECONDS: u64 = 30;
 
 #[derive(Clone, Copy)]
 enum ReservationKind {
@@ -57,6 +61,7 @@ pub struct RequestProcessor {
     openrouter: Option<Arc<OpenRouterProvisioner>>,
     oa_org: Option<Arc<OaOrgProvisioner>>,
     lease_issue_lock: tokio::sync::Mutex<()>,
+    lease_settlement_lock: tokio::sync::Mutex<()>,
 }
 
 impl RequestProcessor {
@@ -135,6 +140,7 @@ impl RequestProcessor {
             openrouter,
             oa_org,
             lease_issue_lock: tokio::sync::Mutex::new(()),
+            lease_settlement_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -318,11 +324,19 @@ impl RequestProcessor {
                         lease_config.ttl_seconds,
                     )
                     .await?;
+                let usable_expires_at = created
+                    .expires_at
+                    .saturating_sub(OA_LEASE_EXPIRY_SAFETY_SECONDS);
+                if usable_expires_at <= current_timestamp() {
+                    return Err(ServerError::Internal(
+                        "OA org key has no safe usable lifetime".to_string(),
+                    ));
+                }
                 (
                     created.key,
                     created.hash,
                     created.openrouter_api_base,
-                    created.expires_at,
+                    usable_expires_at,
                     Some(created.verification),
                 )
             }
@@ -364,6 +378,7 @@ impl RequestProcessor {
     /// Settle every expired lease from OpenRouter's authoritative aggregate
     /// usage. Failures are retained and retried by the next background scan.
     pub async fn settle_due_openrouter_leases(&self) {
+        let _settlement_guard = self.lease_settlement_lock.lock().await;
         for lease in self.store.due_openrouter_leases(current_timestamp()) {
             let result = match lease.key_source.as_str() {
                 "openrouter" => match &self.openrouter {
@@ -388,6 +403,55 @@ impl RequestProcessor {
                     .record_openrouter_lease_error(&lease.client_request_id, &error.to_string());
             }
         }
+    }
+
+    /// Retire a key that the upstream rejected before its advertised lease
+    /// end. Requiring the original prompt-free proof prevents lease IDs alone
+    /// from acting as unauthenticated denial-of-service capabilities.
+    pub async fn retire_openrouter_lease(
+        &self,
+        client_request_id: &str,
+        request: &ApiRequestV2,
+    ) -> Result<OpenRouterLeaseStatusResponse, ServerError> {
+        let _settlement_guard = self.lease_settlement_lock.lock().await;
+        let lease = self
+            .store
+            .lookup_openrouter_lease(client_request_id)
+            .ok_or_else(|| ServerError::InvalidRequest("unknown OpenRouter lease".to_string()))?;
+        let request_matches = serde_json::to_value(request)
+            .and_then(|request| {
+                serde_json::to_value(&lease.api_request).map(|issued| request == issued)
+            })
+            .map_err(|error| {
+                ServerError::Internal(format!("failed to compare lease retirement proof: {error}"))
+            })?;
+        if request.client_request_id != client_request_id || !request_matches {
+            return Err(ServerError::InvalidRequest(
+                "lease retirement proof does not match the issued lease".to_string(),
+            ));
+        }
+        match lease.status.as_str() {
+            "finalized" => {}
+            "active" => match lease.key_source.as_str() {
+                "openrouter" => {
+                    let provisioner = self.openrouter.as_ref().ok_or_else(|| {
+                        ServerError::Internal(
+                            "direct OpenRouter settlement credential is unavailable".to_string(),
+                        )
+                    })?;
+                    self.settle_openrouter_lease(&lease, provisioner).await?;
+                }
+                "oa_org" => self.settle_oa_org_lease(&lease)?,
+                source => {
+                    return Err(ServerError::Internal(format!(
+                        "unsupported lease key source {source}"
+                    )))
+                }
+            },
+            _ => return Err(ServerError::LeasePending),
+        }
+        self.openrouter_lease_status(client_request_id)
+            .ok_or_else(|| ServerError::Internal("retired lease disappeared".to_string()))
     }
 
     /// OA stations own the management account and delete expired keys. zkAPI

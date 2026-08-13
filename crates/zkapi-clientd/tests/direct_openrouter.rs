@@ -45,6 +45,7 @@ struct OaFlowState {
     prompts: Arc<Mutex<Vec<String>>>,
     verifier_rejections_remaining: Arc<Mutex<usize>>,
     verifier_attempts: Arc<Mutex<usize>>,
+    inference_auth_failures_remaining: Arc<Mutex<usize>>,
 }
 
 async fn spawn(router: Router) -> String {
@@ -222,7 +223,9 @@ fn oa_verifier_router(state: OaFlowState) -> Router {
         Json(body): Json<Value>,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         if body["station_id"] != "station-test"
-            || body["api_key"] != "sk-or-v1-oa-test"
+            || !body["api_key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("sk-or-v1-oa-test-"))
             || body["station_signature"].as_str().map(str::len) != Some(128)
             || body["org_signature"].as_str().map(str::len) != Some(128)
         {
@@ -260,13 +263,24 @@ fn oa_inference_router(state: OaFlowState) -> Router {
         headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> Result<Json<Value>, StatusCode> {
-        if headers
+        let api_key = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            != Some("Bearer sk-or-v1-oa-test")
-        {
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if !api_key.is_some_and(|key| key.starts_with("sk-or-v1-oa-test-")) {
             return Err(StatusCode::UNAUTHORIZED);
         }
+        let mut failures = state.inference_auth_failures_remaining.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            state
+                .events
+                .lock()
+                .unwrap()
+                .push("inference_rejected".to_string());
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        drop(failures);
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
@@ -314,11 +328,12 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
         }
         state.flow.events.lock().unwrap().push("issued".to_string());
         state.flow.org_requests.lock().unwrap().push(body);
+        let issuance = state.flow.org_requests.lock().unwrap().len();
         let expires_at = now_seconds() + 60;
         Ok(Json(json!({
             "source": "oa_org",
-            "key": "sk-or-v1-oa-test",
-            "key_hash": "oa-runtime-hash",
+            "key": format!("sk-or-v1-oa-test-{issuance}"),
+            "key_hash": format!("oa-runtime-hash-{issuance}"),
             "credit_limit": 0.001,
             "duration_minutes": 1,
             "expires_at": "future",
@@ -720,6 +735,10 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
             )
         } else {
             *flow.verifier_rejections_remaining.lock().unwrap() = 1;
+            // The first key becomes unusable while its signed expiration is
+            // still in the future. The client must retire it and retry the
+            // inference with a freshly issued and verified key.
+            *flow.inference_auth_failures_remaining.lock().unwrap() = 1;
             let verifier_url = spawn(oa_verifier_router(flow.clone())).await;
             let inference_url = spawn(oa_inference_router(flow.clone())).await;
             let trusted_inference_base = format!("{inference_url}/v1");
@@ -817,16 +836,27 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         );
         assert_eq!(
             flow.events.lock().unwrap().as_slice(),
-            ["issued", "verified", "inference"]
+            [
+                "issued",
+                "verified",
+                "inference_rejected",
+                "issued",
+                "verified",
+                "inference"
+            ]
         );
-        assert_eq!(flow.verifier_requests.lock().unwrap().len(), 1);
-        assert_eq!(*flow.verifier_attempts.lock().unwrap(), 2);
+        assert_eq!(flow.verifier_requests.lock().unwrap().len(), 2);
+        assert_eq!(*flow.verifier_attempts.lock().unwrap(), 3);
         assert_eq!(
             flow.prompts.lock().unwrap().as_slice(),
             ["verifier protected prompt"]
         );
         let org_requests = flow.org_requests.lock().unwrap();
-        assert_eq!(org_requests.len(), 1);
+        assert_eq!(org_requests.len(), 2);
+        assert_ne!(
+            org_requests[0]["client_request_id"],
+            org_requests[1]["client_request_id"]
+        );
         assert!(!org_requests[0]
             .to_string()
             .contains("verifier protected prompt"));
@@ -835,6 +865,22 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         .lookup_openrouter_lease(&response.client_request_id)
         .unwrap();
     assert_eq!(lease.key_source, "oa_org");
+    if !live_org {
+        let verifier_requests = flow.verifier_requests.lock().unwrap();
+        assert_eq!(
+            verifier_requests[1]["key_valid_till"].as_u64(),
+            Some(lease.expires_at + 30)
+        );
+        drop(verifier_requests);
+        let first_lease_id = flow.org_requests.lock().unwrap()[0]["client_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let retired = store.lookup_openrouter_lease(&first_lease_id).unwrap();
+        assert_eq!(retired.status, "finalized");
+        assert_eq!(retired.charge_applied, Some(request_cap));
+        assert_eq!(lease.status, "active");
+    }
 }
 
 fn now_seconds() -> u64 {

@@ -5,6 +5,7 @@
 //! - GET  /v1/attestation           -- published signer metadata for deployments
 //! - POST /v2/requests              -- submit an API request
 //! - POST /v2/openrouter/leases     -- open a prompt-private runtime-key lease
+//! - POST /v2/openrouter/leases/:id -- retire a rejected runtime-key lease
 //! - POST /v2/withdraw/clearance    -- request mutual-close clearance
 //! - GET  /v2/requests/:id          -- recover by client_request_id
 //! - GET  /v2/nullifiers/:nullifier -- recover by nullifier
@@ -107,7 +108,7 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
         .route("/v2/openrouter/leases", post(handle_openrouter_lease))
         .route(
             "/v2/openrouter/leases/{client_request_id}",
-            get(handle_openrouter_lease_status),
+            get(handle_openrouter_lease_status).post(handle_openrouter_lease_retirement),
         )
         .route("/v2/withdraw/clearance", post(handle_clearance))
         .route(
@@ -214,6 +215,18 @@ async fn handle_openrouter_lease_status(
         .openrouter_lease_status(&client_request_id)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn handle_openrouter_lease_retirement(
+    State(processor): State<AppState>,
+    Path(client_request_id): Path<String>,
+    Json(api_request): Json<ApiRequestV2>,
+) -> Result<Json<OpenRouterLeaseStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    processor
+        .retire_openrouter_lease(&client_request_id, &api_request)
+        .await
+        .map(Json)
+        .map_err(|error| error_to_response(&error, &client_request_id, &processor))
 }
 
 /// POST /v1/withdraw/clearance -- request a clearance signature.

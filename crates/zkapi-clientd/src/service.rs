@@ -45,6 +45,7 @@ use crate::indexer::IndexerClient;
 const DIRECT_REMOTE_MAX_ATTEMPTS: usize = 3;
 const DIRECT_REMOTE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const DIRECT_REMOTE_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const MAX_OA_LEASE_EXPIRY_SAFETY_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoreRequest {
@@ -637,9 +638,60 @@ impl AuthService {
             let _ = self.recover().await?;
             *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
         }
-        let lease = lease_guard
-            .as_mut()
-            .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+        let (upstream_path, upstream_body) =
+            crate::compat::openrouter_request(&request.path, request.body);
+        let mut rotated = false;
+        let (status, raw_payload, client_request_id) = loop {
+            let lease = lease_guard
+                .as_mut()
+                .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+            match self
+                .send_verified_openrouter_inference(lease, &upstream_path, &upstream_body)
+                .await
+            {
+                Ok((status, raw_payload)) => {
+                    break (status, raw_payload, lease.client_request_id.clone());
+                }
+                Err(error) if !rotated && is_unusable_openrouter_key(&error) => {
+                    let rejected_lease_id = lease.client_request_id.clone();
+                    tracing::warn!(
+                        client_request_id = %rejected_lease_id,
+                        error = %error,
+                        "retiring rejected OpenRouter key and opening a replacement lease"
+                    );
+                    self.retire_direct_openrouter_lease(&rejected_lease_id)
+                        .await?;
+                    *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
+                    rotated = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let response_code = status.as_u16();
+        let wallet = self.status().await?;
+        let (remaining_balance, next_anchor) = wallet
+            .note
+            .map(|note| (Some(note.current_balance), note.current_anchor))
+            .unwrap_or((None, Felt252::ZERO));
+        Ok(CoreResponse {
+            client_request_id,
+            response_code,
+            payload: serde_json::from_str(&raw_payload).ok(),
+            raw_payload,
+            // The authoritative charge is intentionally unknown until the
+            // whole lease settles. Zero here means "not yet applied".
+            charge_applied: 0,
+            next_anchor,
+            remaining_balance,
+        })
+    }
+
+    async fn send_verified_openrouter_inference(
+        &self,
+        lease: &mut ActiveOpenRouterLease,
+        upstream_path: &str,
+        upstream_body: &Value,
+    ) -> Result<(reqwest::StatusCode, String), AuthError> {
         if !lease.verified {
             let evidence = lease.verification.clone().ok_or_else(|| {
                 AuthError::KeyVerification("OA lease lost its verification evidence".to_string())
@@ -653,33 +705,13 @@ impl AuthService {
             }
             lease.verified = true;
         }
-        let (upstream_path, upstream_body) =
-            crate::compat::openrouter_request(&request.path, request.body);
         let url = format!(
             "{}{}",
             lease.openrouter_api_base.trim_end_matches('/'),
             upstream_path
         );
-        let (status, raw_payload) = self
-            .send_openrouter_inference(&url, &lease.api_key, &upstream_body, lease.expires_at)
-            .await?;
-        let response_code = status.as_u16();
-        let wallet = self.status().await?;
-        let (remaining_balance, next_anchor) = wallet
-            .note
-            .map(|note| (Some(note.current_balance), note.current_anchor))
-            .unwrap_or((None, Felt252::ZERO));
-        Ok(CoreResponse {
-            client_request_id: lease.client_request_id.clone(),
-            response_code,
-            payload: serde_json::from_str(&raw_payload).ok(),
-            raw_payload,
-            // The authoritative charge is intentionally unknown until the
-            // whole lease settles. Zero here means "not yet applied".
-            charge_applied: 0,
-            next_anchor,
-            remaining_balance,
-        })
+        self.send_openrouter_inference(&url, &lease.api_key, upstream_body, lease.expires_at)
+            .await
     }
 
     async fn send_openrouter_inference(
@@ -868,7 +900,9 @@ impl AuthService {
             ));
         }
         if evidence.station_id.is_empty()
-            || evidence.key_valid_till != expires_at
+            || evidence.key_valid_till < expires_at
+            || evidence.key_valid_till.saturating_sub(expires_at)
+                > MAX_OA_LEASE_EXPIRY_SAFETY_SECONDS
             || evidence.station_signature.len() != 128
             || evidence.org_signature.len() != 128
         {
@@ -1049,6 +1083,56 @@ impl AuthService {
             .json()
             .await
             .map_err(|error| AuthError::Serialization(error.to_string()))
+    }
+
+    async fn retire_direct_openrouter_lease(
+        &self,
+        client_request_id: &str,
+    ) -> Result<(), AuthError> {
+        let request = self.prepare_direct_lease_request().await?;
+        if request.client_request_id != client_request_id {
+            return Err(AuthError::LeasePending(
+                "pending proof does not match the rejected OpenRouter lease".to_string(),
+            ));
+        }
+        let response = self
+            .http
+            .post(format!(
+                "{}/v2/openrouter/leases/{client_request_id}",
+                self.config.protocol_server_url.trim_end_matches('/')
+            ))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?;
+        if !status.is_success() {
+            if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
+                return Err(AuthError::Wallet(format!(
+                    "{}: {}",
+                    error.error_code, error.error_message
+                )));
+            }
+            return Err(AuthError::Wallet(format!("HTTP {status}: {body}")));
+        }
+        let status: OpenRouterLeaseStatusResponse = serde_json::from_str(&body)
+            .map_err(|error| AuthError::Serialization(error.to_string()))?;
+        if status.status != "finalized" {
+            return Err(AuthError::LeasePending(format!(
+                "lease {} was not finalized during retirement",
+                status.client_request_id
+            )));
+        }
+        if !self.recover().await?.recovered {
+            return Err(AuthError::LeasePending(format!(
+                "lease {client_request_id} retired but its wallet update is not recoverable"
+            )));
+        }
+        Ok(())
     }
 
     pub async fn demo_overview(&self) -> Result<DemoOverview, AuthError> {
@@ -1388,6 +1472,15 @@ fn is_transient_remote_status(status: reqwest::StatusCode) -> bool {
     matches!(
         status.as_u16(),
         408 | 425 | 429 | 500 | 502 | 503 | 504 | 524 | 529
+    )
+}
+
+fn is_unusable_openrouter_key(error: &AuthError) -> bool {
+    matches!(
+        error,
+        AuthError::UpstreamResponse { status, .. }
+            if *status == reqwest::StatusCode::UNAUTHORIZED
+                || *status == reqwest::StatusCode::PAYMENT_REQUIRED
     )
 }
 
