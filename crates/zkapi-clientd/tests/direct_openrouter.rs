@@ -13,7 +13,9 @@ use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{AuthConfig, AuthService, CoreRequest, ModelDescriptor, RequestMode};
 use zkapi_core::merkle::MerkleTree;
 use zkapi_core::v2 as core;
-use zkapi_serverd::config::{OpenRouterLeaseConfig, ProviderKind, ServerConfig};
+use zkapi_serverd::config::{
+    OpenRouterLeaseConfig, OpenRouterLeaseSourceConfig, ProviderKind, ServerConfig,
+};
 use zkapi_serverd::nullifier_store::NullifierStore;
 use zkapi_serverd::processor::RequestProcessor;
 use zkapi_serverd::provider::EchoProvider;
@@ -31,6 +33,15 @@ struct OpenRouterState {
     prompts: Arc<Mutex<Vec<String>>>,
     create_bodies: Arc<Mutex<Vec<Value>>>,
     deletes: Arc<Mutex<usize>>,
+}
+
+#[derive(Clone, Default)]
+struct OaFlowState {
+    events: Arc<Mutex<Vec<String>>>,
+    org_requests: Arc<Mutex<Vec<Value>>>,
+    verifier_requests: Arc<Mutex<Vec<Value>>>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    verifier_rejections_remaining: Arc<Mutex<usize>>,
 }
 
 async fn spawn(router: Router) -> String {
@@ -165,6 +176,121 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         .with_state(state)
 }
 
+fn oa_verifier_router(state: OaFlowState) -> Router {
+    async fn submit_key(
+        State(state): State<OaFlowState>,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if body["station_id"] != "station-test"
+            || body["api_key"] != "sk-or-v1-oa-test"
+            || body["station_signature"].as_str().map(str::len) != Some(128)
+            || body["org_signature"].as_str().map(str::len) != Some(128)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let mut failures = state.verifier_rejections_remaining.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            return Ok(Json(json!({ "status": "pending" })));
+        }
+        drop(failures);
+        state.events.lock().unwrap().push("verified".to_string());
+        state.verifier_requests.lock().unwrap().push(body);
+        Ok(Json(json!({ "status": "verified" })))
+    }
+    Router::new()
+        .route("/submit_key", post(submit_key))
+        .with_state(state)
+}
+
+fn oa_inference_router(state: OaFlowState) -> Router {
+    async fn infer(
+        State(state): State<OaFlowState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer sk-or-v1-oa-test")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let prompt = body["messages"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        state.events.lock().unwrap().push("inference".to_string());
+        state.prompts.lock().unwrap().push(prompt.clone());
+        Ok(Json(json!({
+            "id": "chatcmpl-oa",
+            "object": "chat.completion",
+            "model": body["model"],
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": format!("verified: {prompt}") },
+                "finish_reason": "stop"
+            }]
+        })))
+    }
+    Router::new()
+        .route("/v1/chat/completions", post(infer))
+        .with_state(state)
+}
+
+fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String) -> Router {
+    #[derive(Clone)]
+    struct OaOrgState {
+        flow: OaFlowState,
+        verifier_url: String,
+        inference_url: String,
+    }
+
+    async fn request_key(
+        State(state): State<OaOrgState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer oa-org-test-secret")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if body["credit_limit"] != 0.001 || body["duration_minutes"] != 1 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        state.flow.events.lock().unwrap().push("issued".to_string());
+        state.flow.org_requests.lock().unwrap().push(body);
+        let expires_at = now_seconds() + 60;
+        Ok(Json(json!({
+            "source": "oa_org",
+            "key": "sk-or-v1-oa-test",
+            "key_hash": "oa-runtime-hash",
+            "credit_limit": 0.001,
+            "duration_minutes": 1,
+            "expires_at": "future",
+            "expires_at_unix": expires_at,
+            "station_id": "station-test",
+            "station_url": "https://station.example",
+            "station_recently_attested": true,
+            "station_signature": "ab".repeat(64),
+            "org_signature": "cd".repeat(64),
+            "verifier_url": state.verifier_url,
+            "openrouter_api_base": format!("{}/v1", state.inference_url),
+        })))
+    }
+
+    Router::new()
+        .route("/api/zkapi/request_key", post(request_key))
+        .with_state(OaOrgState {
+            flow: state,
+            verifier_url,
+            inference_url,
+        })
+}
+
 fn test_directory() -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -256,9 +382,11 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
                 initial_root: root,
                 proof_setup_dir: setup_directory.clone(),
                 openrouter_leases: Some(OpenRouterLeaseConfig {
-                    management_key: live_management_key
-                        .unwrap_or_else(|| "management-test-key".to_string()),
-                    api_base: format!("{openrouter_url}/api"),
+                    source: OpenRouterLeaseSourceConfig::OpenRouter {
+                        management_key: live_management_key
+                            .unwrap_or_else(|| "management-test-key".to_string()),
+                        api_base: format!("{openrouter_url}/api"),
+                    },
                     ttl_seconds: if live_openrouter { 30 } else { 3 },
                     settlement_grace_seconds: if live_openrouter { 20 } else { 0 },
                     settlement_poll_seconds: 1,
@@ -288,6 +416,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         state_signing_key: state_key.clone(),
         clearance_signing_key: clearance_key.clone(),
         request_mode: RequestMode::DirectOpenrouter,
+        openrouter_inference_base: format!("{openrouter_url}/api/v1"),
         ..Default::default()
     })
     .unwrap();
@@ -442,6 +571,194 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         .unwrap();
     assert!(proxy_response.response_payload.contains("proxy prompt"));
     assert_eq!(proxy_response.charge_applied, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
+    let directory = test_directory();
+    let wallet_directory = directory.join("wallet");
+    let contract = Felt252::from_u64(0x0a0a);
+    let deposit = 10_000u128;
+    let request_cap = 1_000u128;
+    let setup_directory = setup_directory();
+    let expiry = 4_000_000_000u64;
+
+    let state_seed = Felt252::from_u64(31);
+    let clear_seed = Felt252::from_u64(32);
+    let signer = Arc::new(ServerSigner::new(&state_seed, &clear_seed));
+    let state_key = signer.state_public_key();
+    let clearance_key = signer.clearance_public_key();
+
+    let mut seed_wallet = Wallet::new(ClientConfig {
+        protocol_version: 2,
+        chain_id: 1,
+        contract_address: contract,
+        request_charge_cap: request_cap,
+        policy_charge_cap: request_cap,
+        policy_enabled: false,
+        server_url: "http://127.0.0.1:1".to_string(),
+        state_dir: wallet_directory.to_string_lossy().to_string(),
+        trusted_epoch_roots: Vec::new(),
+        proof_mode: ClientProofMode::Groth16 {
+            setup_dir: setup_directory.clone(),
+        },
+        state_signing_key: state_key.clone(),
+        clearance_signing_key: clearance_key.clone(),
+    })
+    .unwrap();
+    let (secret, registration) = seed_wallet.generate_deposit_params();
+    seed_wallet
+        .confirm_deposit(secret, 0, deposit, expiry)
+        .unwrap();
+
+    let mut tree = MerkleTree::new();
+    tree.insert(core::note_leaf(0, &registration, deposit, expiry));
+    let tree = Arc::new(RwLock::new(tree));
+    let root = tree.read().unwrap().root();
+    let indexer_url = spawn(indexer_router(tree)).await;
+
+    let flow = OaFlowState::default();
+    let live_org_url = std::env::var("LIVE_OA_ORG_URL").ok();
+    let live_org = live_org_url.is_some();
+    let (org_url, org_secret, verifier_url, trusted_inference_base) =
+        if let Some(org_url) = live_org_url {
+            (
+                org_url,
+                std::env::var("LIVE_OA_ORG_SHARED_SECRET")
+                    .expect("LIVE_OA_ORG_SHARED_SECRET is required with LIVE_OA_ORG_URL"),
+                "https://verifier2.openanonymity.ai".to_string(),
+                "https://openrouter.ai/api/v1".to_string(),
+            )
+        } else {
+            *flow.verifier_rejections_remaining.lock().unwrap() = 1;
+            let verifier_url = spawn(oa_verifier_router(flow.clone())).await;
+            let inference_url = spawn(oa_inference_router(flow.clone())).await;
+            let trusted_inference_base = format!("{inference_url}/v1");
+            let org_url = spawn(oa_org_router(
+                flow.clone(),
+                verifier_url.clone(),
+                inference_url,
+            ))
+            .await;
+            (
+                org_url,
+                "oa-org-test-secret".to_string(),
+                verifier_url,
+                trusted_inference_base,
+            )
+        };
+
+    let store = Arc::new(NullifierStore::new(directory.join("server.db")).unwrap());
+    let processor = Arc::new(
+        RequestProcessor::try_new(
+            ServerConfig {
+                protocol_version: 2,
+                chain_id: 1,
+                contract_address: contract,
+                request_charge_cap: request_cap,
+                policy_charge_cap: request_cap,
+                policy_enabled: false,
+                provider_kind: ProviderKind::Echo,
+                echo_fixed_charge: 1,
+                db_path: directory.join("server.db").to_string_lossy().to_string(),
+                state_seed,
+                clear_seed,
+                initial_root: root,
+                proof_setup_dir: setup_directory.clone(),
+                openrouter_leases: Some(OpenRouterLeaseConfig {
+                    source: OpenRouterLeaseSourceConfig::OaOrg {
+                        org_base_url: org_url,
+                        shared_secret: org_secret,
+                    },
+                    ttl_seconds: 60,
+                    settlement_grace_seconds: 0,
+                    settlement_poll_seconds: 1,
+                }),
+                ..Default::default()
+            },
+            store.clone(),
+            signer,
+            Arc::new(EchoProvider::new(1)),
+            root,
+        )
+        .unwrap(),
+    );
+    let protocol_server_url = spawn(create_router(processor)).await;
+    let service = AuthService::new(AuthConfig {
+        protocol_version: 2,
+        chain_id: 1,
+        contract_address: contract,
+        request_charge_cap: request_cap,
+        policy_charge_cap: request_cap,
+        policy_enabled: false,
+        protocol_server_url,
+        indexer_url,
+        state_dir: wallet_directory,
+        models: vec![ModelDescriptor::new("openai/gpt-4o-mini")],
+        proof_setup_dir: setup_directory,
+        state_signing_key: state_key,
+        clearance_signing_key: clearance_key,
+        request_mode: RequestMode::DirectOpenrouter,
+        oa_verifier_url: verifier_url,
+        openrouter_inference_base: trusted_inference_base,
+        require_oa_org_key_source: true,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let request = CoreRequest::post_json(
+        "/v1/chat/completions",
+        json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "verifier protected prompt"}]
+        }),
+    );
+    if !live_org {
+        let first_attempt = service.execute_request(request.clone()).await;
+        assert!(first_attempt.is_err());
+        assert_eq!(flow.events.lock().unwrap().as_slice(), ["issued"]);
+        assert!(flow.prompts.lock().unwrap().is_empty());
+        assert_eq!(flow.org_requests.lock().unwrap().len(), 1);
+    }
+
+    let response = service
+        .execute_request(CoreRequest::post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "verifier protected prompt"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    let payload = response.payload.unwrap();
+    assert!(payload["choices"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    if !live_org {
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "verified: verifier protected prompt"
+        );
+        assert_eq!(
+            flow.events.lock().unwrap().as_slice(),
+            ["issued", "verified", "inference"]
+        );
+        assert_eq!(flow.verifier_requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            flow.prompts.lock().unwrap().as_slice(),
+            ["verifier protected prompt"]
+        );
+        let org_requests = flow.org_requests.lock().unwrap();
+        assert_eq!(org_requests.len(), 1);
+        assert!(!org_requests[0]
+            .to_string()
+            .contains("verifier protected prompt"));
+    }
+    let lease = store
+        .lookup_openrouter_lease(&response.client_request_id)
+        .unwrap();
+    assert_eq!(lease.key_source, "oa_org");
 }
 
 fn now_seconds() -> u64 {

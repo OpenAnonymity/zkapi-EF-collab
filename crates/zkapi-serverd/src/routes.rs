@@ -24,12 +24,13 @@ use tower_http::cors::CorsLayer;
 
 use zkapi_types::wire::{
     ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, ErrorResponse,
-    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2, RequestResponseV2,
+    OpenRouterLeaseStatusResponse, RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::Felt252;
 
 use crate::dashboard::{DashboardEvent, DashboardHub, DashboardTotals};
 use crate::error::ServerError;
+use crate::oa_org::IssuedOpenRouterLease;
 use crate::pricing;
 use crate::processor::RequestProcessor;
 use crate::provider::build_provider;
@@ -197,7 +198,7 @@ async fn handle_request(
 async fn handle_openrouter_lease(
     State(processor): State<AppState>,
     Json(api_request): Json<ApiRequestV2>,
-) -> Result<(StatusCode, Json<OpenRouterLeaseResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<IssuedOpenRouterLease>), (StatusCode, Json<ErrorResponse>)> {
     processor
         .issue_openrouter_lease(&api_request)
         .await

@@ -262,6 +262,51 @@ struct ActiveOpenRouterLease {
     openrouter_api_base: String,
     expires_at: u64,
     settle_after: u64,
+    verification: Option<OaKeyVerificationEvidence>,
+    verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterLeaseExtensions {
+    #[serde(default = "default_openrouter_key_source")]
+    key_source: String,
+    #[serde(default)]
+    verification: Option<OaKeyVerificationEvidence>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OaKeyVerificationEvidence {
+    verifier_url: String,
+    station_id: String,
+    #[serde(default)]
+    station_recently_attested: bool,
+    key_valid_till: u64,
+    station_signature: String,
+    org_signature: String,
+}
+
+fn default_openrouter_key_source() -> String {
+    "openrouter".to_string()
+}
+
+fn is_secure_or_loopback_url(value: &str) -> bool {
+    value.starts_with("https://")
+        || value.starts_with("http://127.0.0.1:")
+        || value.starts_with("http://localhost:")
+}
+
+fn matches_trusted_url(supplied: &str, expected: &str) -> bool {
+    let expected = expected.trim_end_matches('/');
+    is_secure_or_loopback_url(expected) && supplied.trim_end_matches('/') == expected
+}
+
+fn enforce_required_key_source(require_oa: bool, source: &str) -> Result<(), AuthError> {
+    if require_oa && source != "oa_org" {
+        return Err(AuthError::KeyVerification(
+            "client policy requires an OA-org verifier-backed key".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -300,6 +345,7 @@ impl AuthService {
             wallet_mutex: Arc::new(Mutex::new(())),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(180))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| AuthError::Wallet(error.to_string()))?,
             direct_lease: tokio::sync::Mutex::new(None),
@@ -588,8 +634,21 @@ impl AuthService {
             *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
         }
         let lease = lease_guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+        if !lease.verified {
+            let evidence = lease.verification.clone().ok_or_else(|| {
+                AuthError::KeyVerification("OA lease lost its verification evidence".to_string())
+            })?;
+            self.verify_oa_key(&lease.api_key, lease.expires_at, &evidence)
+                .await?;
+            if now_seconds().saturating_add(1) >= lease.expires_at {
+                return Err(AuthError::KeyVerification(
+                    "OA key expired while verification was in progress".to_string(),
+                ));
+            }
+            lease.verified = true;
+        }
         let (upstream_path, upstream_body) =
             crate::compat::openrouter_request(&request.path, request.body);
         let url = format!(
@@ -657,11 +716,48 @@ impl AuthService {
             if status.is_success() {
                 let lease: OpenRouterLeaseResponse = serde_json::from_str(&body)
                     .map_err(|error| AuthError::Serialization(error.to_string()))?;
+                let extensions: OpenRouterLeaseExtensions = serde_json::from_str(&body)
+                    .map_err(|error| AuthError::Serialization(error.to_string()))?;
                 if lease.api_key.is_empty() || lease.expires_at <= now_seconds() {
                     return Err(AuthError::Wallet(
                         "server returned an unusable OpenRouter lease".to_string(),
                     ));
                 }
+                let expected_inference = &self.config.openrouter_inference_base;
+                if !matches_trusted_url(&lease.openrouter_api_base, expected_inference) {
+                    return Err(AuthError::KeyVerification(
+                        "lease inference origin does not match the client's trusted OpenRouter origin"
+                            .to_string(),
+                    ));
+                }
+                let (verification, verified) = match extensions.key_source.as_str() {
+                    "openrouter" => {
+                        enforce_required_key_source(
+                            self.config.require_oa_org_key_source,
+                            "openrouter",
+                        )?;
+                        if extensions.verification.is_some() {
+                            return Err(AuthError::KeyVerification(
+                                "direct OpenRouter lease included unexpected OA evidence"
+                                    .to_string(),
+                            ));
+                        }
+                        (None, true)
+                    }
+                    "oa_org" => {
+                        let evidence = extensions.verification.ok_or_else(|| {
+                            AuthError::KeyVerification(
+                                "OA org lease omitted verification evidence".to_string(),
+                            )
+                        })?;
+                        (Some(evidence), false)
+                    }
+                    source => {
+                        return Err(AuthError::KeyVerification(format!(
+                            "server returned unsupported key source {source}"
+                        )))
+                    }
+                };
                 tracing::info!(
                     client_request_id = %lease.client_request_id,
                     expires_at = lease.expires_at,
@@ -673,6 +769,8 @@ impl AuthService {
                     openrouter_api_base: lease.openrouter_api_base,
                     expires_at: lease.expires_at,
                     settle_after: lease.settle_after,
+                    verification,
+                    verified,
                 });
             }
             if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
@@ -702,6 +800,60 @@ impl AuthService {
         Err(AuthError::Wallet(
             "lease request failed after retrying a stale indexer root".to_string(),
         ))
+    }
+
+    async fn verify_oa_key(
+        &self,
+        api_key: &str,
+        expires_at: u64,
+        evidence: &OaKeyVerificationEvidence,
+    ) -> Result<(), AuthError> {
+        let expected_verifier = self.config.oa_verifier_url.trim_end_matches('/');
+        if !matches_trusted_url(&evidence.verifier_url, expected_verifier) {
+            return Err(AuthError::KeyVerification(
+                "lease verifier does not match the client's trusted OA verifier".to_string(),
+            ));
+        }
+        if evidence.station_id.is_empty()
+            || evidence.key_valid_till != expires_at
+            || evidence.station_signature.len() != 128
+            || evidence.org_signature.len() != 128
+        {
+            return Err(AuthError::KeyVerification(
+                "OA key evidence is incomplete or inconsistent".to_string(),
+            ));
+        }
+        let response = self
+            .http
+            .post(format!("{expected_verifier}/submit_key"))
+            .json(&serde_json::json!({
+                "station_id": evidence.station_id,
+                "api_key": api_key,
+                "key_valid_till": evidence.key_valid_till,
+                "station_signature": evidence.station_signature,
+                "org_signature": evidence.org_signature,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                AuthError::KeyVerification(format!("verifier request failed: {error}"))
+            })?;
+        let status = response.status();
+        let result: Value = response.json().await.map_err(|error| {
+            AuthError::KeyVerification(format!("invalid verifier response: {error}"))
+        })?;
+        if !status.is_success() || result.get("status").and_then(Value::as_str) != Some("verified")
+        {
+            return Err(AuthError::KeyVerification(format!(
+                "trusted verifier rejected the station key (HTTP {status})"
+            )));
+        }
+        tracing::info!(
+            station_id = %evidence.station_id,
+            recently_attested = evidence.station_recently_attested,
+            "OA verifier accepted station-issued OpenRouter key"
+        );
+        Ok(())
     }
 
     async fn prepare_direct_lease_request(&self) -> Result<ApiRequestV2, AuthError> {
@@ -1248,6 +1400,35 @@ fn default_method() -> String {
 
 fn default_body() -> Value {
     Value::Object(Default::default())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::{enforce_required_key_source, matches_trusted_url};
+
+    #[test]
+    fn endpoint_pinning_rejects_inference_origin_substitution() {
+        assert!(matches_trusted_url(
+            "https://openrouter.ai/api/v1/",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(!matches_trusted_url(
+            "https://attacker.example/api/v1",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(!matches_trusted_url(
+            "http://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn required_oa_policy_rejects_direct_and_legacy_downgrades() {
+        assert!(enforce_required_key_source(true, "openrouter").is_err());
+        assert!(enforce_required_key_source(true, "").is_err());
+        assert!(enforce_required_key_source(true, "oa_org").is_ok());
+        assert!(enforce_required_key_source(false, "openrouter").is_ok());
+    }
 }
 
 #[cfg(any())]

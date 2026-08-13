@@ -69,15 +69,54 @@ impl std::fmt::Debug for MeteredConfig {
     }
 }
 
-/// OpenRouter management-key configuration for prompt-private, short-lived
-/// client leases. This is independent from the metered pass-through provider,
-/// so a server can expose both modes at the same time.
+/// Source used to provision prompt-private, short-lived OpenRouter keys.
 #[derive(Clone)]
+pub enum OpenRouterLeaseSourceConfig {
+    /// Mint child keys directly with an OpenRouter management key.
+    OpenRouter {
+        management_key: String,
+        /// OpenRouter API base without `/v1`.
+        api_base: String,
+    },
+    /// Ask an OA org to relay key creation to a verifier-enrolled station.
+    OaOrg {
+        org_base_url: String,
+        /// Dedicated zkAPI service credential configured by the org.
+        shared_secret: String,
+    },
+}
+
+impl OpenRouterLeaseSourceConfig {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::OpenRouter { .. } => "openrouter",
+            Self::OaOrg { .. } => "oa_org",
+        }
+    }
+}
+
+impl std::fmt::Debug for OpenRouterLeaseSourceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenRouter { api_base, .. } => formatter
+                .debug_struct("OpenRouter")
+                .field("management_key", &"[configured]")
+                .field("api_base", api_base)
+                .finish(),
+            Self::OaOrg { org_base_url, .. } => formatter
+                .debug_struct("OaOrg")
+                .field("org_base_url", org_base_url)
+                .field("shared_secret", &"[configured]")
+                .finish(),
+        }
+    }
+}
+
+/// Prompt-private lease configuration. This remains independent from the
+/// metered pass-through provider, so both modes can be exposed together.
+#[derive(Debug, Clone)]
 pub struct OpenRouterLeaseConfig {
-    /// OpenRouter Management API key. This key is never returned to clients.
-    pub management_key: String,
-    /// OpenRouter API base without `/v1`, normally `https://openrouter.ai/api`.
-    pub api_base: String,
+    pub source: OpenRouterLeaseSourceConfig,
     /// Runtime-key validity window.
     pub ttl_seconds: u64,
     /// Delay after key expiry before reading aggregate usage, allowing the
@@ -85,19 +124,6 @@ pub struct OpenRouterLeaseConfig {
     pub settlement_grace_seconds: u64,
     /// Background settlement scan interval.
     pub settlement_poll_seconds: u64,
-}
-
-impl std::fmt::Debug for OpenRouterLeaseConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OpenRouterLeaseConfig")
-            .field("management_key", &"[configured]")
-            .field("api_base", &self.api_base)
-            .field("ttl_seconds", &self.ttl_seconds)
-            .field("settlement_grace_seconds", &self.settlement_grace_seconds)
-            .field("settlement_poll_seconds", &self.settlement_poll_seconds)
-            .finish()
-    }
 }
 
 impl Default for MeteredConfig {

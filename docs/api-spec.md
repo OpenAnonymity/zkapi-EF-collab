@@ -80,7 +80,12 @@ server creates an OpenRouter child key whose USD limit equals the deployment's
 request charge cap and whose `expires_at` equals the returned UNIX expiry. A
 successful `201` response contains `api_key`, `openrouter_api_base`,
 `issued_at`, `expires_at`, `valid_for_seconds`, `settle_after`, and
-`spending_limit_usd`. The plaintext key is returned once and is not persisted.
+`spending_limit_usd`, plus `key_source`. An OA-org lease also contains a
+`verification` object with `verifier_url`, `station_id`,
+`station_recently_attested`, `key_valid_till`, `station_signature`, and
+`org_signature`. The client requires that URL to match its independently
+configured OA verifier and submits the same `/submit_key` payload as oa-chat
+before using the key. The plaintext key is returned once and is not persisted.
 
 The nullifier remains `reserved` for the whole lease. After expiry plus the
 configured usage-propagation grace period, the server reads aggregate `usage`
@@ -90,6 +95,11 @@ original request, and deletes the expired key. The existing
 signed next state. Thus key issuance, direct inference calls, usage polling,
 and state recovery are several HTTP operations but one zkAPI request and one
 nullifier. The lease-status GET never returns the plaintext key.
+
+For `key_source = "oa_org"`, the station owns provider management and deletes
+the expired key. The zkAPI server cannot inspect account usage, so it finalizes
+the proof-bound hard spending limit after expiry instead of claiming
+usage-based billing.
 
 This mode is disabled when server-side prompt policy is enabled: a server
 cannot enforce a prompt policy while also being excluded from the prompt path.

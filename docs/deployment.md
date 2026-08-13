@@ -112,6 +112,40 @@ Put TLS/reverse-proxy routing in front of the services. Route `/v2/*`,
 the client manifest, image, shell history, or repository. The management key
 must have permission to create, list, inspect, and delete OpenRouter API keys.
 
+As a verifier-backed alternative, configure a dedicated credential on an OA
+org and start serverd with the org source instead of
+`ZKAPI_OPENROUTER_MANAGEMENT_KEY`:
+
+```bash
+export ZKAPI_OA_ORG_SHARED_SECRET='...'
+
+./target/release/zkapi \
+  --protocol-version 2 \
+  --chain-id 11155111 \
+  --contract-address "$VAULT" \
+  --request-charge-cap 1000000 \
+  --proof-setup-dir "$PWD/protocol/setup/v2" \
+  serverd --listen 0.0.0.0:3000 \
+  --oa-org-url https://org.example \
+  --openrouter-lease-ttl-seconds 300 \
+  --openrouter-settlement-grace-seconds 5 \
+  --db-path /data/zkapi-server.db
+```
+
+The OA org must expose `POST /api/zkapi/request_key`, set the same dedicated
+`ZKAPI_SHARED_SECRET`, configure `VERIFIER_URL`, and cap credit/duration at
+least as tightly as the zkAPI deployment. OA-org TTLs are whole minutes. The
+client trusts `https://verifier2.openanonymity.ai` by default; override
+`--oa-verifier-url` only when the independently audited verifier endpoint is
+different. The server reads the service credential only from
+`ZKAPI_OA_ORG_SHARED_SECRET`, not a command-line flag. Never reuse the org
+admin secret as the zkAPI service credential.
+
+Protected clients must also set `--require-oa-org-key-source`. The verifier URL
+and OpenRouter inference base are independently pinned client settings; the
+daemon rejects redirects and any lease that attempts to substitute either
+origin or downgrade to a direct key.
+
 ## 4. Publish client parameters
 
 Publish the vault address, chain ID, request cap, the four public signing-key

@@ -48,6 +48,7 @@ pub struct OpenRouterLeaseRecord {
     pub request_nullifier: Felt252,
     pub api_request: ApiRequestV2,
     pub key_hash: Option<String>,
+    pub key_source: String,
     pub status: String,
     pub issued_at: u64,
     pub expires_at: u64,
@@ -99,6 +100,7 @@ impl NullifierStore {
                 request_nullifier TEXT NOT NULL UNIQUE,
                 api_request_json TEXT NOT NULL,
                 key_hash TEXT UNIQUE,
+                key_source TEXT NOT NULL DEFAULT 'openrouter',
                 status TEXT NOT NULL,
                 issued_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
@@ -122,6 +124,10 @@ impl NullifierStore {
         );
         let _ = conn.execute(
             "ALTER TABLE nullifiers ADD COLUMN reservation_kind TEXT NOT NULL DEFAULT 'proxy'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE openrouter_leases ADD COLUMN key_source TEXT NOT NULL DEFAULT 'openrouter'",
             [],
         );
 
@@ -378,6 +384,7 @@ impl NullifierStore {
     pub fn create_openrouter_lease(
         &self,
         request: &ApiRequestV2,
+        key_source: &str,
         issued_at: u64,
         expires_at: u64,
         settle_after: u64,
@@ -392,13 +399,14 @@ impl NullifierStore {
             .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
         conn.execute(
             "INSERT INTO openrouter_leases (
-                client_request_id, request_nullifier, api_request_json, status,
+                client_request_id, request_nullifier, api_request_json, key_source, status,
                 issued_at, expires_at, settle_after, spending_limit_usd, updated_at
-             ) VALUES (?1, ?2, ?3, 'provisioning', ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, 'provisioning', ?5, ?6, ?7, ?8, ?9)",
             params![
                 request.client_request_id,
                 request.public_inputs.request_nullifier.to_hex(),
                 request_json,
+                key_source,
                 issued_at as i64,
                 expires_at as i64,
                 settle_after as i64,
@@ -407,6 +415,39 @@ impl NullifierStore {
             ],
         )
         .map_err(|error| ServerError::Database(format!("lease insert failed: {error}")))?;
+        Ok(())
+    }
+
+    pub fn update_openrouter_lease_timing(
+        &self,
+        client_request_id: &str,
+        expires_at: u64,
+        settle_after: u64,
+    ) -> Result<(), ServerError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| ServerError::Database(format!("lock poisoned: {error}")))?;
+        let rows = conn
+            .execute(
+                "UPDATE openrouter_leases
+                 SET expires_at = ?1, settle_after = ?2, updated_at = ?3
+                 WHERE client_request_id = ?4 AND status = 'provisioning'",
+                params![
+                    expires_at as i64,
+                    settle_after as i64,
+                    current_timestamp() as i64,
+                    client_request_id,
+                ],
+            )
+            .map_err(|error| {
+                ServerError::Database(format!("lease timing update failed: {error}"))
+            })?;
+        if rows != 1 {
+            return Err(ServerError::Internal(
+                "lease was not in provisioning state".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -625,6 +666,7 @@ fn row_to_openrouter_lease(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenRout
         request_nullifier: Felt252::from_hex(&nullifier).unwrap_or(Felt252::ZERO),
         api_request,
         key_hash: row.get("key_hash")?,
+        key_source: row.get("key_source")?,
         status: row.get("status")?,
         issued_at: row.get::<_, i64>("issued_at")? as u64,
         expires_at: row.get::<_, i64>("expires_at")? as u64,
@@ -792,7 +834,7 @@ mod tests {
             .reserve(&nullifier, "lease-1", &request.payload_hash)
             .unwrap();
         store
-            .create_openrouter_lease(&request, 10, 20, 21, 0.001)
+            .create_openrouter_lease(&request, "openrouter", 10, 20, 21, 0.001)
             .unwrap();
         store
             .activate_openrouter_lease("lease-1", "safe-key-hash")

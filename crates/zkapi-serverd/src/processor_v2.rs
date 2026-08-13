@@ -16,12 +16,13 @@ use zkapi_types::{
     NullifierStatus,
 };
 
-use crate::config::ServerConfig;
+use crate::config::{OpenRouterLeaseSourceConfig, ServerConfig};
 use crate::dashboard::{
     charge_usd, decode_request_view, redact_secrets, DashboardEvent, DashboardHub,
 };
 use crate::error::ServerError;
 use crate::nullifier_store::{NullifierStore, TranscriptRecord};
+use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner};
 use crate::openrouter::OpenRouterProvisioner;
 use crate::pricing;
 use crate::provider::{ApiProvider, ProviderResponse, UsageInfo};
@@ -54,6 +55,7 @@ pub struct RequestProcessor {
     current_root: Arc<RwLock<Felt252>>,
     dashboard: Option<Arc<DashboardHub>>,
     openrouter: Option<Arc<OpenRouterProvisioner>>,
+    oa_org: Option<Arc<OaOrgProvisioner>>,
     lease_issue_lock: tokio::sync::Mutex<()>,
 }
 
@@ -67,21 +69,59 @@ impl RequestProcessor {
     ) -> anyhow::Result<Self> {
         if let Some(lease) = config.openrouter_leases.as_ref() {
             anyhow::ensure!(
-                !lease.management_key.is_empty(),
-                "OpenRouter management key cannot be empty"
-            );
-            anyhow::ensure!(
                 lease.ttl_seconds > 0,
                 "OpenRouter lease TTL must be positive"
             );
+            match &lease.source {
+                OpenRouterLeaseSourceConfig::OpenRouter { management_key, .. } => {
+                    anyhow::ensure!(
+                        !management_key.is_empty(),
+                        "OpenRouter management key cannot be empty"
+                    );
+                }
+                OpenRouterLeaseSourceConfig::OaOrg {
+                    org_base_url,
+                    shared_secret,
+                } => {
+                    anyhow::ensure!(!org_base_url.is_empty(), "OA org URL cannot be empty");
+                    anyhow::ensure!(
+                        !shared_secret.is_empty(),
+                        "OA org shared secret cannot be empty"
+                    );
+                    anyhow::ensure!(
+                        lease.ttl_seconds.is_multiple_of(60),
+                        "OA org lease TTL must be a whole number of minutes"
+                    );
+                }
+            }
         }
         let verifier = RequestVerifier::load(&config.proof_setup_dir)?;
         let openrouter = config
             .openrouter_leases
             .as_ref()
-            .map(|lease| {
-                OpenRouterProvisioner::new(lease.management_key.clone(), lease.api_base.clone())
-                    .map(Arc::new)
+            .and_then(|lease| match &lease.source {
+                OpenRouterLeaseSourceConfig::OpenRouter {
+                    management_key,
+                    api_base,
+                } => Some(
+                    OpenRouterProvisioner::new(management_key.clone(), api_base.clone())
+                        .map(Arc::new),
+                ),
+                OpenRouterLeaseSourceConfig::OaOrg { .. } => None,
+            })
+            .transpose()?;
+        let oa_org = config
+            .openrouter_leases
+            .as_ref()
+            .and_then(|lease| match &lease.source {
+                OpenRouterLeaseSourceConfig::OaOrg {
+                    org_base_url,
+                    shared_secret,
+                } => Some(
+                    OaOrgProvisioner::new(org_base_url.clone(), shared_secret.clone())
+                        .map(Arc::new),
+                ),
+                OpenRouterLeaseSourceConfig::OpenRouter { .. } => None,
             })
             .transpose()?;
         Ok(Self {
@@ -93,6 +133,7 @@ impl RequestProcessor {
             current_root: Arc::new(RwLock::new(current_root)),
             dashboard: None,
             openrouter,
+            oa_org,
             lease_issue_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -157,7 +198,7 @@ impl RequestProcessor {
     pub async fn issue_openrouter_lease(
         &self,
         request: &ApiRequestV2,
-    ) -> Result<OpenRouterLeaseResponse, ServerError> {
+    ) -> Result<IssuedOpenRouterLease, ServerError> {
         let authorization: OpenRouterLeaseAuthorization = serde_json::from_str(&request.payload)
             .map_err(|error| {
                 ServerError::InvalidRequest(format!(
@@ -179,9 +220,6 @@ impl RequestProcessor {
                 "prompt-private leases cannot enforce server-side prompt policy".to_string(),
             ));
         }
-        let provisioner = self.openrouter.as_ref().ok_or_else(|| {
-            ServerError::Internal("OpenRouter lease provider is unavailable".to_string())
-        })?;
         let _issue_guard = self.lease_issue_lock.lock().await;
 
         if self
@@ -191,73 +229,155 @@ impl RequestProcessor {
             return Err(ServerError::Replay);
         }
         let key_name = format!("zkapi-{}", request.client_request_id);
+        let mut resume_provisioning = false;
+        let mut issued_at = current_timestamp();
         if let Some(existing) = self
             .store
             .lookup_openrouter_lease(&request.client_request_id)
         {
+            if existing.key_source != lease_config.source.label() {
+                return Err(ServerError::Internal(format!(
+                    "pending lease source {} does not match configured source {}",
+                    existing.key_source,
+                    lease_config.source.label()
+                )));
+            }
             if existing.status != "provisioning" || existing.key_hash.is_some() {
                 return Err(ServerError::LeasePending);
             }
-            provisioner.delete_keys_named(&key_name).await?;
-            self.store
-                .remove_failed_openrouter_lease(&request.client_request_id)?;
+            match &lease_config.source {
+                OpenRouterLeaseSourceConfig::OpenRouter { .. } => {
+                    let provisioner = self.openrouter.as_ref().ok_or_else(|| {
+                        ServerError::Internal(
+                            "OpenRouter lease provider is unavailable".to_string(),
+                        )
+                    })?;
+                    provisioner.delete_keys_named(&key_name).await?;
+                    self.store
+                        .remove_failed_openrouter_lease(&request.client_request_id)?;
+                }
+                OpenRouterLeaseSourceConfig::OaOrg { .. } => {
+                    // OA station issuance is replay-safe. Retain the durable
+                    // reservation and ask for the same one-show key again.
+                    resume_provisioning = true;
+                    issued_at = existing.issued_at;
+                }
+            }
         }
-        let issued_at = current_timestamp();
-        let expires_at = issued_at.saturating_add(lease_config.ttl_seconds);
-        let settle_after = expires_at.saturating_add(lease_config.settlement_grace_seconds);
+        let requested_expires_at = current_timestamp().saturating_add(lease_config.ttl_seconds);
         let spending_limit_usd = pricing::credits_to_usd(self.config.request_charge_cap);
         if !spending_limit_usd.is_finite() || spending_limit_usd <= 0.0 {
             return Err(ServerError::InvalidRequest(
                 "lease spending limit must be positive".to_string(),
             ));
         }
-        self.store.create_openrouter_lease(
-            request,
-            issued_at,
-            expires_at,
-            settle_after,
-            spending_limit_usd,
-        )?;
-        let created = match provisioner
-            .create_key(&key_name, spending_limit_usd, expires_at)
-            .await
+        if !resume_provisioning {
+            self.store.create_openrouter_lease(
+                request,
+                lease_config.source.label(),
+                issued_at,
+                requested_expires_at,
+                requested_expires_at.saturating_add(lease_config.settlement_grace_seconds),
+                spending_limit_usd,
+            )?;
+        }
+        let (api_key, key_hash, openrouter_api_base, expires_at, verification) = match &lease_config
+            .source
         {
-            Ok(created) => created,
-            Err(error) => {
-                let _ = self
-                    .store
-                    .remove_failed_openrouter_lease(&request.client_request_id);
-                return Err(error);
+            OpenRouterLeaseSourceConfig::OpenRouter { .. } => {
+                let provisioner = self.openrouter.as_ref().ok_or_else(|| {
+                    ServerError::Internal("OpenRouter lease provider is unavailable".to_string())
+                })?;
+                match provisioner
+                    .create_key(&key_name, spending_limit_usd, requested_expires_at)
+                    .await
+                {
+                    Ok(created) => (
+                        created.key,
+                        created.hash,
+                        provisioner.inference_base(),
+                        requested_expires_at,
+                        None,
+                    ),
+                    Err(error) => {
+                        let _ = self
+                            .store
+                            .remove_failed_openrouter_lease(&request.client_request_id);
+                        return Err(error);
+                    }
+                }
+            }
+            OpenRouterLeaseSourceConfig::OaOrg { .. } => {
+                let provisioner = self.oa_org.as_ref().ok_or_else(|| {
+                    ServerError::Internal("OA org lease provider is unavailable".to_string())
+                })?;
+                let created = provisioner
+                    .create_key(
+                        &request.client_request_id,
+                        spending_limit_usd,
+                        lease_config.ttl_seconds,
+                    )
+                    .await?;
+                (
+                    created.key,
+                    created.hash,
+                    created.openrouter_api_base,
+                    created.expires_at,
+                    Some(created.verification),
+                )
             }
         };
+        let settle_after = expires_at.saturating_add(lease_config.settlement_grace_seconds);
+        self.store.update_openrouter_lease_timing(
+            &request.client_request_id,
+            expires_at,
+            settle_after,
+        )?;
         if let Err(error) = self
             .store
-            .activate_openrouter_lease(&request.client_request_id, &created.hash)
+            .activate_openrouter_lease(&request.client_request_id, &key_hash)
         {
-            let _ = provisioner.delete_key(&created.hash).await;
+            if let (Some(provisioner), OpenRouterLeaseSourceConfig::OpenRouter { .. }) =
+                (&self.openrouter, &lease_config.source)
+            {
+                let _ = provisioner.delete_key(&key_hash).await;
+            }
             return Err(error);
         }
-        Ok(OpenRouterLeaseResponse {
-            status: "active".to_string(),
-            client_request_id: request.client_request_id.clone(),
-            api_key: created.key,
-            openrouter_api_base: provisioner.inference_base(),
-            issued_at,
-            expires_at,
-            valid_for_seconds: lease_config.ttl_seconds,
-            settle_after,
-            spending_limit_usd,
+        Ok(IssuedOpenRouterLease {
+            lease: OpenRouterLeaseResponse {
+                status: "active".to_string(),
+                client_request_id: request.client_request_id.clone(),
+                api_key,
+                openrouter_api_base,
+                issued_at,
+                expires_at,
+                valid_for_seconds: expires_at.saturating_sub(issued_at),
+                settle_after,
+                spending_limit_usd,
+            },
+            key_source: lease_config.source.label().to_string(),
+            verification,
         })
     }
 
     /// Settle every expired lease from OpenRouter's authoritative aggregate
     /// usage. Failures are retained and retried by the next background scan.
     pub async fn settle_due_openrouter_leases(&self) {
-        let Some(provisioner) = &self.openrouter else {
-            return;
-        };
         for lease in self.store.due_openrouter_leases(current_timestamp()) {
-            if let Err(error) = self.settle_openrouter_lease(&lease, provisioner).await {
+            let result = match lease.key_source.as_str() {
+                "openrouter" => match &self.openrouter {
+                    Some(provisioner) => self.settle_openrouter_lease(&lease, provisioner).await,
+                    None => Err(ServerError::Internal(
+                        "direct OpenRouter settlement credential is unavailable".to_string(),
+                    )),
+                },
+                "oa_org" => self.settle_oa_org_lease(&lease),
+                source => Err(ServerError::Internal(format!(
+                    "unsupported lease key source {source}"
+                ))),
+            };
+            if let Err(error) = result {
                 tracing::warn!(
                     client_request_id = %lease.client_request_id,
                     error = %error,
@@ -268,6 +388,64 @@ impl RequestProcessor {
                     .record_openrouter_lease_error(&lease.client_request_id, &error.to_string());
             }
         }
+    }
+
+    /// OA stations own the management account and delete expired keys. zkAPI
+    /// therefore cannot read account usage; it settles the proof-bound amount
+    /// reserved as the child key's hard spending limit.
+    fn settle_oa_org_lease(
+        &self,
+        lease: &crate::nullifier_store::OpenRouterLeaseRecord,
+    ) -> Result<(), ServerError> {
+        if let Some(record) = self
+            .store
+            .lookup_by_nullifier(&lease.request_nullifier)
+            .filter(|record| record.status == NullifierStatus::Finalized)
+        {
+            let reserved_limit_usd = record
+                .response_payload
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| payload["reserved_limit_usd"].as_f64())
+                .unwrap_or(lease.spending_limit_usd);
+            self.store.finalize_openrouter_lease(
+                &lease.client_request_id,
+                reserved_limit_usd,
+                record.charge_applied.unwrap_or_default(),
+            )?;
+            return Ok(());
+        }
+        let charge =
+            pricing::usd_to_credits(lease.spending_limit_usd).min(self.config.request_charge_cap);
+        let payload = serde_json::json!({
+            "type": "oa_org_ephemeral_lease_settlement",
+            "issued_at": lease.issued_at,
+            "expires_at": lease.expires_at,
+            "reserved_limit_usd": lease.spending_limit_usd,
+        })
+        .to_string();
+        let provider_response = ProviderResponse {
+            status_code: 200,
+            payload,
+            charge_applied: charge,
+            policy_reason_code: None,
+            policy_evidence_hash: None,
+            usage: Some(UsageInfo {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cost_usd: lease.spending_limit_usd,
+                cost_source: "oa_org_reserved_limit".to_string(),
+            }),
+            upstream_model: None,
+            billing_label: "direct:oa-org-ephemeral".to_string(),
+        };
+        self.finalize_request(&lease.api_request, provider_response, 0, 0)?;
+        self.store.finalize_openrouter_lease(
+            &lease.client_request_id,
+            lease.spending_limit_usd,
+            charge,
+        )
     }
 
     async fn settle_openrouter_lease(
@@ -591,7 +769,7 @@ impl RequestProcessor {
     }
 
     pub fn openrouter_leases_enabled(&self) -> bool {
-        self.openrouter.is_some()
+        self.config.openrouter_leases.is_some()
     }
 
     pub fn openrouter_lease_status(

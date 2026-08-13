@@ -12,7 +12,9 @@ use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor, RequestMode,
     WithdrawalMode,
 };
-use zkapi_serverd::config::{MeteredConfig, OpenRouterLeaseConfig, ProviderKind, ServerConfig};
+use zkapi_serverd::config::{
+    MeteredConfig, OpenRouterLeaseConfig, OpenRouterLeaseSourceConfig, ProviderKind, ServerConfig,
+};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::{EpochRoots, Felt252};
 
@@ -69,6 +71,23 @@ struct Cli {
     clearance_signing_key_x: String,
     #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_Y", default_value = "0x1")]
     clearance_signing_key_y: String,
+    /// Trusted OA verifier used for station-issued key validation.
+    #[arg(
+        long,
+        env = "ZKAPI_OA_VERIFIER_URL",
+        default_value = "https://verifier2.openanonymity.ai"
+    )]
+    oa_verifier_url: String,
+    /// Trusted OpenRouter inference origin for prompt-private leases.
+    #[arg(
+        long,
+        env = "ZKAPI_OPENROUTER_INFERENCE_BASE",
+        default_value = "https://openrouter.ai/api/v1"
+    )]
+    openrouter_inference_base: String,
+    /// Require verifier-backed OA-org keys and reject direct/legacy leases.
+    #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
+    require_oa_org_key_source: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -156,6 +175,9 @@ enum Commands {
         /// OpenRouter Management API key used only to mint bounded runtime leases.
         #[arg(long)]
         openrouter_management_key: Option<String>,
+        /// OA org base URL used to obtain station-issued, verifier-backed keys.
+        #[arg(long)]
+        oa_org_url: Option<String>,
         /// Validity of each prompt-private runtime key.
         #[arg(long, default_value_t = 300)]
         openrouter_lease_ttl_seconds: u64,
@@ -349,6 +371,9 @@ async fn main() -> anyhow::Result<()> {
                 no_fund,
                 skip_mint,
                 request_mode: mode.into(),
+                oa_verifier_url: cli.oa_verifier_url.clone(),
+                openrouter_inference_base: cli.openrouter_inference_base.clone(),
+                require_oa_org_key_source: cli.require_oa_org_key_source,
             })
             .await?
         }
@@ -363,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
             openrouter_inference_key,
             openrouter_api_base,
             openrouter_management_key,
+            oa_org_url,
             openrouter_lease_ttl_seconds,
             openrouter_settlement_grace_seconds,
             openrouter_settlement_poll_seconds,
@@ -394,13 +420,40 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let openrouter_leases = resolve_secret(
+            let openrouter_management_key = resolve_secret(
                 openrouter_management_key,
                 std::env::var("ZKAPI_OPENROUTER_MANAGEMENT_KEY").ok(),
-            )
-            .map(|management_key| OpenRouterLeaseConfig {
-                management_key,
-                api_base: openrouter_api_base_for_leases,
+            );
+            let oa_org_shared_secret =
+                resolve_secret(None, std::env::var("ZKAPI_OA_ORG_SHARED_SECRET").ok());
+            let lease_source = match (openrouter_management_key, oa_org_url, oa_org_shared_secret) {
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    anyhow::bail!(
+                        "configure either direct OpenRouter management or OA org key issuance, not both"
+                    )
+                }
+                (Some(management_key), None, None) => {
+                    Some(OpenRouterLeaseSourceConfig::OpenRouter {
+                        management_key,
+                        api_base: openrouter_api_base_for_leases,
+                    })
+                }
+                (None, Some(org_base_url), Some(shared_secret)) => {
+                    Some(OpenRouterLeaseSourceConfig::OaOrg {
+                        org_base_url,
+                        shared_secret,
+                    })
+                }
+                (None, Some(_), None) => {
+                    anyhow::bail!("--oa-org-url requires an OA org shared secret")
+                }
+                (None, None, Some(_)) => {
+                    anyhow::bail!("an OA org shared secret requires --oa-org-url")
+                }
+                (None, None, None) => None,
+            };
+            let openrouter_leases = lease_source.map(|source| OpenRouterLeaseConfig {
+                source,
                 ttl_seconds: openrouter_lease_ttl_seconds,
                 settlement_grace_seconds: openrouter_settlement_grace_seconds,
                 settlement_poll_seconds: openrouter_settlement_poll_seconds,
@@ -599,6 +652,9 @@ fn build_auth_service_with_mode(
             &cli.clearance_signing_key_y,
         )?,
         request_mode,
+        oa_verifier_url: cli.oa_verifier_url.clone(),
+        openrouter_inference_base: cli.openrouter_inference_base.clone(),
+        require_oa_org_key_source: cli.require_oa_org_key_source,
     })
     .map_err(Into::into)
 }
@@ -615,6 +671,9 @@ struct OneCommandClientOptions<'a> {
     no_fund: bool,
     skip_mint: bool,
     request_mode: RequestMode,
+    oa_verifier_url: String,
+    openrouter_inference_base: String,
+    require_oa_org_key_source: bool,
 }
 
 async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow::Result<()> {
@@ -627,6 +686,9 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
         no_fund,
         skip_mint,
         request_mode,
+        oa_verifier_url,
+        openrouter_inference_base,
+        require_oa_org_key_source,
     } = options;
     let manifest = load_deployment_manifest(deployment).await?;
     validate_deployment_manifest(&manifest)?;
@@ -634,7 +696,15 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
     let state_dir =
         requested_state_dir.unwrap_or_else(|| default_client_state_dir(&manifest.deployment_id));
     ensure_private_state_dir(&state_dir)?;
-    let service = auth_service_from_manifest(&manifest, state_dir.clone(), listen, request_mode)?;
+    let service = auth_service_from_manifest(
+        &manifest,
+        state_dir.clone(),
+        listen,
+        request_mode,
+        oa_verifier_url,
+        openrouter_inference_base,
+        require_oa_org_key_source,
+    )?;
     service.ensure_request_mode_available().await?;
 
     let status = service.status().await?;
@@ -749,6 +819,9 @@ fn auth_service_from_manifest(
     state_dir: PathBuf,
     listen: &str,
     request_mode: RequestMode,
+    oa_verifier_url: String,
+    openrouter_inference_base: String,
+    require_oa_org_key_source: bool,
 ) -> anyhow::Result<Arc<AuthService>> {
     let models = if manifest.models.is_empty() {
         vec![ModelDescriptor::new("openai/gpt-4o-mini")]
@@ -787,6 +860,9 @@ fn auth_service_from_manifest(
             &manifest.clearance_signing_key.y,
         )?,
         request_mode,
+        oa_verifier_url,
+        openrouter_inference_base,
+        require_oa_org_key_source,
     })
     .map_err(Into::into)
 }
@@ -1351,6 +1427,27 @@ mod tests {
             Commands::Serverd {
                 openrouter_management_key: Some(_),
                 openrouter_lease_ttl_seconds: 120,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_accepts_oa_org_url() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "serverd",
+            "--oa-org-url",
+            "https://org.example",
+            "--openrouter-lease-ttl-seconds",
+            "300",
+        ])
+        .expect("OA org lease config parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Serverd {
+                oa_org_url: Some(_),
+                openrouter_lease_ttl_seconds: 300,
                 ..
             }
         ));

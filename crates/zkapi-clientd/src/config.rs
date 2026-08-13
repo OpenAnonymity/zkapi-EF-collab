@@ -64,6 +64,15 @@ pub struct AuthConfig {
     pub state_signing_key: CurvePointWire,
     pub clearance_signing_key: CurvePointWire,
     pub request_mode: RequestMode,
+    /// Independently configured OA verifier trust anchor. Verifier URLs
+    /// supplied by a zkAPI server must match this value exactly.
+    pub oa_verifier_url: String,
+    /// Independently configured inference origin. Lease responses must match
+    /// this value exactly before a child key or prompt is transmitted.
+    pub openrouter_inference_base: String,
+    /// Reject direct/legacy OpenRouter leases and require verifier-backed OA
+    /// org evidence. This is an independent anti-downgrade policy.
+    pub require_oa_org_key_source: bool,
 }
 
 impl AuthConfig {
@@ -105,6 +114,9 @@ impl Default for AuthConfig {
                 y: Felt252::ONE,
             },
             request_mode: RequestMode::Proxy,
+            oa_verifier_url: "https://verifier2.openanonymity.ai".to_string(),
+            openrouter_inference_base: "https://openrouter.ai/api/v1".to_string(),
+            require_oa_org_key_source: false,
         }
     }
 }

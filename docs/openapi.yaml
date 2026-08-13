@@ -102,7 +102,7 @@ components:
         proof: {$ref: "#/components/schemas/Groth16Proof"}
     OpenRouterLease:
       type: object
-      required: [status, client_request_id, api_key, openrouter_api_base, issued_at, expires_at, valid_for_seconds, settle_after, spending_limit_usd]
+      required: [status, client_request_id, api_key, openrouter_api_base, issued_at, expires_at, valid_for_seconds, settle_after, spending_limit_usd, key_source]
       properties:
         status: {const: active}
         client_request_id: {type: string}
@@ -113,3 +113,15 @@ components:
         valid_for_seconds: {type: integer}
         settle_after: {type: integer}
         spending_limit_usd: {type: number}
+        key_source: {type: string, enum: [openrouter, oa_org]}
+        verification:
+          type: object
+          description: Required when key_source is oa_org; submitted to the trusted OA verifier before inference.
+          required: [verifier_url, station_id, station_recently_attested, key_valid_till, station_signature, org_signature]
+          properties:
+            verifier_url: {type: string, format: uri}
+            station_id: {type: string}
+            station_recently_attested: {type: boolean}
+            key_valid_till: {type: integer}
+            station_signature: {type: string}
+            org_signature: {type: string}

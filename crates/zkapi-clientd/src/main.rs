@@ -67,6 +67,21 @@ struct Args {
     clearance_signing_key_x: String,
     #[arg(long, env = "ZKAPI_CLEARANCE_SIGNING_KEY_Y", default_value = "0x1")]
     clearance_signing_key_y: String,
+    #[arg(
+        long,
+        env = "ZKAPI_OA_VERIFIER_URL",
+        default_value = "https://verifier2.openanonymity.ai"
+    )]
+    oa_verifier_url: String,
+    #[arg(
+        long,
+        env = "ZKAPI_OPENROUTER_INFERENCE_BASE",
+        default_value = "https://openrouter.ai/api/v1"
+    )]
+    openrouter_inference_base: String,
+    /// Require verifier-backed OA-org keys and reject direct/legacy leases.
+    #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
+    require_oa_org_key_source: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -137,6 +152,9 @@ async fn main() -> anyhow::Result<()> {
             ModeArg::Proxy => RequestMode::Proxy,
             ModeArg::DirectOpenrouter => RequestMode::DirectOpenrouter,
         },
+        oa_verifier_url: args.oa_verifier_url,
+        openrouter_inference_base: args.openrouter_inference_base,
+        require_oa_org_key_source: args.require_oa_org_key_source,
     })?;
 
     service.ensure_request_mode_available().await?;
