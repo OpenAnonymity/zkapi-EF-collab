@@ -8,17 +8,13 @@ and never receives prompts or responses. Keys can be minted directly with an
 OpenRouter management credential or relayed through an OA org/station so the
 client can verify the provider account's privacy settings before inference.
 
-Version 2 uses:
+The current protocol uses:
 
 - Groth16 over BN254 for request and withdrawal proofs;
 - Poseidon over the BN254 scalar field;
 - Baby-JubJub Pedersen commitments and Poseidon-challenged Schnorr signatures;
 - a 32-level active-note Merkle tree and state-derived nullifiers;
 - OpenAI-compatible chat and responses endpoints on the local client daemon.
-
-Stwo-Cairo and the development witness envelope are not part of the v2 runtime.
-See [the design note](docs/design-note.md) for why a ZK proof is still needed
-even though a STARK is not.
 
 ## Build and test
 
@@ -31,7 +27,7 @@ cargo test --workspace
 (cd protocol/contracts && forge test)
 ```
 
-The selected proving keys are versioned in `protocol/setup/v2`. Do not run the
+The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,
 incompatible setup. For an intentionally fresh deployment:
 
@@ -107,10 +103,6 @@ The local gateway also exposes equivalent OpenAI Responses and Ollama routes.
 - `zkapi-clientd`: local wallet, proof generation, recovery, and OpenAI/Ollama compatibility.
 - `zkapi-serverd`: proof verification, nullifier/lease DB, proxy execution or aggregate lease billing, and next-state signing.
 - `zkapi-indexerd`: Ethereum event indexer and Merkle-path service.
-- `protocol/rust`: shared v2 primitives, circuits, proof code, and wallet SDK.
+- `protocol/rust`: shared protocol primitives, circuits, proof code, and wallet SDK.
 - `protocol/contracts`: the real Groth16 adapter and Ethereum settlement vault.
 - `demo/contracts`: deploys the demo token, real adapter, and vault.
-
-This code and its current one-party Groth16 setup are unaudited. The default
-Mainnet deployment uses real assets but is only an experiment; use only funds
-you can afford to lose.

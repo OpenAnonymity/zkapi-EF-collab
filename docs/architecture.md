@@ -48,5 +48,4 @@ The user-facing compatibility routes remain `/v1/chat/completions`,
 ecosystems. The private client-to-server protocol is versioned independently
 and uses `/v2/*` routes.
 
-See [design-note.md](design-note.md) for the statement and cryptographic
-reasoning, and [deployment.md](deployment.md) for operations.
+See [deployment.md](deployment.md) for operations.
