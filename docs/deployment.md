@@ -30,15 +30,17 @@ export STATE_SIGNING_KEY_Y='0x...'
 export CLEARANCE_SIGNING_KEY_X='0x...'
 export CLEARANCE_SIGNING_KEY_Y='0x...'
 export MINT_AMOUNT='1000000000'
-export OUTPUT_PATH="$PWD/../../.demo/public-testnet-v2.json"
+export RPC_URL='https://...'
+export CHAIN_ID='1'
+export OUTPUT_PATH="$PWD/../../.demo/deployment-v2.json"
 
 export POSEIDON_ADDRESS=$(forge create \
   ../../protocol/contracts/src/libraries/Bn254Poseidon.sol:Bn254Poseidon \
-  --rpc-url "$PUBLIC_TESTNET_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast \
+  --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broadcast \
   --json | jq -r .deployedTo)
 
 forge script script/Deploy.s.sol:DeployScript \
-  --rpc-url "$PUBLIC_TESTNET_RPC_URL" --broadcast --private-key "$PRIVATE_KEY" \
+  --rpc-url "$RPC_URL" --broadcast --private-key "$PRIVATE_KEY" \
   --libraries "zkapi-contracts/libraries/Bn254Poseidon.sol:Bn254Poseidon:$POSEIDON_ADDRESS"
 ```
 
@@ -70,7 +72,7 @@ Start the indexer from the vault deployment block:
 ```bash
 ./target/release/zkapi indexer \
   --listen 0.0.0.0:3001 \
-  --rpc-url "$PUBLIC_TESTNET_RPC_URL" \
+  --rpc-url "$RPC_URL" \
   --contract-address "$VAULT" \
   --from-block "$DEPLOY_BLOCK" \
   --cursor-path /data/indexer.cursor
@@ -88,7 +90,7 @@ export ZKAPI_CLEAR_SEED='0x...'
 
 ./target/release/zkapi \
   --protocol-version 2 \
-  --chain-id 11155111 \
+  --chain-id "$CHAIN_ID" \
   --contract-address "$VAULT" \
   --request-charge-cap 1000000 \
   --proof-setup-dir "$PWD/protocol/setup/v2" \
@@ -121,7 +123,7 @@ export ZKAPI_OA_ORG_SHARED_SECRET='...'
 
 ./target/release/zkapi \
   --protocol-version 2 \
-  --chain-id 11155111 \
+  --chain-id "$CHAIN_ID" \
   --contract-address "$VAULT" \
   --request-charge-cap 1000000 \
   --proof-setup-dir "$PWD/protocol/setup/v2" \

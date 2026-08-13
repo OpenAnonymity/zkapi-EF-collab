@@ -16,7 +16,7 @@ Before any production-money deployment:
   safe fresh-vault migration procedure;
 - add formal cross-implementation vectors for every Poseidon domain and state
   transition;
-- add continuous public testnet lifecycle tests for deposit, several sequential
+- add continuous end-to-end lifecycle tests for deposit, several sequential
   requests, recovery, mutual close, escape challenge, and expiry.
 
 Operational improvements include structured latency/resource telemetry,

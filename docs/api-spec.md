@@ -40,7 +40,7 @@ The local wallet talks to `zkapi-serverd` through:
   "payload_hash": "0x...",
   "public_inputs": {
     "protocol_version": 2,
-    "chain_id": 11155111,
+    "chain_id": 1,
     "contract_address": "0x...",
     "active_root": "0x...",
     "state_signing_key_x": "0x...",

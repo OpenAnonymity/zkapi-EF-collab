@@ -59,16 +59,9 @@ enough ETH for gas. It then serves standard APIs on `127.0.0.1:11434`:
 
 Choose an address with `--address` (the first key prompt verifies it), use a
 different deployment manifest with `--deployment`, or start without funding via
-`--no-fund`. To use the free public testnet deployment instead, pass its manifest
-explicitly:
-
-```bash
-./target/release/zkapi client \
-  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json
-```
-
-Both vaults accept their configured ERC-20 billing token. The Mainnet vault
-uses real USDC; native ETH is used for transaction gas, not request credits.
+`--no-fund`. The configured vault accepts its configured ERC-20 billing token.
+The default Mainnet vault uses real USDC; native ETH is used for transaction
+gas, not request credits.
 
 The default `--mode proxy` sends each request through `zkapi-serverd`. On a
 deployment that advertises `direct_openrouter`, opt into the prompt-private
@@ -107,8 +100,7 @@ curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"explain HTTPS briefly"}]}' | jq .
 ```
 
-See [the public public testnet guide](docs/public-testnet-demo.md) for testnet use and
-equivalent OpenAI Responses and Ollama examples.
+The local gateway also exposes equivalent OpenAI Responses and Ollama routes.
 
 ## Components
 
