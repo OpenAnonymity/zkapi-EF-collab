@@ -42,6 +42,10 @@ use crate::config::{AuthConfig, ModelDescriptor, RequestMode};
 use crate::error::AuthError;
 use crate::indexer::IndexerClient;
 
+const DIRECT_REMOTE_MAX_ATTEMPTS: usize = 3;
+const DIRECT_REMOTE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const DIRECT_REMOTE_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoreRequest {
     #[serde(default = "default_method")]
@@ -656,27 +660,10 @@ impl AuthService {
             lease.openrouter_api_base.trim_end_matches('/'),
             upstream_path
         );
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&lease.api_key)
-            .header("content-type", "application/json")
-            .json(&upstream_body)
-            .send()
-            .await
-            .map_err(|error| AuthError::Upstream(error.to_string()))?;
-        let status = response.status();
+        let (status, raw_payload) = self
+            .send_openrouter_inference(&url, &lease.api_key, &upstream_body, lease.expires_at)
+            .await?;
         let response_code = status.as_u16();
-        let raw_payload = response
-            .text()
-            .await
-            .map_err(|error| AuthError::Upstream(error.to_string()))?;
-        if !status.is_success() {
-            return Err(AuthError::Upstream(format!(
-                "OpenRouter returned {status}: {}",
-                truncate_for_error(&raw_payload, 500)
-            )));
-        }
         let wallet = self.status().await?;
         let (remaining_balance, next_anchor) = wallet
             .note
@@ -693,6 +680,72 @@ impl AuthService {
             next_anchor,
             remaining_balance,
         })
+    }
+
+    async fn send_openrouter_inference(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &Value,
+        expires_at: u64,
+    ) -> Result<(reqwest::StatusCode, String), AuthError> {
+        for attempt in 1..=DIRECT_REMOTE_MAX_ATTEMPTS {
+            let response = match self
+                .http
+                .post(url)
+                .bearer_auth(api_key)
+                .header("content-type", "application/json")
+                .json(body)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < DIRECT_REMOTE_MAX_ATTEMPTS {
+                        let delay = direct_remote_retry_delay(attempt, None);
+                        if retry_fits_lease(expires_at, delay) {
+                            tracing::warn!(
+                                attempt,
+                                error = %error,
+                                "retrying transient OpenRouter transport failure"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    return Err(AuthError::Upstream(error.to_string()));
+                }
+            };
+            let status = response.status();
+            let retry_after = retry_after_delay(response.headers());
+            let raw_payload = response
+                .text()
+                .await
+                .map_err(|error| AuthError::Upstream(error.to_string()))?;
+            if status.is_success() {
+                return Ok((status, raw_payload));
+            }
+            if is_transient_remote_status(status) && attempt < DIRECT_REMOTE_MAX_ATTEMPTS {
+                let delay = direct_remote_retry_delay(attempt, retry_after);
+                if retry_fits_lease(expires_at, delay) {
+                    tracing::warn!(
+                        attempt,
+                        %status,
+                        delay_ms = delay.as_millis(),
+                        "retrying transient OpenRouter inference failure"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+            return Err(AuthError::Upstream(format!(
+                "OpenRouter returned {status}: {}",
+                truncate_for_error(&raw_payload, 500)
+            )));
+        }
+        Err(AuthError::Upstream(
+            "OpenRouter request exhausted its retry budget".to_string(),
+        ))
     }
 
     async fn issue_direct_openrouter_lease(&self) -> Result<ActiveOpenRouterLease, AuthError> {
@@ -823,37 +876,106 @@ impl AuthService {
                 "OA key evidence is incomplete or inconsistent".to_string(),
             ));
         }
-        let response = self
-            .http
-            .post(format!("{expected_verifier}/submit_key"))
-            .json(&serde_json::json!({
-                "station_id": evidence.station_id,
-                "api_key": api_key,
-                "key_valid_till": evidence.key_valid_till,
-                "station_signature": evidence.station_signature,
-                "org_signature": evidence.org_signature,
-            }))
-            .send()
-            .await
-            .map_err(|error| {
-                AuthError::KeyVerification(format!("verifier request failed: {error}"))
+        let url = format!("{expected_verifier}/submit_key");
+        let request = serde_json::json!({
+            "station_id": evidence.station_id,
+            "api_key": api_key,
+            "key_valid_till": evidence.key_valid_till,
+            "station_signature": evidence.station_signature,
+            "org_signature": evidence.org_signature,
+        });
+        for attempt in 1..=DIRECT_REMOTE_MAX_ATTEMPTS {
+            let response = match self.http.post(&url).json(&request).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < DIRECT_REMOTE_MAX_ATTEMPTS {
+                        let delay = direct_remote_retry_delay(attempt, None);
+                        if retry_fits_lease(expires_at, delay) {
+                            tracing::warn!(
+                                attempt,
+                                error = %error,
+                                "retrying transient OA verifier transport failure"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    return Err(AuthError::KeyVerification(format!(
+                        "verifier request failed: {error}"
+                    )));
+                }
+            };
+            let status = response.status();
+            let retry_after = retry_after_delay(response.headers());
+            let body = response.text().await.map_err(|error| {
+                AuthError::KeyVerification(format!("invalid verifier response: {error}"))
             })?;
-        let status = response.status();
-        let result: Value = response.json().await.map_err(|error| {
-            AuthError::KeyVerification(format!("invalid verifier response: {error}"))
-        })?;
-        if !status.is_success() || result.get("status").and_then(Value::as_str) != Some("verified")
-        {
+            let result: Value = match serde_json::from_str(&body) {
+                Ok(result) => result,
+                Err(error)
+                    if is_transient_remote_status(status)
+                        && attempt < DIRECT_REMOTE_MAX_ATTEMPTS =>
+                {
+                    let delay = direct_remote_retry_delay(attempt, retry_after);
+                    if retry_fits_lease(expires_at, delay) {
+                        tracing::warn!(
+                            attempt,
+                            %status,
+                            error = %error,
+                            "retrying invalid transient OA verifier response"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(AuthError::KeyVerification(format!(
+                        "invalid verifier response: {error}"
+                    )));
+                }
+                Err(error) => {
+                    return Err(AuthError::KeyVerification(format!(
+                        "invalid verifier response: {error}"
+                    )))
+                }
+            };
+            if status.is_success()
+                && result.get("status").and_then(Value::as_str) == Some("verified")
+            {
+                tracing::info!(
+                    station_id = %evidence.station_id,
+                    recently_attested = evidence.station_recently_attested,
+                    "OA verifier accepted station-issued OpenRouter key"
+                );
+                return Ok(());
+            }
+            let retryable = result
+                .get("retryable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || is_transient_remote_status(status);
+            if retryable && attempt < DIRECT_REMOTE_MAX_ATTEMPTS {
+                let delay = direct_remote_retry_delay(attempt, retry_after);
+                if retry_fits_lease(expires_at, delay) {
+                    tracing::warn!(
+                        attempt,
+                        %status,
+                        delay_ms = delay.as_millis(),
+                        "retrying transient OA key verification failure"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+            let detail = result
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("station key was not verified");
             return Err(AuthError::KeyVerification(format!(
-                "trusted verifier rejected the station key (HTTP {status})"
+                "trusted verifier rejected the station key (HTTP {status}: {detail})"
             )));
         }
-        tracing::info!(
-            station_id = %evidence.station_id,
-            recently_attested = evidence.station_recently_attested,
-            "OA verifier accepted station-issued OpenRouter key"
-        );
-        Ok(())
+        Err(AuthError::KeyVerification(
+            "OA verifier request exhausted its retry budget".to_string(),
+        ))
     }
 
     async fn prepare_direct_lease_request(&self) -> Result<ApiRequestV2, AuthError> {
@@ -1262,6 +1384,37 @@ fn truncate_for_error(value: &str, max: usize) -> String {
     format!("{}…", &value[..end])
 }
 
+fn is_transient_remote_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        408 | 425 | 429 | 500 | 502 | 503 | 504 | 524 | 529
+    )
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn direct_remote_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
+    let shift = attempt.saturating_sub(1).min(8) as u32;
+    let backoff = DIRECT_REMOTE_RETRY_BASE_DELAY.saturating_mul(1u32 << shift);
+    retry_after.unwrap_or_else(|| backoff.min(DIRECT_REMOTE_RETRY_MAX_DELAY))
+}
+
+fn retry_fits_lease(expires_at: u64, delay: Duration) -> bool {
+    let delay_seconds = delay
+        .as_secs()
+        .saturating_add(u64::from(delay.subsec_nanos() > 0));
+    now_seconds()
+        .saturating_add(delay_seconds)
+        .saturating_add(1)
+        < expires_at
+}
+
 async fn build_request_preview(
     config: &AuthConfig,
     indexer: &IndexerClient,
@@ -1404,7 +1557,14 @@ fn default_body() -> Value {
 
 #[cfg(test)]
 mod security_tests {
-    use super::{enforce_required_key_source, matches_trusted_url};
+    use std::time::Duration;
+
+    use reqwest::StatusCode;
+
+    use super::{
+        direct_remote_retry_delay, enforce_required_key_source, is_transient_remote_status,
+        matches_trusted_url,
+    };
 
     #[test]
     fn endpoint_pinning_rejects_inference_origin_substitution() {
@@ -1428,6 +1588,19 @@ mod security_tests {
         assert!(enforce_required_key_source(true, "").is_err());
         assert!(enforce_required_key_source(true, "oa_org").is_ok());
         assert!(enforce_required_key_source(false, "openrouter").is_ok());
+    }
+
+    #[test]
+    fn direct_remote_retries_only_transient_statuses_and_honors_retry_after() {
+        assert!(is_transient_remote_status(StatusCode::BAD_GATEWAY));
+        assert!(is_transient_remote_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_transient_remote_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_transient_remote_status(StatusCode::BAD_REQUEST));
+        assert!(!is_transient_remote_status(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            direct_remote_retry_delay(1, Some(Duration::from_secs(60))),
+            Duration::from_secs(60)
+        );
     }
 }
 

@@ -33,6 +33,8 @@ struct OpenRouterState {
     prompts: Arc<Mutex<Vec<String>>>,
     create_bodies: Arc<Mutex<Vec<Value>>>,
     deletes: Arc<Mutex<usize>>,
+    inference_attempts: Arc<Mutex<usize>>,
+    inference_failures_remaining: Arc<Mutex<usize>>,
 }
 
 #[derive(Clone, Default)]
@@ -42,6 +44,7 @@ struct OaFlowState {
     verifier_requests: Arc<Mutex<Vec<Value>>>,
     prompts: Arc<Mutex<Vec<String>>>,
     verifier_rejections_remaining: Arc<Mutex<usize>>,
+    verifier_attempts: Arc<Mutex<usize>>,
 }
 
 async fn spawn(router: Router) -> String {
@@ -110,14 +113,33 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         State(state): State<OpenRouterState>,
         headers: HeaderMap,
         Json(body): Json<Value>,
-    ) -> Result<Json<Value>, StatusCode> {
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         if headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             != Some("Bearer sk-or-v1-runtime-test")
         {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": { "message": "invalid key" } })),
+            ));
         }
+        *state.inference_attempts.lock().unwrap() += 1;
+        let mut failures = state.inference_failures_remaining.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": {
+                        "code": 502,
+                        "message": "provider temporarily unavailable",
+                        "metadata": { "error_type": "provider_unavailable" }
+                    }
+                })),
+            ));
+        }
+        drop(failures);
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
@@ -180,18 +202,29 @@ fn oa_verifier_router(state: OaFlowState) -> Router {
     async fn submit_key(
         State(state): State<OaFlowState>,
         Json(body): Json<Value>,
-    ) -> Result<Json<Value>, StatusCode> {
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         if body["station_id"] != "station-test"
             || body["api_key"] != "sk-or-v1-oa-test"
             || body["station_signature"].as_str().map(str::len) != Some(128)
             || body["org_signature"].as_str().map(str::len) != Some(128)
         {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "invalid evidence" })),
+            ));
         }
+        *state.verifier_attempts.lock().unwrap() += 1;
         let mut failures = state.verifier_rejections_remaining.lock().unwrap();
         if *failures > 0 {
             *failures -= 1;
-            return Ok(Json(json!({ "status": "pending" })));
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "unverified",
+                    "detail": "ownership_check_error",
+                    "retryable": true
+                })),
+            ));
         }
         drop(failures);
         state.events.lock().unwrap().push("verified".to_string());
@@ -443,6 +476,15 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         ))
         .await
         .unwrap();
+    if !live_openrouter {
+        // Reproduce OpenRouter's intermittent provider_unavailable response on
+        // a reused lease. The client should absorb the 502 and retry the exact
+        // inference request without opening another lease.
+        *openrouter_state
+            .inference_failures_remaining
+            .lock()
+            .unwrap() = 1;
+    }
     let second = service
         .execute_request(CoreRequest::post_json(
             "/v1/responses",
@@ -480,6 +522,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             openrouter_state.prompts.lock().unwrap().as_slice(),
             ["private prompt one", "private prompt two"]
         );
+        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 3);
         assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
         assert_eq!(create_body["limit"], 0.001);
@@ -706,22 +749,6 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
     })
     .unwrap();
 
-    let request = CoreRequest::post_json(
-        "/v1/chat/completions",
-        json!({
-            "model": "openai/gpt-4o-mini",
-            "max_tokens": 16,
-            "messages": [{"role": "user", "content": "verifier protected prompt"}]
-        }),
-    );
-    if !live_org {
-        let first_attempt = service.execute_request(request.clone()).await;
-        assert!(first_attempt.is_err());
-        assert_eq!(flow.events.lock().unwrap().as_slice(), ["issued"]);
-        assert!(flow.prompts.lock().unwrap().is_empty());
-        assert_eq!(flow.org_requests.lock().unwrap().len(), 1);
-    }
-
     let response = service
         .execute_request(CoreRequest::post_json(
             "/v1/chat/completions",
@@ -747,6 +774,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
             ["issued", "verified", "inference"]
         );
         assert_eq!(flow.verifier_requests.lock().unwrap().len(), 1);
+        assert_eq!(*flow.verifier_attempts.lock().unwrap(), 2);
         assert_eq!(
             flow.prompts.lock().unwrap().as_slice(),
             ["verifier protected prompt"]
