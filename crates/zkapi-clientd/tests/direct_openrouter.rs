@@ -710,6 +710,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         "/v1/chat/completions",
         json!({
             "model": "openai/gpt-4o-mini",
+            "max_tokens": 16,
             "messages": [{"role": "user", "content": "verifier protected prompt"}]
         }),
     );
@@ -726,6 +727,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
             "/v1/chat/completions",
             json!({
                 "model": "openai/gpt-4o-mini",
+                "max_tokens": 16,
                 "messages": [{"role": "user", "content": "verifier protected prompt"}]
             }),
         ))
