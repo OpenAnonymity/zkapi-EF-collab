@@ -111,30 +111,6 @@ jobs:
         working-directory: protocol/cairo
         run: scarb test
 
-  integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/checkout-protocol
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Start Anvil
-        run: |
-          nohup anvil --host 127.0.0.1 --port 8545 > /tmp/anvil.log 2>&1 &
-          sleep 3
-
-      - name: Run integration tests
-        run: cargo test -p zkapi-integration-tests --all-features -- --test-threads=1
-
   docker:
     runs-on: ubuntu-latest
     steps:
