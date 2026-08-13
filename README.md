@@ -37,6 +37,9 @@ incompatible setup. For an intentionally fresh deployment:
 
 ## Local client
 
+For prompt-private Mainnet and Sepolia setup, see the
+[local client quickstart](docs/local-client-quickstart.md).
+
 After building, start a ready-to-use local gateway with one command:
 
 ```bash
