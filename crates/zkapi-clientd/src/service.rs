@@ -267,6 +267,7 @@ struct ActiveOpenRouterLease {
     openrouter_api_base: String,
     expires_at: u64,
     settle_after: u64,
+    successful_inferences: u64,
     verification: Option<OaKeyVerificationEvidence>,
     verified: bool,
 }
@@ -650,9 +651,16 @@ impl AuthService {
                 .await
             {
                 Ok((status, raw_payload)) => {
+                    lease.successful_inferences = lease.successful_inferences.saturating_add(1);
                     break (status, raw_payload, lease.client_request_id.clone());
                 }
-                Err(error) if !rotated && is_unusable_openrouter_key(&error) => {
+                Err(error)
+                    if !rotated
+                        && is_rotatable_openrouter_key_failure(
+                            &error,
+                            lease.successful_inferences,
+                        ) =>
+                {
                     let rejected_lease_id = lease.client_request_id.clone();
                     tracing::warn!(
                         client_request_id = %rejected_lease_id,
@@ -854,6 +862,7 @@ impl AuthService {
                     openrouter_api_base: lease.openrouter_api_base,
                     expires_at: lease.expires_at,
                     settle_after: lease.settle_after,
+                    successful_inferences: 0,
                     verification,
                     verified,
                 });
@@ -1475,13 +1484,24 @@ fn is_transient_remote_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-fn is_unusable_openrouter_key(error: &AuthError) -> bool {
-    matches!(
-        error,
+fn is_rotatable_openrouter_key_failure(error: &AuthError, successful_inferences: u64) -> bool {
+    match error {
         AuthError::UpstreamResponse { status, .. }
-            if *status == reqwest::StatusCode::UNAUTHORIZED
-                || *status == reqwest::StatusCode::PAYMENT_REQUIRED
-    )
+            if *status == reqwest::StatusCode::UNAUTHORIZED =>
+        {
+            true
+        }
+        AuthError::UpstreamResponse { status, message }
+            if *status == reqwest::StatusCode::PAYMENT_REQUIRED =>
+        {
+            // A fresh replacement has the same total limit, so it cannot fix
+            // a request whose declared maximum was unaffordable from the
+            // outset. Rotation is useful only after this lease has spent some
+            // of its limit and OpenRouter identifies that limit as the cause.
+            successful_inferences > 0 && message.contains("openrouter_key_limit")
+        }
+        _ => false,
+    }
 }
 
 fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -1655,9 +1675,10 @@ mod security_tests {
     use reqwest::StatusCode;
 
     use super::{
-        direct_remote_retry_delay, enforce_required_key_source, is_transient_remote_status,
-        matches_trusted_url,
+        direct_remote_retry_delay, enforce_required_key_source,
+        is_rotatable_openrouter_key_failure, is_transient_remote_status, matches_trusted_url,
     };
+    use crate::error::AuthError;
 
     #[test]
     fn endpoint_pinning_rejects_inference_origin_substitution() {
@@ -1694,6 +1715,29 @@ mod security_tests {
             direct_remote_retry_delay(1, Some(Duration::from_secs(60))),
             Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn key_rotation_does_not_retry_an_unaffordable_fresh_lease() {
+        let unauthorized = AuthError::UpstreamResponse {
+            status: StatusCode::UNAUTHORIZED,
+            message: "invalid key".to_string(),
+        };
+        assert!(is_rotatable_openrouter_key_failure(&unauthorized, 0));
+
+        let key_limit = AuthError::UpstreamResponse {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: r#"{"error":{"metadata":{"limit_source":"openrouter_key_limit"}}}"#
+                .to_string(),
+        };
+        assert!(!is_rotatable_openrouter_key_failure(&key_limit, 0));
+        assert!(is_rotatable_openrouter_key_failure(&key_limit, 1));
+
+        let account_limit = AuthError::UpstreamResponse {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: r#"{"error":{"metadata":{"limit_source":"account"}}}"#.to_string(),
+        };
+        assert!(!is_rotatable_openrouter_key_failure(&account_limit, 1));
     }
 }
 
