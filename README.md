@@ -100,6 +100,9 @@ curl -fsS http://127.0.0.1:11434/v1/chat/completions \
 ```
 
 The local gateway also exposes equivalent OpenAI Responses and Ollama routes.
+OpenAI chat streams use SSE. Ollama `/api/chat` streams use newline-delimited
+JSON and stream by default, so either OpenWebUI connection type receives tokens
+as OpenRouter produces them.
 
 ## Components
 

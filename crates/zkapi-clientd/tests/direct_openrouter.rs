@@ -597,6 +597,58 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&second_chunk).contains("stream prompt"));
+
+        // OpenWebUI often connects to port 11434 as an Ollama backend rather
+        // than as an OpenAI-compatible backend. Ollama streaming is NDJSON,
+        // not SSE, and must also reach the caller one chunk at a time.
+        let response = reqwest::Client::new()
+            .post(format!("{local_client_url}/api/chat"))
+            .json(&json!({
+                "model": "openai/gpt-4o-mini",
+                "stream": true,
+                "messages": [{"role": "user", "content": "ollama stream prompt"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/x-ndjson"
+        );
+        let mut chunks = response.bytes_stream();
+        let first_chunk = tokio::time::timeout(Duration::from_millis(200), chunks.next())
+            .await
+            .expect("the first Ollama chunk should not be buffered")
+            .unwrap()
+            .unwrap();
+        let first: Value = serde_json::from_slice(&first_chunk).unwrap();
+        assert_eq!(first["message"]["content"], "answer: ");
+        assert_eq!(first["done"], false);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), chunks.next())
+                .await
+                .is_err()
+        );
+        let second_chunk = tokio::time::timeout(Duration::from_secs(1), chunks.next())
+            .await
+            .expect("the delayed Ollama chunk should remain readable")
+            .unwrap()
+            .unwrap();
+        let second: Value = serde_json::from_slice(&second_chunk).unwrap();
+        assert_eq!(second["message"]["content"], "ollama stream prompt");
+        assert_eq!(second["done"], false);
+        let final_chunk = tokio::time::timeout(Duration::from_secs(1), chunks.next())
+            .await
+            .expect("the final Ollama chunk should be emitted")
+            .unwrap()
+            .unwrap();
+        let final_chunk: Value = serde_json::from_slice(&final_chunk).unwrap();
+        assert_eq!(final_chunk["message"]["content"], "");
+        assert_eq!(final_chunk["done"], true);
     }
 
     // Exercise the README usage pattern repeatedly. Before client-side output
@@ -647,6 +699,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
                 "private prompt one",
                 "private prompt two",
                 "stream prompt",
+                "ollama stream prompt",
                 "private prompt 3",
                 "private prompt 4",
                 "private prompt 5",
@@ -655,7 +708,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
                 "private prompt 8",
             ]
         );
-        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 10);
+        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 11);
         assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
         assert_eq!(create_body["limit"], 0.001);
@@ -691,7 +744,7 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
 
     let recovered = service.recover().await.unwrap();
     assert!(recovered.recovered);
-    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000054);
+    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000060);
     let recovered_balance = recovered.wallet.note.unwrap().current_balance;
     if live_openrouter {
         assert!(recovered_balance < deposit);

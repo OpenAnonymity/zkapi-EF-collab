@@ -104,6 +104,11 @@ pub fn stream_requested(body: &Value) -> bool {
     body.get("stream").and_then(Value::as_bool) == Some(true)
 }
 
+/// Ollama streams by default unless the caller explicitly opts out.
+pub fn ollama_stream_requested(body: &Value) -> bool {
+    body.get("stream").and_then(Value::as_bool) != Some(false)
+}
+
 fn ensure_direct_completion_limit(object: &mut serde_json::Map<String, Value>) {
     if object.contains_key("max_tokens") || object.contains_key("max_completion_tokens") {
         return;
@@ -425,5 +430,12 @@ mod tests {
         );
         assert_eq!(chat["stream"], true);
         assert!(stream_requested(&chat));
+    }
+
+    #[test]
+    fn ollama_streaming_defaults_on_and_can_be_disabled() {
+        assert!(ollama_stream_requested(&json!({})));
+        assert!(ollama_stream_requested(&json!({ "stream": true })));
+        assert!(!ollama_stream_requested(&json!({ "stream": false })));
     }
 }

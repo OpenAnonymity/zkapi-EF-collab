@@ -13,14 +13,18 @@
 //! Errors are rendered in either a generic or OpenAI-style envelope, with a
 //! funding-page hint attached on `402 Payment Required`.
 
+use std::collections::VecDeque;
+use std::io;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream::{self, BoxStream};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -189,6 +193,21 @@ async fn responses_api(
 
 async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<Value>) -> Response {
     let model = compat::extract_model(&body, service.default_model());
+    if compat::ollama_stream_requested(&body) {
+        let mut body = body;
+        if let Some(object) = body.as_object_mut() {
+            // Ollama defaults to streaming. Make that default explicit before
+            // normalizing the request into OpenRouter's chat format.
+            object.insert("stream".to_string(), Value::Bool(true));
+        }
+        return match service
+            .execute_streaming_request(compat::core_request("/api/chat", body))
+            .await
+        {
+            Ok(upstream) => streaming_ollama_response(upstream, model),
+            Err(err) => generic_error(err),
+        };
+    }
     match service
         .execute_request(compat::core_request("/api/chat", body))
         .await
@@ -196,6 +215,208 @@ async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<V
         Ok(response) => Json(compat::ollama_chat(&model, &response)).into_response(),
         Err(err) => generic_error(err),
     }
+}
+
+struct OllamaStreamState {
+    upstream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    model: String,
+    input: Vec<u8>,
+    output: VecDeque<Result<Bytes, io::Error>>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    finish_reason: String,
+    finished: bool,
+}
+
+impl OllamaStreamState {
+    fn consume_complete_lines(&mut self) {
+        while !self.finished {
+            let Some(newline) = self.input.iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
+            let mut line = self.input.drain(..=newline).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            self.consume_sse_line(&line);
+        }
+    }
+
+    fn consume_sse_line(&mut self, line: &[u8]) {
+        let Some(payload) = line.strip_prefix(b"data:") else {
+            // OpenRouter emits `: OPENROUTER PROCESSING` SSE comments while a
+            // provider is starting. They are valid SSE but not Ollama JSON.
+            return;
+        };
+        let payload = payload.strip_prefix(b" ").unwrap_or(payload);
+        if payload.is_empty() {
+            return;
+        }
+        if payload == b"[DONE]" {
+            self.enqueue_done();
+            return;
+        }
+        let chunk: Value = match serde_json::from_slice(payload) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                self.output.push_back(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid OpenRouter SSE event: {error}"),
+                )));
+                self.finished = true;
+                return;
+            }
+        };
+
+        if let Some(usage) = chunk.get("usage") {
+            self.prompt_tokens = usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(self.prompt_tokens);
+            self.completion_tokens = usage
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(self.completion_tokens);
+        }
+        if let Some(error) = chunk.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("OpenRouter streaming error");
+            self.enqueue_json(json!({ "error": message }));
+            self.finished = true;
+            return;
+        }
+
+        let choice = chunk.get("choices").and_then(|choices| choices.get(0));
+        if let Some(reason) = choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+        {
+            self.finish_reason = reason.to_string();
+        }
+        let delta = choice.and_then(|choice| choice.get("delta"));
+        let content = delta
+            .and_then(|delta| delta.get("content"))
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty());
+        let thinking = delta
+            .and_then(|delta| {
+                delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+            })
+            .and_then(Value::as_str)
+            .filter(|thinking| !thinking.is_empty());
+        let tool_calls = delta
+            .and_then(|delta| delta.get("tool_calls"))
+            .filter(|tool_calls| !tool_calls.is_null());
+        if content.is_none() && thinking.is_none() && tool_calls.is_none() {
+            return;
+        }
+
+        let mut message = serde_json::Map::from_iter([
+            ("role".to_string(), Value::String("assistant".to_string())),
+            (
+                "content".to_string(),
+                Value::String(content.unwrap_or_default().to_string()),
+            ),
+        ]);
+        if let Some(thinking) = thinking {
+            message.insert("thinking".to_string(), Value::String(thinking.to_string()));
+        }
+        if let Some(tool_calls) = tool_calls {
+            message.insert("tool_calls".to_string(), tool_calls.clone());
+        }
+        self.enqueue_json(json!({
+            "model": self.model,
+            "created_at": "1970-01-01T00:00:00Z",
+            "message": message,
+            "done": false,
+        }));
+    }
+
+    fn enqueue_done(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.enqueue_json(json!({
+            "model": self.model,
+            "created_at": "1970-01-01T00:00:00Z",
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+            "done_reason": self.finish_reason,
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": self.prompt_tokens,
+            "eval_count": self.completion_tokens,
+        }));
+        self.finished = true;
+    }
+
+    fn enqueue_json(&mut self, value: Value) {
+        let mut line = serde_json::to_vec(&value).expect("serializing an Ollama stream chunk");
+        line.push(b'\n');
+        self.output.push_back(Ok(Bytes::from(line)));
+    }
+}
+
+fn streaming_ollama_response(upstream: reqwest::Response, model: String) -> Response {
+    let status = upstream.status();
+    let state = OllamaStreamState {
+        upstream: upstream.bytes_stream().boxed(),
+        model,
+        input: Vec::new(),
+        output: VecDeque::new(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        finish_reason: "stop".to_string(),
+        finished: false,
+    };
+    let output = stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(chunk) = state.output.pop_front() {
+                return Some((chunk, state));
+            }
+            if state.finished {
+                return None;
+            }
+            match state.upstream.next().await {
+                Some(Ok(chunk)) => {
+                    state.input.extend_from_slice(&chunk);
+                    state.consume_complete_lines();
+                }
+                Some(Err(error)) => {
+                    state.finished = true;
+                    return Some((Err(io::Error::other(error)), state));
+                }
+                None => {
+                    if !state.input.is_empty() {
+                        let line = std::mem::take(&mut state.input);
+                        state.consume_sse_line(&line);
+                    }
+                    state.enqueue_done();
+                }
+            }
+        }
+    });
+
+    let mut response = Response::new(Body::from_stream(output));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn models(State(service): State<Arc<AuthService>>) -> Json<Value> {

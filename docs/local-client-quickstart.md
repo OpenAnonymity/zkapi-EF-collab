@@ -42,5 +42,7 @@ curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -d '{"model":"openai/gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":"Explain HTTPS briefly."}]}' | jq .
 ```
 
-`/v1/chat/completions` also passes `"stream": true` through as an unbuffered
-OpenAI-compatible SSE response, including when the client is used by OpenWebUI.
+Streaming works with both OpenWebUI connection types: `/v1/chat/completions`
+passes `"stream": true` through as unbuffered OpenAI-compatible SSE, while
+`/api/chat` converts that stream into Ollama-compatible NDJSON (and follows
+Ollama's default of streaming when the field is omitted).

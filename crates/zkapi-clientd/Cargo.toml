@@ -19,6 +19,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
 fs2 = { workspace = true }
+futures-util = "0.3"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,5 +34,4 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-serverd = { path = "../zkapi-serverd" }
-futures-util = "0.3"
 http-body-util = "0.1"
