@@ -29,11 +29,18 @@ leases. Each lease can cover a typical 1,024-token completion from the models
 advertised by the deployment.
 
 Omit `--address` to let `cast` derive the address and prompt securely for the
-private key, or add `--address 0x...`. Keep the client running, then call its
-local OpenAI-compatible API:
+private key, or add `--address 0x...`. Funding prompts for the private key once,
+uses a temporary encrypted `cast` keystore for mint/approve/deposit, and removes
+that keystore as soon as funding finishes. The key is never stored in zkAPI's
+state directory.
+
+Keep the client running, then call its local OpenAI-compatible API:
 
 ```bash
 curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"openai/gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":"Explain HTTPS briefly."}]}' | jq .
 ```
+
+`/v1/chat/completions` also passes `"stream": true` through as an unbuffered
+OpenAI-compatible SSE response, including when the client is used by OpenWebUI.

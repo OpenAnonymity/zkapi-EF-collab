@@ -578,6 +578,23 @@ impl AuthService {
         }
     }
 
+    /// Forward a direct OpenRouter response without buffering its body. The
+    /// HTTP route wraps the returned byte stream in an Axum body so SSE chunks
+    /// reach OpenAI-compatible callers as soon as OpenRouter emits them.
+    pub async fn execute_streaming_request(
+        &self,
+        request: CoreRequest,
+    ) -> Result<reqwest::Response, AuthError> {
+        match self.config.request_mode {
+            RequestMode::DirectOpenrouter => {
+                self.execute_direct_openrouter_streaming(request).await
+            }
+            RequestMode::Proxy => Err(AuthError::InvalidInput(
+                "streaming is available only in direct-openrouter mode".to_string(),
+            )),
+        }
+    }
+
     /// Reconcile a pending direct-mode lease with the server. `run()` calls
     /// this periodically so the wallet advances soon after authoritative usage
     /// settlement even if no new LLM request arrives.
@@ -611,34 +628,8 @@ impl AuthService {
     ) -> Result<CoreResponse, AuthError> {
         self.ensure_scheme_agreement().await?;
         let mut lease_guard = self.direct_lease.lock().await;
-
-        if let Some(lease) = lease_guard.as_ref() {
-            // Leave a small margin so a key cannot expire while a request is
-            // being transmitted to OpenRouter.
-            if now_seconds().saturating_add(1) >= lease.expires_at {
-                let settle_deadline = lease.settle_after.saturating_add(60);
-                loop {
-                    if self.recover().await?.recovered {
-                        *lease_guard = None;
-                        break;
-                    }
-                    if now_seconds() >= settle_deadline {
-                        return Err(AuthError::LeasePending(format!(
-                            "lease {} expired but authoritative usage has not settled yet",
-                            lease.client_request_id
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-
-        if lease_guard.is_none() {
-            // Recover any state finalized since daemon startup before proving a
-            // new lease request.
-            let _ = self.recover().await?;
-            *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
-        }
+        self.ensure_direct_openrouter_lease(&mut lease_guard)
+            .await?;
         let (upstream_path, upstream_body) =
             crate::compat::openrouter_request(&request.path, request.body);
         let mut rotated = false;
@@ -647,10 +638,15 @@ impl AuthService {
                 .as_mut()
                 .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
             match self
-                .send_verified_openrouter_inference(lease, &upstream_path, &upstream_body)
+                .send_verified_openrouter_request(lease, &upstream_path, &upstream_body)
                 .await
             {
-                Ok((status, raw_payload)) => {
+                Ok(response) => {
+                    let status = response.status();
+                    let raw_payload = response
+                        .text()
+                        .await
+                        .map_err(|error| AuthError::Upstream(error.to_string()))?;
                     lease.successful_inferences = lease.successful_inferences.saturating_add(1);
                     break (status, raw_payload, lease.client_request_id.clone());
                 }
@@ -694,12 +690,92 @@ impl AuthService {
         })
     }
 
-    async fn send_verified_openrouter_inference(
+    async fn ensure_direct_openrouter_lease(
+        &self,
+        lease_slot: &mut Option<ActiveOpenRouterLease>,
+    ) -> Result<(), AuthError> {
+        if let Some(lease) = lease_slot.as_ref() {
+            // Leave a small margin so a key cannot expire while a request is
+            // being transmitted to OpenRouter.
+            if now_seconds().saturating_add(1) >= lease.expires_at {
+                let settle_deadline = lease.settle_after.saturating_add(60);
+                loop {
+                    if self.recover().await?.recovered {
+                        *lease_slot = None;
+                        break;
+                    }
+                    if now_seconds() >= settle_deadline {
+                        return Err(AuthError::LeasePending(format!(
+                            "lease {} expired but authoritative usage has not settled yet",
+                            lease.client_request_id
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+
+        if lease_slot.is_none() {
+            // Recover any state finalized since daemon startup before proving a
+            // new lease request.
+            let _ = self.recover().await?;
+            *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
+        }
+        Ok(())
+    }
+
+    async fn execute_direct_openrouter_streaming(
+        &self,
+        request: CoreRequest,
+    ) -> Result<reqwest::Response, AuthError> {
+        self.ensure_scheme_agreement().await?;
+        let mut lease_guard = self.direct_lease.lock().await;
+        self.ensure_direct_openrouter_lease(&mut lease_guard)
+            .await?;
+        let (upstream_path, upstream_body) =
+            crate::compat::openrouter_request(&request.path, request.body);
+        let mut rotated = false;
+        loop {
+            let lease = lease_guard
+                .as_mut()
+                .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+            match self
+                .send_verified_openrouter_request(lease, &upstream_path, &upstream_body)
+                .await
+            {
+                Ok(response) => {
+                    lease.successful_inferences = lease.successful_inferences.saturating_add(1);
+                    return Ok(response);
+                }
+                Err(error)
+                    if !rotated
+                        && is_rotatable_openrouter_key_failure(
+                            &error,
+                            lease.successful_inferences,
+                        ) =>
+                {
+                    let rejected_lease_id = lease.client_request_id.clone();
+                    tracing::warn!(
+                        client_request_id = %rejected_lease_id,
+                        error = %error,
+                        "retiring rejected OpenRouter key and opening a replacement lease"
+                    );
+                    self.retire_direct_openrouter_lease(&rejected_lease_id)
+                        .await?;
+                    *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
+                    rotated = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn send_verified_openrouter_request(
         &self,
         lease: &mut ActiveOpenRouterLease,
         upstream_path: &str,
         upstream_body: &Value,
-    ) -> Result<(reqwest::StatusCode, String), AuthError> {
+    ) -> Result<reqwest::Response, AuthError> {
         if !lease.verified {
             let evidence = lease.verification.clone().ok_or_else(|| {
                 AuthError::KeyVerification("OA lease lost its verification evidence".to_string())
@@ -718,17 +794,17 @@ impl AuthService {
             lease.openrouter_api_base.trim_end_matches('/'),
             upstream_path
         );
-        self.send_openrouter_inference(&url, &lease.api_key, upstream_body, lease.expires_at)
+        self.send_openrouter_request(&url, &lease.api_key, upstream_body, lease.expires_at)
             .await
     }
 
-    async fn send_openrouter_inference(
+    async fn send_openrouter_request(
         &self,
         url: &str,
         api_key: &str,
         body: &Value,
         expires_at: u64,
-    ) -> Result<(reqwest::StatusCode, String), AuthError> {
+    ) -> Result<reqwest::Response, AuthError> {
         for attempt in 1..=DIRECT_REMOTE_MAX_ATTEMPTS {
             let response = match self
                 .http
@@ -758,13 +834,13 @@ impl AuthService {
             };
             let status = response.status();
             let retry_after = retry_after_delay(response.headers());
+            if status.is_success() {
+                return Ok(response);
+            }
             let raw_payload = response
                 .text()
                 .await
                 .map_err(|error| AuthError::Upstream(error.to_string()))?;
-            if status.is_success() {
-                return Ok((status, raw_payload));
-            }
             if is_transient_remote_status(status) && attempt < DIRECT_REMOTE_MAX_ATTEMPTS {
                 let delay = direct_remote_retry_delay(attempt, retry_after);
                 if retry_fits_lease(expires_at, delay) {
@@ -789,7 +865,9 @@ impl AuthService {
     }
 
     async fn issue_direct_openrouter_lease(&self) -> Result<ActiveOpenRouterLease, AuthError> {
-        for attempt in 0..2 {
+        let mut retried_stale_root = false;
+        let mut reconciled_lost_key = false;
+        loop {
             let request = self.prepare_direct_lease_request().await?;
             let response = self
                 .http
@@ -868,21 +946,56 @@ impl AuthService {
                 });
             }
             if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
-                if error.error_code == "stale_root" && attempt == 0 {
+                if error.error_code == "stale_root" && !retried_stale_root {
                     self.clear_pending_request().await?;
+                    retried_stale_root = true;
                     continue;
                 }
                 if error.error_code == "lease_pending" {
-                    let status = self
+                    let lease_status = self
                         .fetch_direct_lease_status(&request.client_request_id)
                         .await?;
-                    return Err(AuthError::LeasePending(format!(
-                        "lease {} is {}; key expiry {}, settlement after {}",
-                        status.client_request_id,
-                        status.status,
-                        status.expires_at,
-                        status.settle_after
-                    )));
+                    if reconciled_lost_key {
+                        return Err(AuthError::LeasePending(format!(
+                            "lease {} is still {} after local recovery",
+                            lease_status.client_request_id, lease_status.status
+                        )));
+                    }
+                    match lease_status.status.as_str() {
+                        "active" => {
+                            // A restarted daemon intentionally has no copy of
+                            // the one-show runtime key. Retire that unusable
+                            // lease immediately, recover its wallet update,
+                            // and prove a fresh lease in this same request.
+                            tracing::warn!(
+                                client_request_id = %lease_status.client_request_id,
+                                expires_at = lease_status.expires_at,
+                                "retiring active OpenRouter lease whose local key was lost"
+                            );
+                            self.retire_direct_openrouter_lease(&lease_status.client_request_id)
+                                .await?;
+                        }
+                        "finalized" => {
+                            let recovered = self.recover().await?;
+                            if !recovered.recovered && recovered.wallet.pending_request {
+                                return Err(AuthError::LeasePending(format!(
+                                    "finalized lease {} is not yet recoverable",
+                                    lease_status.client_request_id
+                                )));
+                            }
+                        }
+                        _ => {
+                            return Err(AuthError::LeasePending(format!(
+                                "lease {} is {}; key expiry {}, settlement after {}",
+                                lease_status.client_request_id,
+                                lease_status.status,
+                                lease_status.expires_at,
+                                lease_status.settle_after
+                            )));
+                        }
+                    }
+                    reconciled_lost_key = true;
+                    continue;
                 }
                 return Err(AuthError::Wallet(format!(
                     "{}: {}",
@@ -891,9 +1004,6 @@ impl AuthService {
             }
             return Err(AuthError::Wallet(format!("HTTP {status}: {body}")));
         }
-        Err(AuthError::Wallet(
-            "lease request failed after retrying a stale indexer root".to_string(),
-        ))
     }
 
     async fn verify_oa_key(

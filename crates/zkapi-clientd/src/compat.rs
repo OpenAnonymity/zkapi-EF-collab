@@ -46,7 +46,9 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
     if path == "/v1/chat/completions" || path == CHAT_PATH {
         let mut object = object;
         ensure_direct_completion_limit(&mut object);
-        object.insert("stream".to_string(), Value::Bool(false));
+        object
+            .entry("stream".to_string())
+            .or_insert(Value::Bool(false));
         return (CHAT_PATH.to_string(), Value::Object(object));
     }
 
@@ -61,6 +63,7 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
         "tools",
         "tool_choice",
         "response_format",
+        "stream",
     ] {
         if let Some(value) = object.get(key) {
             normalized.insert(key.to_string(), value.clone());
@@ -91,8 +94,14 @@ pub fn openrouter_request(path: &str, body: Value) -> (String, Value) {
             );
         }
     }
-    normalized.insert("stream".to_string(), Value::Bool(false));
+    normalized
+        .entry("stream".to_string())
+        .or_insert(Value::Bool(false));
     (CHAT_PATH.to_string(), Value::Object(normalized))
+}
+
+pub fn stream_requested(body: &Value) -> bool {
+    body.get("stream").and_then(Value::as_bool) == Some(true)
 }
 
 fn ensure_direct_completion_limit(object: &mut serde_json::Map<String, Value>) {
@@ -402,5 +411,19 @@ mod tests {
             }),
         );
         assert_eq!(responses["max_tokens"], 88);
+    }
+
+    #[test]
+    fn direct_openrouter_preserves_streaming_requests() {
+        let (_, chat) = openrouter_request(
+            "/v1/chat/completions",
+            json!({
+                "model": "openai/gpt-5.6-sol",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        );
+        assert_eq!(chat["stream"], true);
+        assert!(stream_requested(&chat));
     }
 }

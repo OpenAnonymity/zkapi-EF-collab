@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
 use serde_json::Value;
+use zeroize::Zeroizing;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
@@ -721,7 +723,7 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
                 );
             }
             eprintln!(
-                "No active zkAPI note in {}. Funding {} billing credits now; cast will securely prompt for the wallet key.",
+                "No active zkAPI note in {}. Funding {} billing credits now; cast will securely prompt once for the wallet key.",
                 state_dir.display(),
                 initial_credits
             );
@@ -867,8 +869,9 @@ fn auth_service_from_manifest(
     .map_err(Into::into)
 }
 
-/// Create, submit, and confirm the first note with only terminal prompts from
-/// Foundry's `cast`. The key never enters our argument parser or state files.
+/// Create, submit, and confirm the first note with one terminal key prompt from
+/// Foundry's `cast`. The key is kept in a temporary encrypted keystore only for
+/// this funding flow and never enters zkAPI's argument parser or state files.
 async fn fund_public_deployment(
     service: &Arc<AuthService>,
     manifest: &DeploymentManifest,
@@ -889,18 +892,19 @@ async fn fund_public_deployment(
             manifest.deployment_id
         )
     })?;
+    let signer = create_ephemeral_cast_signer()?;
     let address = match requested_address {
         Some(address) => {
             let requested = normalize_address(address)?;
-            let signer = cast_interactive_address()?;
-            if signer != requested {
+            if signer.address != requested {
                 anyhow::bail!(
-                    "--address {requested} does not match the private key's address {signer}"
+                    "--address {requested} does not match the private key's address {}",
+                    signer.address
                 );
             }
             requested
         }
-        None => cast_interactive_address()?,
+        None => signer.address.clone(),
     };
     let plan = service.prepare_deposit(amount).await?;
     let amount = plan.amount.to_string();
@@ -909,16 +913,18 @@ async fn fund_public_deployment(
     let note_id = plan.next_note_id;
 
     if !skip_mint && manifest.demo_mint_enabled {
-        run_cast_interactive(&[
-            "send".to_string(),
-            "--rpc-url".to_string(),
-            manifest.rpc_url.clone(),
-            "--interactive".to_string(),
-            token.to_string(),
-            "mint(address,uint256)".to_string(),
-            address.clone(),
-            amount.clone(),
-        ])?;
+        run_cast_signed(
+            &signer,
+            &[
+                "send".to_string(),
+                "--rpc-url".to_string(),
+                manifest.rpc_url.clone(),
+                token.to_string(),
+                "mint(address,uint256)".to_string(),
+                address.clone(),
+                amount.clone(),
+            ],
+        )?;
     } else if !skip_mint {
         eprintln!(
             "This deployment uses a real billing token and has no faucet mint. The selected address must already hold at least {amount} token base units."
@@ -943,27 +949,31 @@ async fn fund_public_deployment(
             plan.amount - balance
         );
     }
-    run_cast_interactive(&[
-        "send".to_string(),
-        "--rpc-url".to_string(),
-        manifest.rpc_url.clone(),
-        "--interactive".to_string(),
-        token.to_string(),
-        "approve(address,uint256)".to_string(),
-        manifest.contract_address.clone(),
-        amount.clone(),
-    ])?;
-    run_cast_interactive(&[
-        "send".to_string(),
-        "--rpc-url".to_string(),
-        manifest.rpc_url.clone(),
-        "--interactive".to_string(),
-        manifest.contract_address.clone(),
-        "deposit(bytes32,uint128,uint256[32])".to_string(),
-        commitment,
-        amount.clone(),
-        siblings,
-    ])?;
+    run_cast_signed(
+        &signer,
+        &[
+            "send".to_string(),
+            "--rpc-url".to_string(),
+            manifest.rpc_url.clone(),
+            token.to_string(),
+            "approve(address,uint256)".to_string(),
+            manifest.contract_address.clone(),
+            amount.clone(),
+        ],
+    )?;
+    run_cast_signed(
+        &signer,
+        &[
+            "send".to_string(),
+            "--rpc-url".to_string(),
+            manifest.rpc_url.clone(),
+            manifest.contract_address.clone(),
+            "deposit(bytes32,uint128,uint256[32])".to_string(),
+            commitment,
+            amount.clone(),
+            siblings,
+        ],
+    )?;
 
     wait_for_indexed_note(&manifest.indexer_url, note_id).await?;
     let expiry_ts = read_note_expiry(manifest, note_id)?;
@@ -1069,10 +1079,31 @@ fn read_note_expiry(manifest: &DeploymentManifest, note_id: u32) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("vault note getter returned no expiry timestamp"))
 }
 
-fn cast_interactive_address() -> anyhow::Result<String> {
-    eprintln!("cast will prompt for the depositor private key to derive and verify its address.");
+struct EphemeralCastSigner {
+    _keystore_dir: tempfile::TempDir,
+    keystore_path: PathBuf,
+    password: Zeroizing<String>,
+    address: String,
+}
+
+fn create_ephemeral_cast_signer() -> anyhow::Result<EphemeralCastSigner> {
+    let keystore_dir = tempfile::Builder::new()
+        .prefix("zkapi-cast-signer-")
+        .tempdir()
+        .map_err(|error| anyhow::anyhow!("failed to create temporary cast keystore: {error}"))?;
+    let mut password_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut password_bytes);
+    let password = Zeroizing::new(hex::encode(password_bytes));
+    password_bytes.fill(0);
+
+    eprintln!(
+        "Enter the depositor private key once. It will be cached only in a temporary encrypted keystore for this funding flow."
+    );
     let output = Command::new("cast")
-        .args(["wallet", "address", "--interactive"])
+        .args(["wallet", "import", "zkapi-funding", "--keystore-dir"])
+        .arg(keystore_dir.path())
+        .arg("--interactive")
+        .env("CAST_UNSAFE_PASSWORD", password.as_str())
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1081,22 +1112,54 @@ fn cast_interactive_address() -> anyhow::Result<String> {
             anyhow::anyhow!("failed to run cast; install Foundry's cast command: {err}")
         })?;
     if !output.status.success() {
-        anyhow::bail!("cast could not derive a wallet address")
+        anyhow::bail!("cast could not import the temporary funding signer")
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|err| anyhow::anyhow!("cast returned a non-UTF-8 address: {err}"))?;
-    let address = stdout
+
+    let import_output = String::from_utf8(output.stdout)
+        .map_err(|error| anyhow::anyhow!("cast returned non-UTF-8 import output: {error}"))?;
+    let address = import_output
         .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("cast did not return a wallet address"))?;
-    normalize_address(address)
+        .find_map(|line| {
+            line.split_once("Address:")
+                .map(|(_, address)| address.trim())
+        })
+        .ok_or_else(|| anyhow::anyhow!("cast did not report the imported wallet address"))?;
+    let address = normalize_address(address)?;
+
+    let mut keystore_files = std::fs::read_dir(keystore_dir.path())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    if keystore_files.len() != 1 {
+        anyhow::bail!(
+            "cast created {} temporary keystore files; expected exactly one",
+            keystore_files.len()
+        );
+    }
+    let keystore_path = keystore_files.remove(0);
+    eprintln!("Temporary cast signer ready for {address}.");
+
+    Ok(EphemeralCastSigner {
+        _keystore_dir: keystore_dir,
+        keystore_path,
+        password,
+        address,
+    })
 }
 
-fn run_cast_interactive(args: &[String]) -> anyhow::Result<()> {
+fn run_cast_signed(signer: &EphemeralCastSigner, args: &[String]) -> anyhow::Result<()> {
+    let (subcommand, arguments) = args
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("cast transaction command is empty"))?;
     let status = Command::new("cast")
-        .args(args)
-        .stdin(Stdio::inherit())
+        .arg(subcommand)
+        .arg("--keystore")
+        .arg(&signer.keystore_path)
+        .arg("--password")
+        .arg(signer.password.as_str())
+        .args(arguments)
+        .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()

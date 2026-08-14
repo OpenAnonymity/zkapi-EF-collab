@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -132,6 +133,15 @@ async fn chat_completions(
     State(service): State<Arc<AuthService>>,
     Json(body): Json<Value>,
 ) -> Response {
+    if compat::stream_requested(&body) {
+        return match service
+            .execute_streaming_request(compat::core_request("/v1/chat/completions", body))
+            .await
+        {
+            Ok(upstream) => streaming_openrouter_response(upstream),
+            Err(err) => openai_error(err),
+        };
+    }
     let model = compat::extract_model(&body, service.default_model());
     match service
         .execute_request(compat::core_request("/v1/chat/completions", body))
@@ -140,6 +150,27 @@ async fn chat_completions(
         Ok(response) => Json(compat::chat_completion(&model, &response)).into_response(),
         Err(err) => openai_error(err),
     }
+}
+
+fn streaming_openrouter_response(upstream: reqwest::Response) -> Response {
+    let status = upstream.status();
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let cache_control = upstream.headers().get(header::CACHE_CONTROL).cloned();
+    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        content_type.unwrap_or_else(|| HeaderValue::from_static("text/event-stream")),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        cache_control.unwrap_or_else(|| HeaderValue::from_static("no-cache")),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn responses_api(
