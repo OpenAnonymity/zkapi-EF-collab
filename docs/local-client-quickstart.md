@@ -34,6 +34,12 @@ uses a temporary encrypted `cast` keystore for mint/approve/deposit, and removes
 that keystore as soon as funding finishes. The key is never stored in zkAPI's
 state directory.
 
+The client manages that directory as a stable active-wallet slot. When an
+existing note no longer has enough reserve for another maximum-cost request,
+normal startup preserves it under `retired/note_<id>` (where it remains
+available for withdrawal), funds a fresh note, and continues using the same
+client command. `--no-fund` disables both automatic funding and this rotation.
+
 Keep the client running, then call its local OpenAI-compatible API:
 
 ```bash

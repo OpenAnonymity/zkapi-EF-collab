@@ -35,3 +35,4 @@ tracing-subscriber = { workspace = true }
 zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-serverd = { path = "../zkapi-serverd" }
 http-body-util = "0.1"
+tempfile = { workspace = true }

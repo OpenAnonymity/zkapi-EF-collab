@@ -96,6 +96,18 @@ pub struct WalletStatus {
     pub note: Option<NoteStatus>,
 }
 
+/// A low-balance note moved out of the active wallet slot.
+///
+/// `state_dir` remains a complete wallet state directory, so the note can be
+/// selected later for withdrawal without keeping it in the daemon's active
+/// request path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetiredNote {
+    pub note_id: u32,
+    pub remaining_balance: u128,
+    pub state_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FundingConfig {
     pub contract_address: Felt252,
@@ -452,6 +464,64 @@ impl AuthService {
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
             let wallet = load_wallet(&config, Vec::new())?;
             Ok(wallet_status(&wallet))
+        })
+        .await
+    }
+
+    /// Preserve a note that cannot safely authorize another maximum-cost
+    /// request and clear the active wallet slot for a fresh deposit.
+    ///
+    /// The balance check and filesystem move happen under the same wallet
+    /// locks as request execution. A pending request is never retired because
+    /// its eventual response may still advance the note state.
+    pub async fn retire_low_balance_note(&self) -> Result<Option<RetiredNote>, AuthError> {
+        let config = self.config.clone();
+        let wallet_mutex = self.wallet_mutex.clone();
+        spawn_blocking(move || {
+            let _guard = wallet_mutex
+                .lock()
+                .map_err(|err| AuthError::Wallet(err.to_string()))?;
+            let _lockfile = acquire_wallet_lock(&config.state_dir)?;
+            let wallet = load_wallet(&config, Vec::new())?;
+            let Some(state) = wallet.state() else {
+                return Ok(None);
+            };
+            let proof_bound = if config.policy_enabled {
+                config.policy_charge_cap
+            } else {
+                config.request_charge_cap
+            };
+            if state.current_balance > proof_bound {
+                return Ok(None);
+            }
+            // The wallet normally removes this file after settlement. Treat
+            // any surviving journal (including one too damaged to parse) as
+            // in-flight state and fail closed instead of separating it from
+            // its note.
+            if config.state_dir.join("pending_journal.json").exists() {
+                return Err(AuthError::PendingRequest);
+            }
+
+            let note_id = state.note_id;
+            let remaining_balance = state.current_balance;
+            let retired_dir = next_retired_note_dir(&config.state_dir, note_id)?;
+            create_private_dir(&retired_dir)?;
+
+            let active_state_path = config.state_dir.join("note_state.json");
+            let retired_state_path = retired_dir.join("note_state.json");
+            std::fs::rename(&active_state_path, &retired_state_path).map_err(|err| {
+                AuthError::Wallet(format!(
+                    "failed to retire note {note_id} from {} to {}: {err}",
+                    active_state_path.display(),
+                    retired_state_path.display()
+                ))
+            })?;
+
+            Ok(Some(RetiredNote {
+                note_id,
+                remaining_balance,
+                state_dir: retired_dir,
+            }))
         })
         .await
     }
@@ -1830,6 +1900,34 @@ fn wallet_lock_path(state_dir: &Path) -> PathBuf {
     state_dir.join(".wallet.lock")
 }
 
+fn next_retired_note_dir(state_dir: &Path, note_id: u32) -> Result<PathBuf, AuthError> {
+    let retired_root = state_dir.join("retired");
+    create_private_dir(&retired_root)?;
+    for suffix in 1u32.. {
+        let name = if suffix == 1 {
+            format!("note_{note_id}")
+        } else {
+            format!("note_{note_id}_{suffix}")
+        };
+        let candidate = retired_root.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("the retired-note suffix space is non-empty")
+}
+
+fn create_private_dir(path: &Path) -> Result<(), AuthError> {
+    std::fs::create_dir_all(path).map_err(|err| AuthError::Wallet(err.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|err| AuthError::Wallet(err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> ClientConfig {
     ClientConfig {
         protocol_version: config.protocol_version,
@@ -1988,6 +2086,87 @@ mod security_tests {
                 .to_string(),
         };
         assert!(!is_rejected_openrouter_key(&permission_denied));
+    }
+}
+
+#[cfg(test)]
+mod wallet_lifecycle_tests {
+    use tempfile::tempdir;
+    use zkapi_client::journal::PendingRequestJournal;
+    use zkapi_client::note_state::NoteState;
+
+    use super::*;
+
+    async fn service_with_note(
+        balance: u128,
+        request_charge_cap: u128,
+    ) -> (tempfile::TempDir, Arc<AuthService>) {
+        let directory = tempdir().unwrap();
+        let service = AuthService::new(AuthConfig {
+            state_dir: directory.path().to_path_buf(),
+            request_charge_cap,
+            ..Default::default()
+        })
+        .unwrap();
+        service
+            .confirm_deposit(ConfirmDepositRequest {
+                secret: Felt252::ONE,
+                note_id: 18,
+                amount: balance,
+                expiry_ts: 4_000_000_000,
+            })
+            .await
+            .unwrap();
+        (directory, service)
+    }
+
+    #[tokio::test]
+    async fn low_balance_note_is_preserved_and_active_slot_is_cleared() {
+        let (directory, service) = service_with_note(50_000, 50_000).await;
+
+        let retired = service
+            .retire_low_balance_note()
+            .await
+            .unwrap()
+            .expect("low-balance note should be retired");
+
+        assert_eq!(retired.note_id, 18);
+        assert_eq!(retired.remaining_balance, 50_000);
+        assert_eq!(retired.state_dir, directory.path().join("retired/note_18"));
+        assert!(!directory.path().join("note_state.json").exists());
+        let preserved = NoteState::load(&retired.state_dir.join("note_state.json")).unwrap();
+        assert_eq!(preserved.note_id, 18);
+        assert_eq!(preserved.current_balance, 50_000);
+        assert!(!service.status().await.unwrap().has_note);
+    }
+
+    #[tokio::test]
+    async fn healthy_or_pending_note_is_never_retired() {
+        let (_healthy_directory, healthy) = service_with_note(50_001, 50_000).await;
+        assert!(healthy.retire_low_balance_note().await.unwrap().is_none());
+        assert!(healthy.status().await.unwrap().has_note);
+
+        let (pending_directory, pending) = service_with_note(50_000, 50_000).await;
+        PendingRequestJournal::write(
+            &pending_directory.path().join("pending_journal.json"),
+            &PendingRequestJournal {
+                exists: true,
+                client_request_id: "pending-request".to_string(),
+                nullifier: Felt252::ONE,
+                payload_hash: Felt252::ONE,
+                user_rerandomization: Felt252::ONE,
+                created_at_ms: 1,
+                prepared_request: None,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            pending.retire_low_balance_note().await,
+            Err(AuthError::PendingRequest)
+        ));
+        assert!(pending_directory.path().join("note_state.json").exists());
+        assert!(!pending_directory.path().join("retired").exists());
     }
 }
 

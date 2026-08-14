@@ -122,8 +122,8 @@ enum Commands {
     /// Start a ready-to-use local OpenAI/Ollama-compatible client.
     ///
     /// By default this loads the experimental Ethereum Mainnet deployment,
-    /// funds a new real-USDC note only when the selected local state directory
-    /// has no active note, then listens on 127.0.0.1:11434.
+    /// manages low-balance notes, funds a new real-USDC note when needed, then
+    /// listens on 127.0.0.1:11434.
     Client {
         /// Deployment manifest URL or local JSON path.
         #[arg(long, default_value = PUBLIC_MAINNET_MANIFEST)]
@@ -134,13 +134,13 @@ enum Commands {
         /// Local HTTP address for OpenAI, Responses, and Ollama-compatible APIs.
         #[arg(long, default_value = "127.0.0.1:11434")]
         listen: String,
-        /// Private wallet state directory. Defaults to a deployment-specific user state path.
+        /// Managed private wallet state directory. Defaults to a deployment-specific user state path.
         #[arg(long)]
         state_dir: Option<PathBuf>,
-        /// Billing-token base units to deposit when the client has no active note.
+        /// Billing-token base units to deposit when the client needs a fresh note.
         #[arg(long, default_value_t = 2_000_000)]
         initial_credits: u128,
-        /// Start without funding when no active note exists.
+        /// Start without automatic funding or low-balance note rotation.
         #[arg(long)]
         no_fund: bool,
         /// Do not call a test deployment's optional faucet-style mint method.
@@ -744,13 +744,25 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
                     note.note_id, note.current_balance, manifest.request_charge_cap
                 );
             } else {
-                anyhow::bail!(
-                    "active note {} in {} has {} credits and no reserve beyond this deployment's {}-credit per-request proof bound. Preserve that state for withdrawal, then start a fresh note with --state-dir <NEW_DIRECTORY>",
-                    note.note_id,
-                    state_dir.display(),
-                    note.current_balance,
-                    manifest.request_charge_cap
+                let retired = service.retire_low_balance_note().await?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "active note state changed while preparing automatic rotation; retry startup"
+                    )
+                })?;
+                eprintln!(
+                    "Retired low-balance note {} with {} credits to {}. Funding a fresh active note automatically.",
+                    retired.note_id,
+                    retired.remaining_balance,
+                    retired.state_dir.display()
                 );
+                fund_public_deployment(
+                    &service,
+                    &manifest,
+                    requested_address,
+                    initial_credits,
+                    skip_mint,
+                )
+                .await?;
             }
         }
     }

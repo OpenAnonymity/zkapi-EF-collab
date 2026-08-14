@@ -10,6 +10,7 @@ pub use routes::{build_router, run};
 pub use service::{
     AuthService, ConfirmDepositRequest, CoreRequest, CoreResponse, DemoOverview, DepositPlan,
     FundingConfig, IndexerSnapshot, NoteStatus, ProtocolResponseTrace, RecoverResult,
-    RequestDemoResult, RequestPreview, ServerAttestationSnapshot, ServerHealthSnapshot,
-    ServerSnapshot, WalletStatus, WithdrawalMode, WithdrawalPlan, ZkapiConfig, CREDITS_PER_USD,
+    RequestDemoResult, RequestPreview, RetiredNote, ServerAttestationSnapshot,
+    ServerHealthSnapshot, ServerSnapshot, WalletStatus, WithdrawalMode, WithdrawalPlan,
+    ZkapiConfig, CREDITS_PER_USD,
 };
