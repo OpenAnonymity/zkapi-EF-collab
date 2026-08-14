@@ -31,7 +31,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::compat;
 use crate::error::AuthError;
-use crate::service::{AuthService, ConfirmDepositRequest, CoreRequest, WithdrawalMode};
+use crate::service::{
+    AuthService, ConfirmDepositRequest, CoreRequest, StreamingCoreResponse, WithdrawalMode,
+};
 
 #[derive(Debug, Deserialize)]
 struct PrepareDepositBody {
@@ -156,19 +158,20 @@ async fn chat_completions(
     }
 }
 
-fn streaming_openrouter_response(upstream: reqwest::Response) -> Response {
-    let status = upstream.status();
-    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
-    let cache_control = upstream.headers().get(header::CACHE_CONTROL).cloned();
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
-    *response.status_mut() = status;
+fn streaming_openrouter_response(upstream: StreamingCoreResponse) -> Response {
+    let mut response = Response::new(Body::from_stream(upstream.body));
+    *response.status_mut() = upstream.status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        content_type.unwrap_or_else(|| HeaderValue::from_static("text/event-stream")),
+        upstream
+            .content_type
+            .unwrap_or_else(|| HeaderValue::from_static("text/event-stream")),
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        cache_control.unwrap_or_else(|| HeaderValue::from_static("no-cache")),
+        upstream
+            .cache_control
+            .unwrap_or_else(|| HeaderValue::from_static("no-cache")),
     );
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
@@ -218,7 +221,7 @@ async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<V
 }
 
 struct OllamaStreamState {
-    upstream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    upstream: BoxStream<'static, Result<Bytes, io::Error>>,
     model: String,
     input: Vec<u8>,
     output: VecDeque<Result<Bytes, io::Error>>,
@@ -362,10 +365,10 @@ impl OllamaStreamState {
     }
 }
 
-fn streaming_ollama_response(upstream: reqwest::Response, model: String) -> Response {
-    let status = upstream.status();
+fn streaming_ollama_response(upstream: StreamingCoreResponse, model: String) -> Response {
+    let status = upstream.status;
     let state = OllamaStreamState {
-        upstream: upstream.bytes_stream().boxed(),
+        upstream: upstream.body,
         model,
         input: Vec::new(),
         output: VecDeque::new(),

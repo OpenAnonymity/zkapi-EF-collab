@@ -21,12 +21,12 @@ Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
 ```bash
 ./target/release/zkapi --require-oa-org-key-source client \
   --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
-  --mode direct-openrouter --initial-credits 500000
+  --mode direct-openrouter --initial-credits 5000000
 ```
 
-The larger Sepolia test-token deposit supports several $0.05 frontier-model
-leases. Each lease can cover a typical 1,024-token completion from the models
-advertised by the deployment.
+The larger Sepolia test-token deposit supports about 100 requests at the demo's
+$0.05 cap. Every inference receives a new child key, and the client retires it
+after that response; a depleted key is never reused by the next request.
 
 Omit `--address` to let `cast` derive the address and prompt securely for the
 private key, or add `--address 0x...`. Funding prompts for the private key once,

@@ -26,6 +26,7 @@ The local wallet talks to `zkapi-serverd` through:
 | POST | `/v2/requests` | verify proof, execute provider, sign next state |
 | POST | `/v2/openrouter/leases` | reserve one prompt-free request and return a bounded runtime key once |
 | GET | `/v2/openrouter/leases/{client_request_id}` | recover non-secret lease timing/status metadata |
+| POST | `/v2/openrouter/leases/{client_request_id}` | retire a request-scoped key and finalize its reserved request |
 | POST | `/v2/withdraw/clearance` | sign a mutual-close nullifier |
 | GET | `/v2/requests/{client_request_id}` | recover a finalized request |
 | GET | `/v2/nullifiers/{nullifier}` | recover by nullifier |
@@ -87,18 +88,19 @@ successful `201` response contains `api_key`, `openrouter_api_base`,
 configured OA verifier and submits the same `/submit_key` payload as oa-chat
 before using the key. The plaintext key is returned once and is not persisted.
 
-The nullifier remains `reserved` for the whole lease. After expiry plus the
-configured usage-propagation grace period, the server reads aggregate `usage`
-through OpenRouter's Management API, converts USD to credits, finalizes the
-original request, and deletes the expired key. The existing
+The client uses each lease for one inference and posts a retirement after the
+buffered body or final streaming chunk. For a directly managed key, the server
+reads aggregate `usage` through OpenRouter's Management API, converts USD to
+credits, finalizes the original request, and deletes the key. Expiry plus the
+configured usage-propagation grace period remains a crash-recovery fallback. The existing
 `GET /v2/requests/{client_request_id}` recovery response then supplies the
 signed next state. Thus key issuance, direct inference calls, usage polling,
 and state recovery are several HTTP operations but one zkAPI request and one
 nullifier. The lease-status GET never returns the plaintext key.
 
 For `key_source = "oa_org"`, the station owns provider management and deletes
-the expired key. The zkAPI server cannot inspect account usage, so it finalizes
-the proof-bound hard spending limit after expiry instead of claiming
+expired keys. The zkAPI server cannot inspect account usage, so explicit
+retirement finalizes the proof-bound hard spending limit instead of claiming
 usage-based billing.
 
 This mode is disabled when server-side prompt policy is enabled: a server

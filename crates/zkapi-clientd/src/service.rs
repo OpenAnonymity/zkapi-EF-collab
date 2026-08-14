@@ -14,11 +14,15 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::body::Bytes;
 use fs2::FileExt;
+use futures_util::stream::{self, BoxStream};
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -266,10 +270,76 @@ struct ActiveOpenRouterLease {
     api_key: String,
     openrouter_api_base: String,
     expires_at: u64,
-    settle_after: u64,
-    successful_inferences: u64,
     verification: Option<OaKeyVerificationEvidence>,
     verified: bool,
+}
+
+/// An upstream response whose body owns the one-request OpenRouter lease.
+///
+/// The body retires the key and recovers the wallet after the upstream reaches
+/// EOF. Dropping it early (for example, when a caller disconnects) schedules
+/// the same cleanup before another inference request can proceed.
+pub struct StreamingCoreResponse {
+    pub status: reqwest::StatusCode,
+    pub content_type: Option<reqwest::header::HeaderValue>,
+    pub cache_control: Option<reqwest::header::HeaderValue>,
+    pub body: BoxStream<'static, Result<Bytes, io::Error>>,
+}
+
+struct DirectOpenRouterStreamFinalizer {
+    service: Arc<AuthService>,
+    client_request_id: Option<String>,
+    request_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl DirectOpenRouterStreamFinalizer {
+    async fn finish(mut self) {
+        let Some(client_request_id) = self.client_request_id.take() else {
+            return;
+        };
+        if let Err(error) = self
+            .service
+            .finish_direct_openrouter_request(&client_request_id)
+            .await
+        {
+            tracing::warn!(
+                %client_request_id,
+                error = %error,
+                "could not retire per-request OpenRouter key after stream completion"
+            );
+        }
+        self.request_guard.take();
+    }
+}
+
+impl Drop for DirectOpenRouterStreamFinalizer {
+    fn drop(&mut self) {
+        let Some(client_request_id) = self.client_request_id.take() else {
+            return;
+        };
+        let service = self.service.clone();
+        let request_guard = self.request_guard.take();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                %client_request_id,
+                "stream ended outside the async runtime; lease cleanup will resume on the next request"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(error) = service
+                .finish_direct_openrouter_request(&client_request_id)
+                .await
+            {
+                tracing::warn!(
+                    %client_request_id,
+                    error = %error,
+                    "could not retire per-request OpenRouter key after stream disconnect"
+                );
+            }
+            drop(request_guard);
+        });
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,6 +409,7 @@ pub struct AuthService {
     indexer: IndexerClient,
     http: reqwest::Client,
     direct_lease: tokio::sync::Mutex<Option<ActiveOpenRouterLease>>,
+    direct_request_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AuthService {
@@ -355,6 +426,7 @@ impl AuthService {
                 .build()
                 .map_err(|error| AuthError::Wallet(error.to_string()))?,
             direct_lease: tokio::sync::Mutex::new(None),
+            direct_request_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }))
     }
 
@@ -580,11 +652,12 @@ impl AuthService {
 
     /// Forward a direct OpenRouter response without buffering its body. The
     /// HTTP route wraps the returned byte stream in an Axum body so SSE chunks
-    /// reach OpenAI-compatible callers as soon as OpenRouter emits them.
+    /// reach OpenAI-compatible callers as soon as OpenRouter emits them. The
+    /// returned body also owns the request-scoped key cleanup lifecycle.
     pub async fn execute_streaming_request(
-        &self,
+        self: &Arc<Self>,
         request: CoreRequest,
-    ) -> Result<reqwest::Response, AuthError> {
+    ) -> Result<StreamingCoreResponse, AuthError> {
         match self.config.request_mode {
             RequestMode::DirectOpenrouter => {
                 self.execute_direct_openrouter_streaming(request).await
@@ -602,15 +675,11 @@ impl AuthService {
         if self.config.request_mode != RequestMode::DirectOpenrouter {
             return;
         }
-        if self
-            .direct_lease
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|lease| now_seconds() < lease.expires_at)
-        {
+        // A streaming response owns this lock through its final body chunk.
+        // Do not race its key retirement with periodic crash recovery.
+        let Ok(_request_guard) = self.direct_request_mutex.try_lock() else {
             return;
-        }
+        };
         match self.recover().await {
             Ok(result) if result.recovered => {
                 let mut lease = self.direct_lease.lock().await;
@@ -627,50 +696,37 @@ impl AuthService {
         request: CoreRequest,
     ) -> Result<CoreResponse, AuthError> {
         self.ensure_scheme_agreement().await?;
+        let _request_guard = self.direct_request_mutex.lock().await;
         let mut lease_guard = self.direct_lease.lock().await;
-        self.ensure_direct_openrouter_lease(&mut lease_guard)
+        self.open_fresh_direct_openrouter_lease(&mut lease_guard)
             .await?;
         let (upstream_path, upstream_body) =
             crate::compat::openrouter_request(&request.path, request.body);
-        let mut rotated = false;
-        let (status, raw_payload, client_request_id) = loop {
-            let lease = lease_guard
-                .as_mut()
-                .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
-            match self
-                .send_verified_openrouter_request(lease, &upstream_path, &upstream_body)
-                .await
-            {
-                Ok(response) => {
-                    let status = response.status();
-                    let raw_payload = response
-                        .text()
-                        .await
-                        .map_err(|error| AuthError::Upstream(error.to_string()))?;
-                    lease.successful_inferences = lease.successful_inferences.saturating_add(1);
-                    break (status, raw_payload, lease.client_request_id.clone());
-                }
-                Err(error)
-                    if !rotated
-                        && is_rotatable_openrouter_key_failure(
-                            &error,
-                            lease.successful_inferences,
-                        ) =>
-                {
-                    let rejected_lease_id = lease.client_request_id.clone();
-                    tracing::warn!(
-                        client_request_id = %rejected_lease_id,
-                        error = %error,
-                        "retiring rejected OpenRouter key and opening a replacement lease"
-                    );
-                    self.retire_direct_openrouter_lease(&rejected_lease_id)
-                        .await?;
-                    *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
-                    rotated = true;
-                }
-                Err(error) => return Err(error),
-            }
+        let (client_request_id, upstream) = self
+            .send_on_request_scoped_openrouter_key(&mut lease_guard, &upstream_path, &upstream_body)
+            .await?;
+        let status = upstream.status();
+        let result = upstream
+            .text()
+            .await
+            .map(|raw_payload| (status, raw_payload))
+            .map_err(|error| AuthError::Upstream(error.to_string()));
+        drop(lease_guard);
+
+        // A key is never reused, including after an upstream rejection. A 402
+        // on this fresh key therefore describes this request's own declared
+        // maximum, not a balance depleted by earlier requests.
+        if let Err(error) = self
+            .finish_direct_openrouter_request(&client_request_id)
+            .await
+        {
+            tracing::warn!(
+                %client_request_id,
+                error = %error,
+                "could not retire per-request OpenRouter key after buffered response"
+            );
         };
+        let (status, raw_payload) = result?;
         let response_code = status.as_u16();
         let wallet = self.status().await?;
         let (remaining_balance, next_anchor) = wallet
@@ -690,84 +746,154 @@ impl AuthService {
         })
     }
 
-    async fn ensure_direct_openrouter_lease(
+    async fn open_fresh_direct_openrouter_lease(
         &self,
         lease_slot: &mut Option<ActiveOpenRouterLease>,
     ) -> Result<(), AuthError> {
-        if let Some(lease) = lease_slot.as_ref() {
-            // Leave a small margin so a key cannot expire while a request is
-            // being transmitted to OpenRouter.
-            if now_seconds().saturating_add(1) >= lease.expires_at {
-                let settle_deadline = lease.settle_after.saturating_add(60);
-                loop {
-                    if self.recover().await?.recovered {
-                        *lease_slot = None;
-                        break;
-                    }
-                    if now_seconds() >= settle_deadline {
-                        return Err(AuthError::LeasePending(format!(
-                            "lease {} expired but authoritative usage has not settled yet",
-                            lease.client_request_id
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
+        if let Some(unfinished) = lease_slot.take() {
+            tracing::warn!(
+                client_request_id = %unfinished.client_request_id,
+                "retiring an unfinished OpenRouter key before opening the request-scoped key"
+            );
+            self.retire_direct_openrouter_lease(&unfinished.client_request_id)
+                .await?;
         }
 
-        if lease_slot.is_none() {
-            // Recover any state finalized since daemon startup before proving a
-            // new lease request.
-            let _ = self.recover().await?;
-            *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
-        }
+        // Recover any state finalized since daemon startup before proving a
+        // new lease request, then unconditionally issue a new child key.
+        let _ = self.recover().await?;
+        *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
         Ok(())
     }
 
     async fn execute_direct_openrouter_streaming(
-        &self,
+        self: &Arc<Self>,
         request: CoreRequest,
-    ) -> Result<reqwest::Response, AuthError> {
+    ) -> Result<StreamingCoreResponse, AuthError> {
         self.ensure_scheme_agreement().await?;
+        let request_guard = self.direct_request_mutex.clone().lock_owned().await;
         let mut lease_guard = self.direct_lease.lock().await;
-        self.ensure_direct_openrouter_lease(&mut lease_guard)
+        self.open_fresh_direct_openrouter_lease(&mut lease_guard)
             .await?;
         let (upstream_path, upstream_body) =
             crate::compat::openrouter_request(&request.path, request.body);
-        let mut rotated = false;
+        let upstream = self
+            .send_on_request_scoped_openrouter_key(&mut lease_guard, &upstream_path, &upstream_body)
+            .await;
+        drop(lease_guard);
+
+        let (client_request_id, upstream) = upstream?;
+        let status = upstream.status();
+        let content_type = upstream
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .cloned();
+        let cache_control = upstream
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .cloned();
+        let finalizer = DirectOpenRouterStreamFinalizer {
+            service: self.clone(),
+            client_request_id: Some(client_request_id),
+            request_guard: Some(request_guard),
+        };
+        let state = (upstream.bytes_stream().boxed(), Some(finalizer), false);
+        let body = stream::unfold(state, |(mut upstream, mut finalizer, done)| async move {
+            if done {
+                return None;
+            }
+            match upstream.next().await {
+                Some(Ok(chunk)) => Some((Ok(chunk), (upstream, finalizer, false))),
+                Some(Err(error)) => {
+                    if let Some(finalizer) = finalizer.take() {
+                        finalizer.finish().await;
+                    }
+                    Some((Err(io::Error::other(error)), (upstream, finalizer, true)))
+                }
+                None => {
+                    if let Some(finalizer) = finalizer.take() {
+                        finalizer.finish().await;
+                    }
+                    None
+                }
+            }
+        })
+        .boxed();
+        Ok(StreamingCoreResponse {
+            status,
+            content_type,
+            cache_control,
+            body,
+        })
+    }
+
+    async fn send_on_request_scoped_openrouter_key(
+        &self,
+        lease_slot: &mut Option<ActiveOpenRouterLease>,
+        upstream_path: &str,
+        upstream_body: &Value,
+    ) -> Result<(String, reqwest::Response), AuthError> {
+        let mut replaced_rejected_key = false;
         loop {
-            let lease = lease_guard
+            let lease = lease_slot
                 .as_mut()
                 .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+            let client_request_id = lease.client_request_id.clone();
             match self
-                .send_verified_openrouter_request(lease, &upstream_path, &upstream_body)
+                .send_verified_openrouter_request(lease, upstream_path, upstream_body)
                 .await
             {
-                Ok(response) => {
-                    lease.successful_inferences = lease.successful_inferences.saturating_add(1);
-                    return Ok(response);
-                }
-                Err(error)
-                    if !rotated
-                        && is_rotatable_openrouter_key_failure(
-                            &error,
-                            lease.successful_inferences,
-                        ) =>
-                {
-                    let rejected_lease_id = lease.client_request_id.clone();
+                Ok(response) => return Ok((client_request_id, response)),
+                Err(error) if !replaced_rejected_key && is_rejected_openrouter_key(&error) => {
                     tracing::warn!(
-                        client_request_id = %rejected_lease_id,
+                        %client_request_id,
                         error = %error,
-                        "retiring rejected OpenRouter key and opening a replacement lease"
+                        "retiring rejected request-scoped key and opening one replacement"
                     );
-                    self.retire_direct_openrouter_lease(&rejected_lease_id)
+                    *lease_slot = None;
+                    self.retire_direct_openrouter_lease(&client_request_id)
                         .await?;
-                    *lease_guard = Some(self.issue_direct_openrouter_lease().await?);
-                    rotated = true;
+                    *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
+                    replaced_rejected_key = true;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    *lease_slot = None;
+                    if let Err(cleanup_error) = self
+                        .retire_direct_openrouter_lease(&client_request_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            %client_request_id,
+                            error = %cleanup_error,
+                            "could not retire rejected request-scoped OpenRouter key"
+                        );
+                    }
+                    return Err(error);
+                }
             }
         }
+    }
+
+    async fn finish_direct_openrouter_request(
+        &self,
+        client_request_id: &str,
+    ) -> Result<(), AuthError> {
+        {
+            let mut lease_slot = self.direct_lease.lock().await;
+            if lease_slot
+                .as_ref()
+                .is_some_and(|lease| lease.client_request_id == client_request_id)
+            {
+                *lease_slot = None;
+            }
+        }
+        self.retire_direct_openrouter_lease(client_request_id)
+            .await?;
+        tracing::info!(
+            %client_request_id,
+            "retired request-scoped OpenRouter key and recovered wallet"
+        );
+        Ok(())
     }
 
     async fn send_verified_openrouter_request(
@@ -939,8 +1065,6 @@ impl AuthService {
                     api_key: lease.api_key,
                     openrouter_api_base: lease.openrouter_api_base,
                     expires_at: lease.expires_at,
-                    settle_after: lease.settle_after,
-                    successful_inferences: 0,
                     verification,
                     verified,
                 });
@@ -1594,7 +1718,7 @@ fn is_transient_remote_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
-fn is_rotatable_openrouter_key_failure(error: &AuthError, successful_inferences: u64) -> bool {
+fn is_rejected_openrouter_key(error: &AuthError) -> bool {
     match error {
         AuthError::UpstreamResponse { status, .. }
             if *status == reqwest::StatusCode::UNAUTHORIZED =>
@@ -1602,21 +1726,12 @@ fn is_rotatable_openrouter_key_failure(error: &AuthError, successful_inferences:
             true
         }
         AuthError::UpstreamResponse { status, message }
-            if *status == reqwest::StatusCode::PAYMENT_REQUIRED =>
-        {
-            // A fresh replacement has the same total limit, so it cannot fix
-            // a request whose declared maximum was unaffordable from the
-            // outset. Rotation is useful only after this lease has spent some
-            // of its limit and OpenRouter identifies that limit as the cause.
-            successful_inferences > 0 && message.contains("openrouter_key_limit")
-        }
-        AuthError::UpstreamResponse { status, message }
             if *status == reqwest::StatusCode::FORBIDDEN =>
         {
             // OpenRouter also reports an exhausted total key limit as 403.
             // Match the structured error message narrowly because unrelated
             // permission and guardrail failures use the same status.
-            successful_inferences > 0 && is_openrouter_total_key_limit_error(message)
+            is_openrouter_total_key_limit_error(message)
         }
         _ => false,
     }
@@ -1805,8 +1920,8 @@ mod security_tests {
     use reqwest::StatusCode;
 
     use super::{
-        direct_remote_retry_delay, enforce_required_key_source,
-        is_rotatable_openrouter_key_failure, is_transient_remote_status, matches_trusted_url,
+        direct_remote_retry_delay, enforce_required_key_source, is_rejected_openrouter_key,
+        is_transient_remote_status, matches_trusted_url,
     };
     use crate::error::AuthError;
 
@@ -1846,42 +1961,33 @@ mod security_tests {
             Duration::from_secs(60)
         );
     }
-
     #[test]
-    fn key_rotation_does_not_retry_an_unaffordable_fresh_lease() {
+    fn request_scoped_key_replacement_is_narrow() {
         let unauthorized = AuthError::UpstreamResponse {
             status: StatusCode::UNAUTHORIZED,
             message: "invalid key".to_string(),
         };
-        assert!(is_rotatable_openrouter_key_failure(&unauthorized, 0));
+        assert!(is_rejected_openrouter_key(&unauthorized));
 
         let key_limit = AuthError::UpstreamResponse {
             status: StatusCode::PAYMENT_REQUIRED,
             message: r#"{"error":{"metadata":{"limit_source":"openrouter_key_limit"}}}"#
                 .to_string(),
         };
-        assert!(!is_rotatable_openrouter_key_failure(&key_limit, 0));
-        assert!(is_rotatable_openrouter_key_failure(&key_limit, 1));
-
-        let account_limit = AuthError::UpstreamResponse {
-            status: StatusCode::PAYMENT_REQUIRED,
-            message: r#"{"error":{"metadata":{"limit_source":"account"}}}"#.to_string(),
-        };
-        assert!(!is_rotatable_openrouter_key_failure(&account_limit, 1));
+        assert!(!is_rejected_openrouter_key(&key_limit));
 
         let total_key_limit = AuthError::UpstreamResponse {
             status: StatusCode::FORBIDDEN,
             message: r#"{"error":{"message":"Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/216fb8653233c25e6e60bbf30158f3e74c474b2b584ac1bfd40e0adec6c80f8b","code":403}}"#.to_string(),
         };
-        assert!(!is_rotatable_openrouter_key_failure(&total_key_limit, 0));
-        assert!(is_rotatable_openrouter_key_failure(&total_key_limit, 1));
+        assert!(is_rejected_openrouter_key(&total_key_limit));
 
         let permission_denied = AuthError::UpstreamResponse {
             status: StatusCode::FORBIDDEN,
             message: r#"{"error":{"message":"Request blocked by guardrail","code":403}}"#
                 .to_string(),
         };
-        assert!(!is_rotatable_openrouter_key_failure(&permission_denied, 1));
+        assert!(!is_rejected_openrouter_key(&permission_denied));
     }
 }
 

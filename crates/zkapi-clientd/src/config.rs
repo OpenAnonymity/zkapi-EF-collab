@@ -10,8 +10,8 @@ pub enum RequestMode {
     /// The zkAPI server forwards each LLM request to its configured provider.
     #[default]
     Proxy,
-    /// The local daemon leases a bounded OpenRouter key and sends prompts
-    /// directly to OpenRouter; the zkAPI server sees only aggregate usage.
+    /// The local daemon leases a new bounded OpenRouter key per inference and
+    /// sends prompts directly; the zkAPI server sees only lease settlement.
     DirectOpenrouter,
 }
 

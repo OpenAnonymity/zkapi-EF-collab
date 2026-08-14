@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -40,6 +40,7 @@ struct OpenRouterState {
     deletes: Arc<Mutex<usize>>,
     inference_attempts: Arc<Mutex<usize>>,
     inference_failures_remaining: Arc<Mutex<usize>>,
+    key_usage: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[derive(Clone, Default)]
@@ -97,6 +98,7 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             return Err(StatusCode::UNAUTHORIZED);
         }
         state.create_bodies.lock().unwrap().push(body.clone());
+        let issuance = state.create_bodies.lock().unwrap().len();
         let canonical_expiry = format!(
             "{}.000Z",
             body["expires_at"]
@@ -105,9 +107,9 @@ fn openrouter_router(state: OpenRouterState) -> Router {
                 .trim_end_matches('Z')
         );
         Ok(Json(json!({
-            "key": "sk-or-v1-runtime-test",
+            "key": format!("sk-or-v1-runtime-test-{issuance}"),
             "data": {
-                "hash": "runtime-hash",
+                "hash": format!("runtime-hash-{issuance}"),
                 "usage": 0.0,
                 "limit": body["limit"],
                 "expires_at": canonical_expiry,
@@ -120,11 +122,11 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> Result<Response, (StatusCode, Json<Value>)> {
-        if headers
+        let api_key = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            != Some("Bearer sk-or-v1-runtime-test")
-        {
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if !api_key.is_some_and(|key| key.starts_with("sk-or-v1-runtime-test-")) {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": { "message": "invalid key" } })),
@@ -146,13 +148,14 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             ));
         }
         drop(failures);
+        let api_key = api_key.unwrap().to_string();
+        let prior_key_requests = *state.key_usage.lock().unwrap().get(&api_key).unwrap_or(&0);
         // A bounded child key eventually rejects requests whose model-default
-        // maximum completion could exceed the remaining credit, even when the
-        // preceding completions were short. Reproduce the quick-start failure
-        // after two unconstrained requests.
+        // maximum completion could exceed its remaining credit. This mock
+        // catches regressions that accidentally reuse one key across calls.
         if body.get("max_tokens").is_none()
             && body.get("max_completion_tokens").is_none()
-            && state.prompts.lock().unwrap().len() >= 2
+            && prior_key_requests >= 2
         {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
@@ -169,6 +172,7 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             .unwrap_or_default()
             .to_string();
         state.prompts.lock().unwrap().push(prompt.clone());
+        *state.key_usage.lock().unwrap().entry(api_key).or_default() += 1;
         if body.get("stream").and_then(Value::as_bool) == Some(true) {
             let chunks = VecDeque::from([
                 Bytes::from_static(
@@ -212,7 +216,7 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         Path(hash): Path<String>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, StatusCode> {
-        if hash != "runtime-hash"
+        if !hash.starts_with("runtime-hash-")
             || headers
                 .get(AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
@@ -220,7 +224,8 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        let calls = state.prompts.lock().unwrap().len();
+        let key = hash.replacen("runtime-hash-", "sk-or-v1-runtime-test-", 1);
+        let calls = *state.key_usage.lock().unwrap().get(&key).unwrap_or(&0);
         Ok(Json(json!({
             "data": { "hash": hash, "usage": 0.000006 * calls as f64, "limit": 0.001 }
         })))
@@ -230,7 +235,7 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         Path(hash): Path<String>,
         headers: HeaderMap,
     ) -> StatusCode {
-        if hash != "runtime-hash"
+        if !hash.starts_with("runtime-hash-")
             || headers
                 .get(AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
@@ -408,7 +413,7 @@ fn setup_directory() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_request() {
+async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() {
     let directory = test_directory();
     let wallet_directory = directory.join("wallet");
     let contract = Felt252::from_u64(0xdeadbeef);
@@ -540,9 +545,9 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         .await
         .unwrap();
     if !live_openrouter {
-        // Reproduce OpenRouter's intermittent provider_unavailable response on
-        // a reused lease. The client should absorb the 502 and retry the exact
-        // inference request without opening another lease.
+        // Reproduce OpenRouter's intermittent provider_unavailable response.
+        // The client should absorb the 502 and retry the exact inference on
+        // this request's fresh key.
         *openrouter_state
             .inference_failures_remaining
             .lock()
@@ -649,30 +654,23 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         let final_chunk: Value = serde_json::from_slice(&final_chunk).unwrap();
         assert_eq!(final_chunk["message"]["content"], "");
         assert_eq!(final_chunk["done"], true);
+        drop(chunks);
+
+        // Streaming cleanup runs when the final body is consumed or dropped.
+        // Wait for it so the assertions below also cover disconnect cleanup.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if *openrouter_state.deletes.lock().unwrap() == 4 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("all four request-scoped keys should be retired promptly");
     }
 
-    // Exercise the README usage pattern repeatedly. Before client-side output
-    // bounding, the mock's lease headroom check returns 402 on request three;
-    // the local route used to disguise that response as 502.
-    if !live_openrouter {
-        for number in 3..=8 {
-            service
-                .execute_request(CoreRequest::post_json(
-                    "/v1/chat/completions",
-                    json!({
-                        "model": "openai/gpt-4o-mini",
-                        "messages": [{
-                            "role": "user",
-                            "content": format!("private prompt {number}")
-                        }]
-                    }),
-                ))
-                .await
-                .unwrap();
-        }
-    }
-
-    assert_eq!(first.client_request_id, second.client_request_id);
+    assert_ne!(first.client_request_id, second.client_request_id);
     if live_openrouter {
         assert!(
             first.payload.as_ref().unwrap()["choices"][0]["message"]["content"]
@@ -700,26 +698,21 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
                 "private prompt two",
                 "stream prompt",
                 "ollama stream prompt",
-                "private prompt 3",
-                "private prompt 4",
-                "private prompt 5",
-                "private prompt 6",
-                "private prompt 7",
-                "private prompt 8",
             ]
         );
-        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 11);
-        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
-        let create_body = openrouter_state.create_bodies.lock().unwrap()[0].clone();
-        assert_eq!(create_body["limit"], 0.001);
-        assert_eq!(create_body["include_byok_in_limit"], true);
-        assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
+        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 4);
+        for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {
+            assert_eq!(create_body["limit"], 0.001);
+            assert_eq!(create_body["include_byok_in_limit"], true);
+            assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
+        }
     }
 
     let lease = store
         .lookup_openrouter_lease(&first.client_request_id)
         .unwrap();
-    assert_eq!(lease.status, "active");
+    assert_eq!(lease.status, "finalized");
     assert!(!lease.api_request.payload.contains("private prompt"));
     assert!(!serde_json::to_string(&lease.api_request)
         .unwrap()
@@ -736,21 +729,17 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
             .lookup_by_client_id(&first.client_request_id)
             .unwrap()
             .status,
-        zkapi_types::NullifierStatus::Reserved
+        zkapi_types::NullifierStatus::Finalized
     );
-    let sleep_seconds = lease.settle_after.saturating_sub(now_seconds()) + 1;
-    tokio::time::sleep(Duration::from_secs(sleep_seconds)).await;
-    processor.settle_due_openrouter_leases().await;
-
     let recovered = service.recover().await.unwrap();
-    assert!(recovered.recovered);
-    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000060);
+    assert!(!recovered.recovered);
+    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000006);
     let recovered_balance = recovered.wallet.note.unwrap().current_balance;
     if live_openrouter {
         assert!(recovered_balance < deposit);
     } else {
-        assert_eq!(recovered_balance, deposit - expected_charge);
-        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
+        assert_eq!(recovered_balance, deposit - (4 * expected_charge));
+        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 4);
     }
     let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
     if live_openrouter {
@@ -764,8 +753,8 @@ async fn multiple_direct_chats_share_one_private_lease_then_settle_one_zkapi_req
         .unwrap_or_default()
         .contains("private prompt"));
 
-    // The ordinary proxy route remains live on the same server. It consumes a
-    // second zkAPI request and, unlike direct mode, EchoProvider sees/echoes it.
+    // The ordinary proxy route remains live on the same server and, unlike
+    // direct mode, EchoProvider sees/echoes the request body.
     let mut proxy_wallet = Wallet::new(ClientConfig {
         protocol_version: 2,
         chain_id: 1,
@@ -991,12 +980,13 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         .unwrap();
     assert_eq!(lease.key_source, "oa_org");
     if !live_org {
-        let verifier_requests = flow.verifier_requests.lock().unwrap();
-        assert_eq!(
-            verifier_requests[1]["key_valid_till"].as_u64(),
-            Some(lease.expires_at + 30)
-        );
-        drop(verifier_requests);
+        {
+            let verifier_requests = flow.verifier_requests.lock().unwrap();
+            assert_eq!(
+                verifier_requests[1]["key_valid_till"].as_u64(),
+                Some(lease.expires_at + 30)
+            );
+        }
         let first_lease_id = flow.org_requests.lock().unwrap()[0]["client_request_id"]
             .as_str()
             .unwrap()
@@ -1004,12 +994,11 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         let retired = store.lookup_openrouter_lease(&first_lease_id).unwrap();
         assert_eq!(retired.status, "finalized");
         assert_eq!(retired.charge_applied, Some(request_cap));
-        assert_eq!(lease.status, "active");
+        assert_eq!(lease.status, "finalized");
 
-        // Simulate a daemon restart. The active lease's one-show key exists
-        // only in the old process memory, while the pending wallet proof is
-        // durable. The replacement service must retire/recover that lease and
-        // complete this call with a newly issued key instead of returning 409.
+        // A replacement daemon must start from the just-recovered wallet and
+        // issue another fresh request-scoped key instead of finding a pending
+        // lease from the preceding inference.
         let restarted = AuthService::new(auth_config).unwrap();
         let after_restart = restarted
             .execute_request(CoreRequest::post_json(
@@ -1039,7 +1028,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
                 .lookup_openrouter_lease(&after_restart.client_request_id)
                 .unwrap()
                 .status,
-            "active"
+            "finalized"
         );
         assert_eq!(flow.org_requests.lock().unwrap().len(), 3);
         assert_eq!(

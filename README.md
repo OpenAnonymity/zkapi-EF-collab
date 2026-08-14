@@ -70,22 +70,21 @@ mode with:
 ./target/release/zkapi client --mode direct-openrouter
 ```
 
-The first local LLM call creates one Groth16 authorization and receives a
-short-lived OpenRouter runtime key. The local daemon then calls OpenRouter
-directly and reuses that key for sequential chats until it expires. After
-expiry, `zkapi-serverd` reads the key's authoritative aggregate USD usage,
-applies one zkAPI state transition, and the local daemon recovers it before
-opening the next lease. OpenRouter still sees the LLM traffic; the zkAPI server
-does not. The runtime key is held only in local process memory and is never
-stored by the server.
+Every local LLM call creates one Groth16 authorization and receives a new,
+short-lived OpenRouter runtime key. The local daemon uses that key for exactly
+one inference, retires it after the buffered response or final streaming chunk,
+and recovers the resulting zkAPI state before opening the next lease. OpenRouter
+still sees the LLM traffic; the zkAPI server does not. Runtime keys are held only
+in local process memory, are never stored by the server, and are never reused by
+a later inference.
 
 When the server is configured with `--oa-org-url`, the response also contains
 the station ID, expiry, station signature, org signature, and verifier URL used
 by oa-chat. The local daemon submits that evidence to its independently
 configured `--oa-verifier-url` and refuses to send a prompt unless the verifier
 accepts the key. Because the station owns the OpenRouter management account,
-zkAPI cannot read actual child-key usage in this mode; the lease settles at its
-proof-bound hard spending limit rather than aggregate usage.
+zkAPI cannot read actual child-key usage in this mode; each request-scoped lease
+settles at its proof-bound hard spending limit rather than aggregate usage.
 
 Clients that require this protection must set `--require-oa-org-key-source`
 (or `ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE=true`). This independent policy rejects a
