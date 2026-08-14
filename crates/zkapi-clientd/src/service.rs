@@ -1610,8 +1610,28 @@ fn is_rotatable_openrouter_key_failure(error: &AuthError, successful_inferences:
             // of its limit and OpenRouter identifies that limit as the cause.
             successful_inferences > 0 && message.contains("openrouter_key_limit")
         }
+        AuthError::UpstreamResponse { status, message }
+            if *status == reqwest::StatusCode::FORBIDDEN =>
+        {
+            // OpenRouter also reports an exhausted total key limit as 403.
+            // Match the structured error message narrowly because unrelated
+            // permission and guardrail failures use the same status.
+            successful_inferences > 0 && is_openrouter_total_key_limit_error(message)
+        }
         _ => false,
     }
+}
+
+fn is_openrouter_total_key_limit_error(message: &str) -> bool {
+    serde_json::from_str::<Value>(message)
+        .ok()
+        .and_then(|body| {
+            body.get("error")?
+                .get("message")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .is_some_and(|message| message.starts_with("Key limit exceeded (total limit)"))
 }
 
 fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -1848,6 +1868,20 @@ mod security_tests {
             message: r#"{"error":{"metadata":{"limit_source":"account"}}}"#.to_string(),
         };
         assert!(!is_rotatable_openrouter_key_failure(&account_limit, 1));
+
+        let total_key_limit = AuthError::UpstreamResponse {
+            status: StatusCode::FORBIDDEN,
+            message: r#"{"error":{"message":"Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/216fb8653233c25e6e60bbf30158f3e74c474b2b584ac1bfd40e0adec6c80f8b","code":403}}"#.to_string(),
+        };
+        assert!(!is_rotatable_openrouter_key_failure(&total_key_limit, 0));
+        assert!(is_rotatable_openrouter_key_failure(&total_key_limit, 1));
+
+        let permission_denied = AuthError::UpstreamResponse {
+            status: StatusCode::FORBIDDEN,
+            message: r#"{"error":{"message":"Request blocked by guardrail","code":403}}"#
+                .to_string(),
+        };
+        assert!(!is_rotatable_openrouter_key_failure(&permission_denied, 1));
     }
 }
 
