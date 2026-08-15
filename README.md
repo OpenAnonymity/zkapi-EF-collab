@@ -25,8 +25,43 @@ git submodule update --init --recursive
 cargo build --release --bin zkapi
 cargo test --workspace
 node --test funding-page/wallet.test.cjs
+node --test funding-page/browser-wallet.test.cjs
 (cd protocol/contracts && forge test)
 ```
+
+### Use OA Chat directly from a website
+
+The OA Chat client can also run the zkAPI v2 wallet and Groth16 prover entirely
+in the browser, with no local daemon. Build a deployable static directory with:
+
+```bash
+cargo install wasm-bindgen-cli --version 0.2.117 --locked
+./scripts/build-browser-client.sh
+python3 -m http.server 4173 --directory dist/browser
+```
+
+Open `http://127.0.0.1:4173/funding/`. The checked-in browser configuration
+uses the public Sepolia demo by default. A deployment can replace
+`funding/browser-config.json`. A manifest selected with `?zkapiDeployment=` is
+accepted only when its exact URL is also listed in that file's
+`allowed_deployment_manifest_urls`, preventing a shared link from silently
+substituting a different deployment. The manifest's vault, chain, billing
+token, server and indexer origins, signing keys, proving-key hashes, charge cap,
+OpenRouter origin, and OA verifier must also match `trusted_deployment`.
+
+The initial static payload includes a 2.2 MB WASM module. The 5.4 MB request
+and 7.2 MB withdrawal proving keys are downloaded and integrity-checked only
+when the corresponding proof is needed, then cached by the browser. Proofs run
+in a Web Worker. Private note state and the write-ahead recovery journal are
+stored atomically in IndexedDB, mutations are serialized with Web Locks across
+tabs, and the site requests persistent browser storage. Clearing site data can
+still make an active note unrecoverable, so users should withdraw before
+clearing the OA Chat origin. Production hosting should use HTTPS, a strict CSP,
+no third-party scripts, and immutable integrity-pinned WASM/proving-key assets.
+
+The daemon remains supported. On a daemon-served OA Chat page it is selected
+automatically; `?zkapiMode=browser` forces the WebAssembly wallet and
+`?zkapiMode=daemon` disables browser fallback.
 
 The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,

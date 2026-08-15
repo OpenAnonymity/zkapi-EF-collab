@@ -83,7 +83,7 @@ export default class RightPanel {
             <div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
                 <section class="border-b border-border p-3">
                     <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-1.5"><span class="zkapi-status-dot ${hasError ? 'error' : 'online'}"></span><span class="text-xs font-medium text-foreground">${hasError ? 'Daemon unavailable' : modeTitle}</span></div>
+                        <div class="flex items-center gap-1.5"><span class="zkapi-status-dot ${hasError ? 'error' : 'online'}"></span><span class="text-xs font-medium text-foreground">${hasError ? 'Payment unavailable' : modeTitle}</span></div>
                         <span class="text-[10px] text-muted-foreground">local</span>
                     </div>
                     <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">${hasError ? this.escapeHtml(zkapiClient.lastError.message) : modeDetail}</p>
@@ -116,7 +116,7 @@ export default class RightPanel {
                         <div><dt>Indexer</dt><dd>${zkapiClient.config ? 'connected' : 'checking'}</dd></div>
                         <div><dt>Withdrawal</dt><dd>${zkapiClient.withdrawal?.phase || 'ready'}</dd></div>
                     </dl>
-                    <p class="mt-5 text-center text-[9px] text-muted-foreground/60">OA Chat UI · zkAPI payment adapter · MIT</p>
+                    <p class="mt-5 text-center text-[9px] text-muted-foreground/60">OA Chat · Private prepaid access · MIT</p>
                 </section>
             </div>`;
 

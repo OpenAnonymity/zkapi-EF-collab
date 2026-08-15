@@ -116,7 +116,7 @@ export default class WelcomePanel {
                 </div>
                 <div class="mt-6 rounded-xl border border-border bg-muted/20 p-4">
                     <p class="text-sm font-medium text-foreground">Private access, funded with MetaMask</p>
-                    <p class="mt-1.5 text-xs leading-relaxed text-muted-foreground">OA Chat uses a zkAPI private balance for access. Deposit once, then chat normally. Each chat reuses one bounded ephemeral key for its title, response, and follow-ups.</p>
+                    <p class="mt-1.5 text-xs leading-relaxed text-muted-foreground">OA Chat uses a private prepaid balance for access. Deposit once, then chat normally. Each chat reuses one bounded ephemeral key for its title, response, and follow-ups.</p>
                 </div>
                 <label class="mt-4 block">
                     <span class="text-xs font-medium text-foreground">Starting balance</span>
@@ -126,11 +126,11 @@ export default class WelcomePanel {
                     </div>
                 </label>
                 ${zkapiClient.config?.funding?.demo_mint_enabled ? '<p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">On Sepolia, demo billing tokens are minted automatically if needed. MetaMask only needs test ETH for gas.</p>' : ''}
-                ${daemonError ? `<p class="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">Local daemon: ${this.escapeHtml(daemonError)}</p>` : ''}
+                ${daemonError ? `<p class="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">Payment service: ${this.escapeHtml(daemonError)}</p>` : ''}
                 ${this.error ? `<p class="mt-3 text-xs text-destructive">${this.escapeHtml(this.error)}</p>` : ''}
                 <button id="welcome-fund-btn" class="zkapi-primary-button mt-5 w-full" type="button">Continue with MetaMask</button>
                 <button id="welcome-skip-btn" class="btn-ghost-hover mt-2 w-full rounded-lg px-3 py-2 text-xs text-muted-foreground hover:text-foreground" type="button">Not now</button>
-                <p class="mt-4 text-center text-[10px] leading-relaxed text-muted-foreground/70">The note secret and chat history stay in this local daemon and browser.</p>
+                <p class="mt-4 text-center text-[10px] leading-relaxed text-muted-foreground/70">The note secret and chat history stay on this device.</p>
             </div>`;
     }
 
@@ -153,7 +153,7 @@ export default class WelcomePanel {
                 </div>
                 <h2 class="mt-4 text-center text-lg font-semibold text-foreground">You’re ready to chat</h2>
                 <p class="mt-2 text-center text-sm text-muted-foreground">Private balance: <strong class="text-foreground">${zkapiClient.formatMoney(zkapiClient.note?.current_balance)}</strong></p>
-                <p class="mt-3 text-center text-xs leading-relaxed text-muted-foreground">Everything else works like OA Chat. zkAPI payment state is available from <strong>Private balance</strong> in the sidebar.</p>
+                <p class="mt-3 text-center text-xs leading-relaxed text-muted-foreground">Everything else works like OA Chat. Payment state is available from <strong>Private balance</strong> in the sidebar.</p>
                 <button id="welcome-start-btn" class="zkapi-primary-button mt-6 w-full" type="button">Start chatting</button>
             </div>`;
     }

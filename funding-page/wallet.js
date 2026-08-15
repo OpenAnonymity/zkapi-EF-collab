@@ -220,7 +220,10 @@
       if (log.topics.length >= 3 && data.length >= 192) {
         return {
           noteId: BigInt(log.topics[1]),
+          commitment: log.topics[2],
+          amount: BigInt(`0x${data.slice(0, 64)}`),
           expiryTs: BigInt(`0x${data.slice(64, 128)}`),
+          newRoot: BigInt(`0x${data.slice(128, 192)}`),
         };
       }
     }

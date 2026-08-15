@@ -44,7 +44,10 @@ test("NoteDeposited receipt parsing returns canonical note id and expiry", () =>
   };
   assert.deepEqual(wallet.parseNoteDeposited(receipt, vault), {
     noteId: 21n,
+    commitment: `0x${wallet.abiWord(42n)}`,
+    amount: 100_000n,
     expiryTs: 1_800_000_000n,
+    newRoot: 99n,
   });
 });
 

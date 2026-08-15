@@ -131,7 +131,7 @@ export default class AccountModal {
                 <div class="p-5 space-y-4">
                     <div class="rounded-lg border border-border bg-muted/20 p-4">
                         <p class="text-sm font-medium text-foreground">Fund once, chat privately</p>
-                        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">MetaMask deposits billing tokens into a private zkAPI note. The note secret and chat history remain on this machine.</p>
+                        <p class="mt-1 text-xs leading-relaxed text-muted-foreground">MetaMask deposits billing tokens into a private prepaid note. The note secret and chat history remain on this machine.</p>
                     </div>
                     <label class="block">
                         <span class="text-xs font-medium text-foreground">Deposit amount</span>
@@ -241,7 +241,7 @@ export default class AccountModal {
         const title = this.view === 'withdraw' ? 'Withdraw private balance' : 'Private balance';
         const subtitle = this.view === 'withdraw'
             ? 'Return the remaining note balance to MetaMask'
-            : 'OA Chat · zkAPI private payment';
+            : 'OA Chat · private prepaid access';
         this.overlay.innerHTML = `
             <div role="dialog" aria-modal="true" aria-labelledby="zkapi-payment-title" class="${MODAL_CLASSES}">
                 <div class="flex items-start justify-between border-b border-border px-5 py-4">
@@ -269,7 +269,7 @@ export default class AccountModal {
         }));
         this.overlay.querySelector('#zkapi-refresh-btn')?.addEventListener('click', () => this.run(async () => {
             await zkapiClient.refresh();
-            this.setStatus('Balance refreshed from the local daemon.');
+            this.setStatus('Private balance refreshed.');
         }));
         this.overlay.querySelector('#zkapi-withdraw-view-btn')?.addEventListener('click', () => {
             this.view = 'withdraw';

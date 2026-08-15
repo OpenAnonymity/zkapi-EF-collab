@@ -1,0 +1,32 @@
+{
+  "deployment_manifest_url": "https://d33l4w2z2nh4cg.cloudfront.net/config.json",
+  "allowed_deployment_manifest_urls": [
+    "https://d33l4w2z2nh4cg.cloudfront.net/config.json"
+  ],
+  "trusted_deployment": {
+    "deployment_id": "zkapi-ef-sepolia-groth16-v2-20260811",
+    "chain_id": 11155111,
+    "contract_address": "0x590Df9aBBfB21074016dAA486c771AE0aF729ee2",
+    "billing_token_address": "0x7773548bCb3Af5c4Ed1FCDBFE763855338C6822f",
+    "protocol_server_url": "https://d33l4w2z2nh4cg.cloudfront.net",
+    "indexer_url": "https://d33l4w2z2nh4cg.cloudfront.net",
+    "request_charge_cap": 50000,
+    "state_signing_key": {
+      "x": "0x68b03dd2caf06ee9496c41808866d50eebc6499dc6de33cc043a657bf852751",
+      "y": "0xa093a54ed79f4e88652b6bbe9bf4fc3794a0779e513045ed2a75699564792cb"
+    },
+    "clearance_signing_key": {
+      "x": "0x1bec3c118854b4ffcde1fb6dead674808c0c38e4f45b54c33984460bb0fb8d2b",
+      "y": "0x239f4e558d7dfde57e0c23066e6cf94e628d7b6b49e728a5ce0b2d0ab0992898"
+    },
+    "request_proving_key_sha256": "faa0e68954ade5e9709fa74baca3380cf0ff0d325ff06742385f33036123928e",
+    "withdrawal_proving_key_sha256": "92a90139c87ae0e331fddc92a36e231047e1b4ae95474521d9a75f9b5a7bd0ab",
+    "openrouter_inference_base": "https://openrouter.ai/api/v1",
+    "verifier_url": "https://verifier2.openanonymity.ai"
+  },
+  "proving_keys_base_url": "./proofs/",
+  "credits_per_usd": 1000000,
+  "suggested_deposit_amount": 5000000,
+  "openrouter_requests_per_key": 5,
+  "require_oa_key_source": true
+}

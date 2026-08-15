@@ -1,4 +1,4 @@
-import zkapiClient, { SESSION_HEADER, ZkapiHttpError } from './services/zkapiClient.js';
+import zkapiClient, { ZkapiHttpError } from './services/zkapiClient.js';
 import { resolveProviderFromModelId } from './services/providerRegistry.js';
 
 const MODEL_CACHE_KEY = 'zkapi-model-catalog-v1';
@@ -87,16 +87,12 @@ class ZkapiInferenceAPI {
     }
 
     async request(path, body, sessionId, abortController = null) {
-        const response = await fetch(path, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'content-type': 'application/json',
-                [SESSION_HEADER]: sessionId
-            },
-            body: JSON.stringify({ ...body, stream: false }),
-            signal: abortController?.signal
-        });
+        const response = await zkapiClient.inferenceFetch(
+            path,
+            { ...body, stream: false },
+            sessionId,
+            abortController?.signal
+        );
         const text = await response.text();
         let payload = {};
         try {
