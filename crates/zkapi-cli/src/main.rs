@@ -12,7 +12,7 @@ use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor, RequestMode,
-    WithdrawalMode,
+    WithdrawalMode, DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
 };
 use zkapi_serverd::config::{
     MeteredConfig, OpenRouterLeaseConfig, OpenRouterLeaseSourceConfig, ProviderKind, ServerConfig,
@@ -90,6 +90,14 @@ struct Cli {
     /// Require verifier-backed OA-org keys and reject direct/legacy leases.
     #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
     require_oa_org_key_source: bool,
+    /// Maximum local LLM requests sent through one ephemeral OpenRouter key.
+    #[arg(
+        long,
+        env = "ZKAPI_OPENROUTER_REQUESTS_PER_KEY",
+        default_value_t = DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    openrouter_requests_per_key: u32,
     #[command(subcommand)]
     command: Commands,
 }
@@ -376,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
                 oa_verifier_url: cli.oa_verifier_url.clone(),
                 openrouter_inference_base: cli.openrouter_inference_base.clone(),
                 require_oa_org_key_source: cli.require_oa_org_key_source,
+                openrouter_requests_per_key: cli.openrouter_requests_per_key,
             })
             .await?
         }
@@ -657,6 +666,7 @@ fn build_auth_service_with_mode(
         oa_verifier_url: cli.oa_verifier_url.clone(),
         openrouter_inference_base: cli.openrouter_inference_base.clone(),
         require_oa_org_key_source: cli.require_oa_org_key_source,
+        openrouter_requests_per_key: cli.openrouter_requests_per_key,
     })
     .map_err(Into::into)
 }
@@ -676,6 +686,15 @@ struct OneCommandClientOptions<'a> {
     oa_verifier_url: String,
     openrouter_inference_base: String,
     require_oa_org_key_source: bool,
+    openrouter_requests_per_key: u32,
+}
+
+struct LocalClientPolicy {
+    request_mode: RequestMode,
+    oa_verifier_url: String,
+    openrouter_inference_base: String,
+    require_oa_org_key_source: bool,
+    openrouter_requests_per_key: u32,
 }
 
 async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow::Result<()> {
@@ -691,6 +710,7 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
         oa_verifier_url,
         openrouter_inference_base,
         require_oa_org_key_source,
+        openrouter_requests_per_key,
     } = options;
     let manifest = load_deployment_manifest(deployment).await?;
     validate_deployment_manifest(&manifest)?;
@@ -702,10 +722,13 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
         &manifest,
         state_dir.clone(),
         listen,
-        request_mode,
-        oa_verifier_url,
-        openrouter_inference_base,
-        require_oa_org_key_source,
+        LocalClientPolicy {
+            request_mode,
+            oa_verifier_url,
+            openrouter_inference_base,
+            require_oa_org_key_source,
+            openrouter_requests_per_key,
+        },
     )?;
     service.ensure_request_mode_available().await?;
 
@@ -832,11 +855,15 @@ fn auth_service_from_manifest(
     manifest: &DeploymentManifest,
     state_dir: PathBuf,
     listen: &str,
-    request_mode: RequestMode,
-    oa_verifier_url: String,
-    openrouter_inference_base: String,
-    require_oa_org_key_source: bool,
+    policy: LocalClientPolicy,
 ) -> anyhow::Result<Arc<AuthService>> {
+    let LocalClientPolicy {
+        request_mode,
+        oa_verifier_url,
+        openrouter_inference_base,
+        require_oa_org_key_source,
+        openrouter_requests_per_key,
+    } = policy;
     let models = if manifest.models.is_empty() {
         vec![ModelDescriptor::new("openai/gpt-4o-mini")]
     } else {
@@ -877,6 +904,7 @@ fn auth_service_from_manifest(
         oa_verifier_url,
         openrouter_inference_base,
         require_oa_org_key_source,
+        openrouter_requests_per_key,
     })
     .map_err(Into::into)
 }
@@ -1471,6 +1499,8 @@ mod tests {
     fn client_accepts_prompt_private_openrouter_mode() {
         let cli = Cli::try_parse_from([
             "zkapi",
+            "--openrouter-requests-per-key",
+            "3",
             "client",
             "--mode",
             "direct-openrouter",
@@ -1484,6 +1514,17 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(cli.openrouter_requests_per_key, 3);
+    }
+
+    #[test]
+    fn client_defaults_to_five_requests_per_ephemeral_key() {
+        let cli = Cli::try_parse_from(["zkapi", "client", "--no-fund"]).unwrap();
+        assert_eq!(
+            cli.openrouter_requests_per_key,
+            DEFAULT_OPENROUTER_REQUESTS_PER_KEY
+        );
+        assert_eq!(cli.openrouter_requests_per_key, 5);
     }
 
     #[test]

@@ -70,22 +70,24 @@ mode with:
 ./target/release/zkapi client --mode direct-openrouter
 ```
 
-Every local LLM call creates one Groth16 authorization and receives a new,
-short-lived OpenRouter runtime key. The local daemon uses that key for exactly
-one inference, retires it after the buffered response or final streaming chunk,
-and recovers the resulting zkAPI state before opening the next lease. OpenRouter
-still sees the LLM traffic; the zkAPI server does not. Runtime keys are held only
-in local process memory, are never stored by the server, and are never reused by
-a later inference.
+Each Groth16 authorization receives one short-lived OpenRouter runtime key. By
+default the local daemon sends at most five sequential LLM requests through
+that key, then disables it, settles its aggregate usage, and obtains a new key.
+Set `--openrouter-requests-per-key 1` before the `client` subcommand for one key
+per request, or choose another positive limit to trade fewer proofs and
+settlement pauses for greater cross-request linkability. OpenRouter still sees
+the LLM traffic; the zkAPI server does not. Runtime keys are held only in local
+process memory and are never stored by the server.
 
 When the server is configured with `--oa-org-url`, the response also contains
 the station ID, expiry, station signature, org signature, and verifier URL used
 by oa-chat. The local daemon submits that evidence to its independently
 configured `--oa-verifier-url` and refuses to send a prompt unless the verifier
 accepts the key. Because the station owns the OpenRouter management account,
-the station disables each request-scoped key when zkAPI retires it (or at its
-provider-enforced expiry), waits for usage to stabilize, and persists a signed
-aggregate-usage receipt before deleting the key. The org verifies and
+the station disables each key when zkAPI retires it after the configured
+request count (or at its provider-enforced expiry), waits for usage to
+stabilize, and persists a signed aggregate-usage receipt before deleting the
+key. The org verifies and
 countersigns that receipt, and zkAPI charges the reported micro-dollar usage
 rather than the reserved hard limit.
 

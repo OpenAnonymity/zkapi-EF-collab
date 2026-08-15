@@ -24,9 +24,17 @@ Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
   --mode direct-openrouter --initial-credits 5000000
 ```
 
-The larger Sepolia test-token deposit supports about 100 requests at the demo's
-$0.05 cap. Every inference receives a new child key, and the client retires it
-after that response; a depleted key is never reused by the next request.
+The larger Sepolia test-token deposit reserves enough for about 100
+maximum-cost lease windows at the demo's $0.05 cap. By default a child key
+serves at most five sequential LLM
+requests before the client disables it, settles measured aggregate usage, and
+opens the next lease. Requests sharing a key are linkable to OpenRouter. To use
+one key per request, put `--openrouter-requests-per-key 1` before `client`:
+
+```bash
+./target/release/zkapi --require-oa-org-key-source \
+  --openrouter-requests-per-key 1 client --mode direct-openrouter
+```
 
 Omit `--address` to let `cast` derive the address and prompt securely for the
 private key, or add `--address 0x...`. Funding prompts for the private key once,

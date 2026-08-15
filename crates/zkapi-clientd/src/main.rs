@@ -5,7 +5,9 @@
 //! [`AuthService`], and serves the HTTP API on the configured address.
 
 use clap::{Parser, ValueEnum};
-use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor, RequestMode};
+use zkapi_clientd::{
+    run, AuthConfig, AuthService, ModelDescriptor, RequestMode, DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
+};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::Felt252;
 
@@ -82,6 +84,14 @@ struct Args {
     /// Require verifier-backed OA-org keys and reject direct/legacy leases.
     #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
     require_oa_org_key_source: bool,
+    /// Maximum local LLM requests sent through one ephemeral OpenRouter key.
+    #[arg(
+        long,
+        env = "ZKAPI_OPENROUTER_REQUESTS_PER_KEY",
+        default_value_t = DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    openrouter_requests_per_key: u32,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -155,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         oa_verifier_url: args.oa_verifier_url,
         openrouter_inference_base: args.openrouter_inference_base,
         require_oa_org_key_source: args.require_oa_org_key_source,
+        openrouter_requests_per_key: args.openrouter_requests_per_key,
     })?;
 
     service.ensure_request_mode_available().await?;

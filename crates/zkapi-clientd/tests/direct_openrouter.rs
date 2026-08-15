@@ -151,24 +151,6 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         }
         drop(failures);
         let api_key = api_key.unwrap().to_string();
-        let prior_key_requests = *state.key_usage.lock().unwrap().get(&api_key).unwrap_or(&0);
-        // A bounded child key eventually rejects requests whose model-default
-        // maximum completion could exceed its remaining credit. This mock
-        // catches regressions that accidentally reuse one key across calls.
-        if body.get("max_tokens").is_none()
-            && body.get("max_completion_tokens").is_none()
-            && prior_key_requests >= 2
-        {
-            return Err((
-                StatusCode::PAYMENT_REQUIRED,
-                Json(json!({
-                    "error": {
-                        "code": 402,
-                        "message": "This request requires more credits than are available"
-                    }
-                })),
-            ));
-        }
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
@@ -484,7 +466,7 @@ fn setup_directory() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() {
+async fn bounded_lease_rotates_after_the_configured_request_count() {
     let directory = test_directory();
     let wallet_directory = directory.join("wallet");
     let contract = Felt252::from_u64(0xdeadbeef);
@@ -590,6 +572,7 @@ async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() 
         clearance_signing_key: clearance_key.clone(),
         request_mode: RequestMode::DirectOpenrouter,
         openrouter_inference_base: format!("{openrouter_url}/api/v1"),
+        openrouter_requests_per_key: 2,
         ..Default::default()
     })
     .unwrap();
@@ -618,7 +601,7 @@ async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() 
     if !live_openrouter {
         // Reproduce OpenRouter's intermittent provider_unavailable response.
         // The client should absorb the 502 and retry the exact inference on
-        // this request's fresh key.
+        // the still-valid lease key.
         *openrouter_state
             .inference_failures_remaining
             .lock()
@@ -726,22 +709,27 @@ async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() 
         assert_eq!(final_chunk["message"]["content"], "");
         assert_eq!(final_chunk["done"], true);
         drop(chunks);
-
-        // Streaming cleanup runs when the final body is consumed or dropped.
-        // Wait for it so the assertions below also cover disconnect cleanup.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if *openrouter_state.deletes.lock().unwrap() == 4 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("all four request-scoped keys should be retired promptly");
     }
 
-    assert_ne!(first.client_request_id, second.client_request_id);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let wallet_settled = !service.status().await.unwrap().pending_request;
+            let first_settled = store
+                .lookup_openrouter_lease(&first.client_request_id)
+                .is_some_and(|lease| lease.status == "finalized");
+            let mock_keys_settled = live_openrouter
+                || (*openrouter_state.deletes.lock().unwrap() == 2
+                    && openrouter_state.create_bodies.lock().unwrap().len() == 2);
+            if wallet_settled && first_settled && mock_keys_settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("request-count key rotation should settle without waiting for key expiry");
+
+    assert_eq!(first.client_request_id, second.client_request_id);
     if live_openrouter {
         assert!(
             first.payload.as_ref().unwrap()["choices"][0]["message"]["content"]
@@ -772,7 +760,7 @@ async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() 
             ]
         );
         assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
-        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 4);
+        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 2);
         for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {
             assert_eq!(create_body["limit"], 0.001);
             assert_eq!(create_body["include_byok_in_limit"], true);
@@ -802,21 +790,26 @@ async fn every_direct_chat_gets_a_fresh_key_and_settles_its_own_zkapi_request() 
             .status,
         zkapi_types::NullifierStatus::Finalized
     );
-    let recovered = service.recover().await.unwrap();
-    assert!(!recovered.recovered);
-    let expected_charge = zkapi_serverd::pricing::usd_to_credits(0.000006);
-    let recovered_balance = recovered.wallet.note.unwrap().current_balance;
+    let expected_lease_charge = zkapi_serverd::pricing::usd_to_credits(2.0 * 0.000006);
+    let expected_total_charge = zkapi_serverd::pricing::usd_to_credits(4.0 * 0.000006);
+    let recovered_balance = service
+        .status()
+        .await
+        .unwrap()
+        .note
+        .unwrap()
+        .current_balance;
     if live_openrouter {
         assert!(recovered_balance < deposit);
     } else {
-        assert_eq!(recovered_balance, deposit - (4 * expected_charge));
-        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 4);
+        assert_eq!(recovered_balance, deposit - expected_total_charge);
+        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 2);
     }
     let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
     if live_openrouter {
         assert!(transcript.charge_applied.is_some_and(|charge| charge > 0));
     } else {
-        assert_eq!(transcript.charge_applied, Some(expected_charge));
+        assert_eq!(transcript.charge_applied, Some(expected_lease_charge));
     }
     assert!(!transcript
         .response_payload
@@ -1065,11 +1058,12 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         let retired = store.lookup_openrouter_lease(&first_lease_id).unwrap();
         assert_eq!(retired.status, "finalized");
         assert_eq!(retired.charge_applied, Some(7));
-        assert_eq!(lease.status, "finalized");
 
-        // A replacement daemon must start from the just-recovered wallet and
-        // issue another fresh request-scoped key instead of finding a pending
-        // lease from the preceding inference.
+        // The successful replacement key remains active for its lease window.
+        assert_eq!(lease.status, "active");
+
+        // A replacement daemon has no copy of that once-returned key. It must
+        // retire and recover the active lease before issuing a new one.
         let restarted = AuthService::new(auth_config).unwrap();
         let after_restart = restarted
             .execute_request(CoreRequest::post_json(
@@ -1099,7 +1093,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
                 .lookup_openrouter_lease(&after_restart.client_request_id)
                 .unwrap()
                 .status,
-            "finalized"
+            "active"
         );
         assert_eq!(flow.org_requests.lock().unwrap().len(), 3);
         assert_eq!(
