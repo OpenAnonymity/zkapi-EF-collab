@@ -1,225 +1,881 @@
 <!DOCTYPE html>
-<html lang="en">
+<!--
+  OA Chat client, MIT licensed, pinned to commit
+  420e4cb0e68cbd2dfe44fd7c93274fbc327a040e. The chat UI and UX remain OA
+  Chat; zkAPI replaces only inference-ticket payment and access transport.
+  See OA_CHAT_LICENSE and OA_CHAT_UPSTREAM.md.
+-->
+<html lang="en" class="theme-light flat-mode">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>zkAPI — anonymous API credits</title>
-  <link rel="stylesheet" href="/funding/styles.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <base href="/funding/">
+    <title>oa-chat</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <script>
+        (function () {
+            try {
+                const storageKey = 'oa-theme-preference';
+                const stored = localStorage.getItem(storageKey);
+                const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                const preference = stored === 'light' || stored === 'dark' ? stored : 'system';
+                const effectiveTheme = preference === 'dark' || (preference === 'system' && prefersDark) ? 'dark' : 'light';
+                const root = document.documentElement;
+
+                root.setAttribute('data-theme-preference', preference);
+                root.setAttribute('data-theme', effectiveTheme);
+
+                if (effectiveTheme === 'dark') {
+                    root.classList.add('dark', 'theme-dark');
+                    root.classList.remove('theme-light');
+                } else {
+                    root.classList.add('theme-light');
+                    root.classList.remove('dark', 'theme-dark');
+                }
+            } catch (error) {
+                console.warn('Unable to apply stored theme preference before hydration:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply left sidebar state immediately to prevent flash
+        (function () {
+            try {
+                const isDesktop = window.innerWidth > 768;
+                if (!isDesktop) return;
+
+                const savedState = localStorage.getItem('oa-left-sidebar-visible');
+                if (savedState === 'false') {
+                    document.documentElement.setAttribute('data-left-sidebar-hidden', 'true');
+                }
+
+                const rawWidth = localStorage.getItem('oa-left-sidebar-width');
+                const parsedWidth = parseInt(rawWidth, 10);
+                if (Number.isFinite(parsedWidth) && parsedWidth > 0) {
+                    const minWidth = 220;
+                    const maxDragWidth = 420;
+                    const layoutMaxWidth = Math.max(minWidth, window.innerWidth - 240);
+                    const maxWidth = Math.max(minWidth, Math.min(maxDragWidth, layoutMaxWidth));
+                    const clampedWidth = Math.max(minWidth, Math.min(maxWidth, parsedWidth));
+                    document.documentElement.style.setProperty('--oa-left-sidebar-width', `${clampedWidth}px`);
+                }
+            } catch (error) {
+                console.warn('Unable to apply left sidebar state:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply right panel state immediately to prevent flash
+        (function () {
+            try {
+                const isDesktop = window.innerWidth >= 1024;
+                const savedState = localStorage.getItem('oa-right-panel-visible');
+                const isVisible = savedState !== null ? savedState === 'true' : isDesktop;
+
+                if (!isVisible) {
+                    document.documentElement.setAttribute('data-right-panel-hidden', 'true');
+                }
+            } catch (error) {
+                console.warn('Unable to apply right panel state:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply flat mode state immediately to prevent flash (default: ON)
+        (function () {
+            try {
+                // Default to flat mode ON unless explicitly set to 'false'
+                if (localStorage.getItem('oa-flat-mode') !== 'false') {
+                    document.documentElement.classList.add('flat-mode');
+                }
+            } catch (error) {
+                console.warn('Unable to apply flat mode state:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply font mode state immediately to prevent flash (default: sans)
+        (function () {
+            try {
+                if (localStorage.getItem('oa-font-mode') === 'serif') {
+                    document.documentElement.classList.add('serif-mode');
+                }
+            } catch (error) {
+                console.warn('Unable to apply font mode state:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply welcome panel state immediately to prevent flash
+        (function () {
+            try {
+                const dismissed = localStorage.getItem('zkapi-oa-welcome-dismissed') === 'true';
+
+                const hasSharedSession = new URLSearchParams(window.location.search).has('s');
+
+                if (dismissed || hasSharedSession) {
+                    document.documentElement.setAttribute('data-welcome-hidden', 'true');
+                }
+            } catch (error) {
+                console.warn('Unable to apply welcome panel state:', error);
+            }
+        })();
+    </script>
+    <script>
+        // Apply wide mode state immediately to prevent flash
+        (function () {
+            try {
+                if (localStorage.getItem('oa-wide-mode') === 'true') {
+                    document.documentElement.classList.add('wide-mode');
+                }
+            } catch (error) {
+                console.warn('Unable to apply wide mode state:', error);
+            }
+        })();
+    </script>
+    <!-- Preload critical resources for faster loading -->
+
+    <!-- Local Fonts -->
+    <link rel="stylesheet" href="fonts/fonts.css">
+    <script>
+        // Warm font caches in the background without blocking first paint.
+        (function () {
+            const waitForFonts = async () => {
+                try {
+                    if (document.fonts && document.fonts.ready) {
+                        await Promise.race([
+                            document.fonts.ready,
+                            new Promise(resolve => setTimeout(resolve, 1000))
+                        ]);
+                        const families = [
+                            'SF Pro Text',
+                            'Newsreader',
+                            'Libre Caslon Text',
+                            'Fira Code'
+                        ];
+                        await Promise.all(families.map((family) =>
+                            document.fonts.load(`400 16px "${family}"`)
+                        ));
+                    }
+                } catch (error) {
+                    console.warn('Font readiness check failed:', error);
+                }
+            };
+            window.fontsReadyPromise = waitForFonts();
+        })();
+    </script>
+
+
+    <!-- SECURITY NOTE: Self-host these assets to avoid third-party script access. -->
+    <!-- Tailwind CSS (precompiled) -->
+    <link rel="stylesheet" href="tailwind.generated.css">
+
+    <!-- Marked.js for Markdown - defer since only used by module scripts -->
+    <script defer src="vendor/marked/marked.min.js"></script>
+
+    <!-- KaTeX for LaTeX - CSS critical, JS uses defer to ensure correct load order -->
+    <link rel="stylesheet" href="vendor/katex/katex.min.css">
+    <script defer src="vendor/katex/katex.min.js"></script>
+    <script defer src="vendor/katex/auto-render.min.js"></script>
+
+    <!-- Highlight.js - CSS critical, JS async (theme sync happens on first use) -->
+    <link rel="stylesheet" href="vendor/highlight/github.min.css" id="hljs-light">
+    <link rel="stylesheet" href="vendor/highlight/github-dark.min.css" id="hljs-dark" disabled>
+    <script async src="vendor/highlight/highlight.min.js"></script>
+    <script>
+        // Sync highlight.js theme with app theme (runs when hljs loads)
+        (function() {
+            function syncHljsTheme() {
+                const isDark = document.documentElement.classList.contains('dark');
+                const lightSheet = document.getElementById('hljs-light');
+                const darkSheet = document.getElementById('hljs-dark');
+                if (lightSheet && darkSheet) {
+                    lightSheet.disabled = isDark;
+                    darkSheet.disabled = !isDark;
+                }
+            }
+            syncHljsTheme();
+            const observer = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    if (mutation.attributeName === 'class') syncHljsTheme();
+                }
+            });
+            observer.observe(document.documentElement, { attributes: true });
+        })();
+    </script>
+
+
+    <!-- libcurl.js for encrypted proxying - loaded async, not needed for initial render -->
+    <script>
+        // Promise wrapper for lazy libcurl initialization
+        window.libcurlReadyPromise = new Promise((resolve, reject) => {
+            // Lazy load - only init when actually needed (proxy enabled)
+            let loadStarted = false;
+            let timeout = null;
+
+            window.initLibcurl = () => {
+                if (loadStarted) return window.libcurlReadyPromise;
+                loadStarted = true;
+
+                const script = document.createElement('script');
+                script.src = 'vendor/libcurl/libcurl_full.js';
+                script.onload = () => libcurl.load_wasm();
+                document.head.appendChild(script);
+
+                timeout = setTimeout(() => reject(new Error('Timeout waiting for libcurl.js')), 15000);
+            };
+
+            document.addEventListener('libcurl_load', () => {
+                clearTimeout(timeout);
+                const lib = window.libcurl || libcurl;
+                if (!lib) { reject(new Error('libcurl undefined')); return; }
+                console.log('[libcurl] ✅ Ready');
+                if (!window.libcurl) window.libcurl = lib;
+                resolve(lib);
+            }, { once: true });
+
+            document.addEventListener('libcurl_abort', (e) => {
+                clearTimeout(timeout);
+                console.error('[libcurl] Aborted:', e.detail);
+                reject(new Error('libcurl.js runtime aborted'));
+            }, { once: true });
+        });
+    </script>
+
+    <!-- hash-wasm for Argon2id encryption - loaded async when needed -->
+    <script>
+        window.hashWasmReadyPromise = null;
+        window.initHashWasm = () => {
+            if (!window.hashWasmReadyPromise) {
+                window.hashWasmReadyPromise = new Promise((resolve, reject) => {
+                    if (window.hashwasm && window.hashwasm.argon2id) {
+                        window.argon2id = window.hashwasm.argon2id;
+                        resolve(window.argon2id);
+                        return;
+                    }
+                    const script = document.createElement('script');
+                    script.src = 'vendor/hash-wasm/argon2.umd.min.js';
+                    script.onload = () => {
+                        if (window.hashwasm && window.hashwasm.argon2id) {
+                            window.argon2id = window.hashwasm.argon2id;
+                            console.log('[hash-wasm] ✅ Argon2id ready');
+                            resolve(window.argon2id);
+                        } else {
+                            reject(new Error('hash-wasm loaded but argon2id is missing'));
+                        }
+                    };
+                    script.onerror = () => reject(new Error('Failed to load hash-wasm'));
+                    document.head.appendChild(script);
+                });
+            }
+            return window.hashWasmReadyPromise;
+        };
+    </script>
+
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="zkapi.css">
+    <script src="wallet.js"></script>
 </head>
-<body>
-  <main>
-    <header class="site-header">
-      <div class="site-title">zk<span class="lo">API</span></div>
-      <div class="health">
-        <span class="health-dot" id="h-auth">auth</span>
-        <span class="health-dot" id="h-indexer">indexer</span>
-        <span class="health-dot" id="h-server">server</span>
-      </div>
-    </header>
+<body class="bg-background text-foreground h-screen overflow-hidden">
+    <!-- Mobile sidebar backdrop -->
+    <div id="mobile-sidebar-backdrop" class="mobile-sidebar-backdrop"></div>
 
-    <div>
-      <h1>Anonymous API credits.</h1>
-      <p class="tagline">Deposit once on chain. Send unlinkable authenticated requests. Withdraw the rest.</p>
-    </div>
+    <div id="app" class="flex flex-col md:flex-row h-full w-full">
+        <!-- Left Sidebar: Chat Sessions -->
+        <aside id="sidebar" class="relative flex-shrink-0 flex flex-col bg-background border-r border-border h-full min-h-0 overflow-hidden transition-[width,border-width] duration-300 ease-in-out w-64">
+            <div class="flex h-full w-full flex-col gap-2 p-2">
+                <div class="flex w-full items-center gap-1 pr-1">
+                    <button id="new-chat-btn" class="btn-ghost-hover flex-1 inline-flex items-center whitespace-nowrap transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 gap-2 bg-card border border-border text-foreground shadow-sm h-9 rounded-md px-3 justify-start">
+                        <span class="text-sm">New Chat</span>
+                        <div class="flex items-center gap-0.5 ml-auto pointer-events-none text-muted-foreground text-xs">
+                            <span class="opacity-60">⌘</span>
+                            <span class="opacity-60">/</span>
+                        </div>
+                    </button>
+                    <button id="delete-history-btn" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 flex-shrink-0" aria-label="Delete all local chat history" data-tooltip="Delete chat history" data-tooltip-position="right">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                        </svg>
+                    </button>
+                    <button id="hide-sidebar-btn" class="sidebar-toggle-btn inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 flex-shrink-0 -ml-0.5" aria-label="Collapse sidebar">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <rect x="4" y="4" width="16" height="16" rx="2"/>
+                            <path d="M4 4h6v16H4a2 2 0 01-2-2V6a2 2 0 012-2z" fill="currentColor" fill-opacity="0.15" stroke="none"/>
+                            <path d="M10 4v16"/>
+                        </svg>
+                        <span class="sidebar-toggle-tooltip sidebar-toggle-tooltip-right" role="tooltip">
+                            <span>Collapse sidebar</span>
+                            <span class="sidebar-toggle-shortcut" aria-hidden="true">
+                                <span>⌘</span>
+                                <span>\</span>
+                            </span>
+                        </span>
+                    </button>
+                </div>
 
-    <!-- Balance card — always visible -->
-    <div id="balance" class="balance-card empty">
-      <div class="kicker">BALANCE</div>
-      <div class="balance-amount">
-        <span id="balance-amount">No active note</span>
-        <span class="unit hidden" id="balance-unit">credits</span>
-      </div>
-      <div class="balance-meta hidden" id="balance-meta">
-        <span>note <strong id="balance-note-id">-</strong></span>
-        <span>deposit <strong id="balance-deposit">-</strong></span>
-        <span>expires <strong id="balance-expiry">-</strong></span>
-      </div>
-    </div>
+                <div class="flex-1 min-h-0 overflow-hidden p-px">
+                    <div class="flex h-full min-h-0 w-full flex-col gap-2">
+                        <div class="relative shrink-0">
+                            <input
+                                id="search-rooms"
+                                class="input-focus-clean appearance-none px-3 py-2 pr-24 text-sm text-foreground transition duration-150 ease-in-out rounded-lg placeholder:text-muted-foreground shadow-sm h-9 w-full border bg-background border-border focus:bg-background"
+                                autocomplete="off"
+                                autocorrect="off"
+                                autocapitalize="off"
+                                spellcheck="false"
+                                placeholder="Search chats..."
+                                value="">
+                            <div class="sidebar-search-shortcut">
+                                <span class="opacity-60">⌘</span>
+                                <span class="opacity-60">⇧</span>
+                                <span class="opacity-60">F</span>
+                            </div>
+                            <button
+                                id="sidebar-filter-btn"
+                                class="sidebar-filter-btn text-muted-foreground transition-colors hover-highlight hover:text-foreground"
+                                type="button"
+                                aria-label="Filter chats"
+                                aria-haspopup="menu"
+                                aria-expanded="false">
+                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M3 5h18" />
+                                    <path d="M6 12h12" />
+                                    <path d="M10 19h4" />
+                                </svg>
+                            </button>
+                            <div id="sidebar-filter-menu" class="sidebar-filter-menu hidden" role="menu" aria-label="Chat filters">
+                                <button class="sidebar-filter-toggle-row" type="button" data-session-star-filter-toggle aria-pressed="false">
+                                    <span>Starred only</span>
+                                    <span class="sidebar-filter-check" aria-hidden="true"></span>
+                                </button>
+                                <label class="sidebar-filter-field">
+                                    <span>Updated</span>
+                                    <select id="sidebar-filter-range" autocomplete="off">
+                                        <option value="all">Any time</option>
+                                        <option value="today">Today</option>
+                                        <option value="yesterday">Yesterday</option>
+                                        <option value="7d">Past 7 days</option>
+                                        <option value="30d">Past 30 days</option>
+                                    </select>
+                                </label>
+                                <label class="sidebar-filter-field">
+                                    <span>Date</span>
+                                    <input id="sidebar-filter-date" type="date" autocomplete="off">
+                                </label>
+                                <button id="clear-sidebar-filters" class="sidebar-filter-clear" type="button">Clear filters</button>
+                            </div>
+                        </div>
 
-    <!-- STEP 1: Fund (visible when no note) -->
-    <section class="step" id="step-fund">
-      <span class="step-num">01 — Fund</span>
-      <h2>Deposit to open a note</h2>
-      <p>Pick an amount, deposit through your browser wallet, and the note activates automatically. Your secret never leaves this machine — only the public commitment goes on chain.</p>
-
-      <form id="prepare-form" class="form-stack">
-        <label>
-          Deposit amount
-          <input id="deposit-amount" name="amount" type="number" min="1" step="1" value="2000" required>
-        </label>
-        <div class="button-row">
-          <button type="submit" class="primary">Generate commitment</button>
-        </div>
-      </form>
-
-      <div id="prepare-result" class="hidden" style="margin-top: 1rem;">
-        <div class="response-card">
-          <div style="margin-bottom: 0.5rem;">
-            <strong>Commitment ready.</strong> Run the commands below, then confirm.
-          </div>
-          <div class="dev-fields">
-            <span class="f-label">secret</span><span class="f-value" id="prep-secret">-</span>
-            <span class="f-label">commitment</span><span class="f-value" id="prep-commitment">-</span>
-            <span class="f-label">note id</span><span class="f-value" id="prep-note-id">-</span>
-            <span class="f-label">active root</span><span class="f-value" id="prep-root">-</span>
-          </div>
-        </div>
-
-        <div class="button-row" style="margin-top: 0.75rem;">
-          <button type="button" id="metamask-deposit" class="primary">Deposit with MetaMask</button>
-        </div>
-        <div id="deposit-status" class="hint hidden" style="margin-top: 0.5rem;"></div>
-
-        <details class="dev">
-          <summary>manual chain commands (no wallet)</summary>
-          <pre id="cast-commands">—</pre>
-        </details>
-
-        <details class="dev">
-          <summary>advanced chain config</summary>
-          <div class="form-stack" style="margin-top: 0.75rem;">
-            <div class="form-row">
-              <label>
-                RPC URL
-                <input id="rpc-url" type="text" placeholder="http://127.0.0.1:8545">
-              </label>
-              <label>
-                Billing token
-                <input id="token-address" type="text" placeholder="0x…">
-              </label>
+                        <div id="sessions-scroll-area" class="flex-1 min-h-0 overflow-y-auto">
+                            <!-- Loading indicator shown while sessions load -->
+                            <div id="sessions-skeleton" class="sessions-loader">
+                                <div class="loader-text">
+                                    <span>Loading chat history</span>
+                                    <span>from local browser storage</span>
+                                </div>
+                                <div class="loader-bar">
+                                    <div class="loader-bar-fill"></div>
+                                </div>
+                            </div>
+                            <div id="sessions-list" class="flex flex-col gap-0.5"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="form-row">
-              <label>
-                Private key
-                <input id="private-key" type="password" placeholder="0x…">
-              </label>
-              <label>
-                Note TTL (seconds)
-                <input id="note-ttl" type="number" min="1" step="1" value="2592000">
-              </label>
-            </div>
-          </div>
-        </details>
+            <button id="account-tab-btn" data-status="none" class="account-tab-btn" type="button" aria-label="Private balance" aria-controls="account-modal" aria-expanded="false">
+                <span class="account-tab-dot" aria-hidden="true"></span>
+                <span data-private-balance-label>Private balance</span>
+            </button>
+        </aside>
 
-        <form id="confirm-form" class="form-stack" style="margin-top: 1rem;">
-          <label>
-            Expiry timestamp (unix seconds — copy from cast output)
-            <input id="expiry-ts" name="expiry_ts" type="number" min="1" step="1" placeholder="e.g. 1795000000" required>
-          </label>
-          <!-- hidden fields populated by prepare -->
-          <input id="secret" name="secret" type="hidden">
-          <input id="note-id" name="note_id" type="hidden">
-          <input id="confirm-amount" name="amount" type="hidden">
-          <div class="button-row">
-            <button type="submit" class="primary">Confirm note locally</button>
-          </div>
-          <div id="confirm-error" class="error hidden"></div>
-        </form>
-      </div>
-    </section>
+        <div class="flex flex-1 min-w-0">
+            <!-- Main Content Area -->
+            <main class="relative flex-1 flex flex-col min-w-0 min-h-0 h-full">
+                <!-- Chat Toolbar - fixed at top, divider appears on scroll when content overlaps -->
+                <div id="chat-toolbar" class="chat-toolbar flex-shrink-0 flex flex-nowrap items-center justify-between px-2 pt-2 pb-1">
+                    <!-- Left toolbar buttons -->
+                    <div class="flex items-center gap-1">
+                        <!-- Show Sidebar Button (hidden by default, shown when sidebar is hidden) -->
+                        <button id="show-sidebar-btn" class="sidebar-toggle-btn hidden inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none" aria-label="Expand sidebar">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                <rect x="4" y="4" width="16" height="16" rx="2"/>
+                                <path d="M4 4h6v16H4a2 2 0 01-2-2V6a2 2 0 012-2z" fill="currentColor" fill-opacity="0.15" stroke="none"/>
+                                <path d="M10 4v16"/>
+                            </svg>
+                            <span class="sidebar-toggle-tooltip" role="tooltip">
+                                <span>Expand sidebar</span>
+                                <span class="sidebar-toggle-shortcut" aria-hidden="true">
+                                    <span>⌘</span>
+                                    <span>\</span>
+                                </span>
+                            </span>
+                        </button>
 
-    <!-- STEP 2: Send requests (visible when funded) -->
-    <section class="step hidden" id="step-request">
-      <span class="step-num">02 — Send</span>
-      <h2>Send an authenticated request</h2>
-      <p>The daemon attaches a zero-knowledge proof, verifies the server's signed next state, and updates your balance.</p>
+                        <!-- Wide Mode Button -->
+                        <button id="wide-mode-btn" class="hidden inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none" aria-label="Toggle wide mode">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                            </svg>
+                        </button>
+                    </div>
 
-      <form id="request-form" class="form-stack">
-        <div class="form-row">
-          <label>
-            API shape
-            <select id="endpoint-kind">
-              <option value="chat">OpenAI chat</option>
-              <option value="responses">OpenAI responses</option>
-              <option value="ollama">Ollama chat</option>
-              <option value="raw">Raw</option>
-            </select>
-          </label>
-          <label>
-            Model
-            <input id="model-input" type="text" value="zkapi-echo">
-          </label>
+                    <!-- Right toolbar buttons -->
+                    <div class="flex items-center gap-1">
+                        <!-- Share Button (hidden by default, shown when session is active and not imported) -->
+                        <button id="share-btn" class="hidden items-center gap-1.5 px-2.5 py-1.5 rounded-md hover-highlight cursor-pointer select-none text-sm">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+                            </svg>
+                            <span id="share-btn-text" class="whitespace-nowrap">Share</span>
+                        </button>
+
+                        <!-- Show Right Panel Button -->
+                        <button id="show-right-panel-btn" class="system-panel-toggle-btn inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                                <rect x="4" y="4" width="16" height="16" rx="2"/>
+                                <path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4V4z" fill="currentColor" fill-opacity="0.15" stroke="none"/>
+                                <path d="M14 4v16"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <!-- Mobile toolbar divider - separate element for reliable positioning -->
+                <div id="mobile-toolbar-divider"></div>
+
+                <!-- Status Indicator Dot (Always visible) -->
+                <!-- FEATURE DISABLED: Status indicator and activity banner - uncomment to re-enable -->
+                <!--
+                <div id="status-indicator" class="absolute top-4 left-12 z-30">
+                    <button id="status-dot-btn" class="relative group">
+                        <div id="breathing-dot" class="w-2.5 h-2.5 rounded-full breathing-dot cursor-pointer hover:scale-110 transition-transform"></div>
+                    </button>
+                </div>
+                -->
+
+                <div class="flex flex-1 flex-col min-w-0 min-h-0 max-h-full">
+                    <!-- Chat Messages Area -->
+                    <div id="chat-area" class="flex-1 min-h-0 w-full overflow-y-scroll">
+                        <div id="messages-container" class="w-full mx-auto flex flex-col items-center gap-6 px-2 sm:px-4 md:px-6 pt-4 pb-32">
+                        </div>
+                    </div>
+
+                    <!-- Input Area - always visible at bottom with consistent padding -->
+                    <div class="absolute bottom-0 left-0 right-0 px-2 pb-2 pt-1 flex-shrink-0">
+                        <div id="input-card" class="rounded-lg p-1.5 border w-full max-w-[42rem] mx-auto flex-shrink-0 shadow-lg relative" style="isolation: isolate;">
+                                <!-- Drop Zone Overlay -->
+                                <div id="drop-zone-overlay" class="hidden absolute inset-0 z-[60] rounded-lg border-2 border-dashed border-primary/30 bg-card flex items-center justify-center pointer-events-none transition-all duration-200">
+                                    <div class="flex flex-col items-center justify-center text-muted-foreground animate-in fade-in zoom-in duration-300">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-10 h-10 mb-2">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+                                        </svg>
+                                        <span class="text-sm font-semibold">Drop files to attach</span>
+                                    </div>
+                                </div>
+
+                                <!-- File Previews Container -->
+                                <div id="file-previews-container" class="hidden mb-3 flex flex-wrap gap-3"></div>
+
+                                <!-- Textarea Container -->
+                                <div class="relative w-full flex flex-col">
+                                    <div class="rounded-md w-full text-muted-foreground focus-within:text-foreground transition-colors bg-transparent">
+                                        <div class="scrubber-input-row flex h-max py-1.5 max-h-96 bg-transparent pl-2 pr-px overflow-y-auto relative">
+                                            <textarea
+                                                id="message-input"
+                                                rows="1"
+                                                class="w-full flex-1 min-w-0 bg-transparent text-sm leading-6 focus:outline-none resize-none overflow-y-auto overflow-x-hidden text-foreground placeholder:text-muted-foreground"
+                                                placeholder="Ask anything"
+                                                style="height: 24px; min-height: 24px; max-height: 300px;"
+                                                autofocus
+                                            ></textarea>
+                                            <div id="scrubber-shortcut-hint" class="absolute right-1.5 flex items-center gap-1 pointer-events-none text-muted-foreground/60 text-[11px] transition-opacity duration-150" aria-hidden="true">
+                                                <span class="scrubber-shortcut-key">tab</span>
+                                                <span class="scrubber-shortcut-key">tab</span>
+                                                <span>to scrub</span>
+                                            </div>
+                                            <div id="scrubber-preview-hint" class="absolute right-1.5 flex items-center gap-1 pointer-events-none text-muted-foreground/60 text-[11px] opacity-0 transition-opacity duration-150" aria-hidden="true">
+                                                <span id="scrubber-preview-hint-text" class="flex items-center gap-1"><span class="scrubber-shortcut-key">ctrl</span> <span>preview</span> <span class="opacity-40 mx-0.5">|</span> <span class="scrubber-shortcut-key">⌥</span> <span>edit</span></span>
+                                            </div>
+                                            <script>
+                                                (function() {
+                                                    const input = document.getElementById('message-input');
+                                                    if (input) {
+                                                        // Focus immediately
+                                                        input.focus();
+
+                                                        // Capture early interactions
+                                                        window.oaPendingSend = false;
+                                                        const handleKeydown = (e) => {
+                                                            if (window.chatInputReady) return; // Let app handle it if ready
+                                                            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                                                                e.preventDefault();
+                                                                window.oaPendingSend = true;
+                                                            }
+                                                        };
+                                                        input.addEventListener('keydown', handleKeydown);
+                                                    }
+                                                })();
+                                            </script>
+                                            <div id="scrubber-preview-diff" class="scrubber-preview-diff" aria-hidden="true"></div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Bottom Actions Bar (never wraps - buttons collapse on mobile via CSS) -->
+                                <div class="flex items-center justify-between gap-1 pt-1.5">
+                                    <div class="relative flex min-w-0 items-center gap-1">
+                                        <button id="model-picker-btn" class="btn-ghost-hover inline-flex items-center justify-center rounded-md text-xs font-medium transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 border border-input bg-background hover:text-accent-foreground h-7 px-2 gap-1.5 text-foreground min-w-0">
+                                            <div class="flex items-center justify-center w-5 h-5 flex-shrink-0 rounded-full border border-border/50 bg-muted">
+                                                <div class="w-2.5 h-2.5 rounded-full border-[1.5px] border-gray-300 border-t-gray-400 animate-spin"></div>
+                                            </div>
+                                            <span>Select Model</span>
+                                            <div class="flex items-center gap-0.5 ml-2 pointer-events-none text-muted-foreground text-xs">
+                                                <span class="opacity-60">⌘</span>
+                                                <span class="opacity-60">K</span>
+                                            </div>
+                                        </button>
+                                        <!-- File Upload Button -->
+                                        <span class="inline-flex relative">
+                                            <input type="file" id="file-upload-input" multiple accept="image/*,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,audio/*" class="hidden">
+                                            <button id="file-upload-btn" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-7 w-7 relative" data-tooltip="Attach files" data-tooltip-position="top">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
+                                                </svg>
+                                                <span id="file-count-badge" class="hidden absolute -top-1 -right-1 w-4 h-4 bg-green-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center"></span>
+                                            </button>
+                                        </span>
+
+                                        <!-- Settings Dropdown -->
+                                        <div class="relative z-50">
+                                            <button id="settings-btn" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-7 w-7" data-tooltip="Settings" data-tooltip-position="top">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 0 1 1.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.559.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.894.149c-.424.07-.764.383-.929.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 0 1-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.398.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 0 1-.12-1.45l.527-.737c.25-.35.272-.806.108-1.204-.165-.397-.506-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 0 1 .12-1.45l.773-.773a1.125 1.125 0 0 1 1.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894Z" />
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                                                </svg>
+                                            </button>
+                                            <!-- Settings Dropdown Menu (hidden by default) -->
+                                            <div id="settings-menu" class="hidden z-[100] rounded-lg border shadow-xl p-2 min-w-[220px] settings-menu-glass">
+                                                <a href="https://forms.gle/HEmvxnJpN1jQC7CfA" target="_blank" rel="noopener noreferrer" class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors flex items-center justify-between">
+                                                    <span>Share Feedback</span>
+                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"></path>
+                                                    </svg>
+                                                </a>
+
+                                                <!-- Data Controls Section (modular - can be moved elsewhere) -->
+                                                <div id="data-management-section" class="mt-2 border-t border-border pt-2">
+                                                    <p class="px-3 pb-1 text-xs font-light tracking-wide text-muted-foreground">Data Controls</p>
+                                                    <!-- All Data row -->
+                                                    <div class="px-3 py-1 flex items-center gap-2">
+                                                        <span class="text-xs text-muted-foreground w-12 shrink-0">All</span>
+                                                        <button data-action="export-all-data" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Export</button>
+                                                        <button data-action="import-data" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Import</button>
+                                                    </div>
+                                                    <!-- Chats row -->
+                                                    <div class="px-3 py-1 flex items-center gap-2">
+                                                        <span class="text-xs text-muted-foreground w-12 shrink-0">Chat History</span>
+                                                        <button data-action="export-chats" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Export</button>
+                                                        <button data-action="import-history" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Import</button>
+                                                    </div>
+                                                    <div class="px-3 py-1 flex items-center gap-2">
+                                                        <span class="text-xs text-muted-foreground w-12 shrink-0">ChatGPT</span>
+                                                        <button data-action="import-history" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Import from ChatGPT</button>
+                                                    </div>
+                                                    <!-- Hidden file inputs -->
+                                                    <input type="file" id="global-import-input" accept="application/json,.json" class="hidden" />
+                                                    <input type="file" id="tickets-import-input" accept="application/json,.json" class="hidden" />
+                                                    <input type="file" id="memory-import-input" accept=".json,application/json" class="hidden" />
+                                                </div>
+
+                                                <!-- Scrubber Section -->
+                                                <div id="scrubber-settings-section" class="hidden mt-2 border-t border-border pt-2">
+                                                    <p class="px-3 pb-1 text-xs font-light tracking-wide text-muted-foreground">Privacy</p>
+                                                    <div class="px-3 py-1 flex items-center gap-2">
+                                                        <span class="text-xs text-muted-foreground w-12 shrink-0">Scrubber</span>
+                                                        <select id="scrubber-model-select" class="flex-1 min-w-0 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-popover-foreground focus:outline-none focus:ring-1 focus:ring-ring truncate">
+                                                            <option value="" disabled selected>Loading…</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                <!-- Memory Section -->
+                                                <div id="memory-settings-section" class="hidden mt-2 border-t border-border pt-2">
+                                                    <p class="px-3 pb-1 text-xs font-light tracking-wide text-muted-foreground">Memory</p>
+                                                    <div class="px-3 py-1.5 flex items-center justify-between gap-2">
+                                                        <span class="text-xs font-medium text-popover-foreground">Memory feature</span>
+                                                        <button id="memory-feature-toggle" type="button" role="switch" aria-checked="true" class="switch-toggle switch-toggle-sm switch-active" data-tooltip="Enable memory mode and background memory extraction" data-tooltip-position="left">
+                                                            <span class="switch-toggle-indicator"></span>
+                                                        </button>
+                                                    </div>
+                                                    <div class="mt-1">
+                                                        <div class="px-3 py-1.5 flex items-center justify-between gap-3">
+                                                            <span class="text-xs text-muted-foreground leading-tight min-w-0 flex-1">Always attach retrieval</span>
+                                                            <button id="memory-auto-include-toggle" type="button" role="switch" aria-checked="false" class="switch-toggle switch-toggle-sm switch-inactive shrink-0" data-tooltip="Automatically attach retrieval without per-message approval" data-tooltip-position="left">
+                                                                <span class="switch-toggle-indicator"></span>
+                                                            </button>
+                                                        </div>
+                                                        <div class="px-3 py-1 flex items-center gap-2">
+                                                            <span class="text-xs text-muted-foreground w-12 shrink-0">Model</span>
+                                                            <select id="memory-agent-model-select" class="flex-1 min-w-0 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-popover-foreground focus:outline-none focus:ring-1 focus:ring-ring truncate">
+                                                                <option value="" disabled selected>Loading…</option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="px-3 py-1 flex items-center gap-2">
+                                                            <span class="text-xs text-muted-foreground w-12 shrink-0">Data</span>
+                                                            <button data-action="export-memory" data-memory-requires-feature data-enabled-title="Export memories" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Export</button>
+                                                            <button data-action="import-memory" data-memory-requires-feature data-enabled-title="Import memories" class="flex-1 px-2 py-1 text-[11px] text-popover-foreground hover-highlight rounded transition-colors border border-border text-center">Import</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <!-- Reasoning toggle section -->
+                                                <div class="border-t border-border pt-2 mt-2">
+                                                    <p class="px-3 pb-2 text-xs font-light tracking-wide text-muted-foreground">Thinking Effort</p>
+                                                    <!-- <div class="px-3 py-1 flex items-center gap-2">
+                                                        <span class="text-xs text-muted-foreground shrink-0">Thinking effort</span>
+                                                    </div> -->
+                                                    <div class="px-3 pb-1">
+                                                        <div id="reasoning-effort-toggle" class="theme-toggle-container reasoning-effort-toggle" role="radiogroup" aria-label="Reasoning effort selection" aria-disabled="false" data-effort="medium">
+                                                            <div class="theme-toggle-indicator"></div>
+                                                            <button type="button" class="theme-toggle-btn reasoning-effort-btn" data-reasoning-effort="low" aria-checked="false" aria-label="Low effort" title="Low effort">
+                                                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="w-4 h-4">
+                                                                    <path d="M3 16.5V12.5" />
+                                                                    <path d="M7.7 16.5V10" class="effort-muted" />
+                                                                    <path d="M12.3 16.5V7.5" class="effort-muted" />
+                                                                    <path d="M17 16.5V5" class="effort-muted" />
+                                                                </svg>
+                                                            </button>
+                                                            <button type="button" class="theme-toggle-btn reasoning-effort-btn" data-reasoning-effort="medium" aria-checked="true" aria-label="Medium effort" title="Medium effort">
+                                                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="w-4 h-4">
+                                                                    <path d="M3 16.5V12.5" />
+                                                                    <path d="M7.7 16.5V10" />
+                                                                    <path d="M12.3 16.5V7.5" class="effort-muted" />
+                                                                    <path d="M17 16.5V5" class="effort-muted" />
+                                                                </svg>
+                                                            </button>
+                                                            <button type="button" class="theme-toggle-btn reasoning-effort-btn" data-reasoning-effort="high" aria-checked="false" aria-label="High effort" title="High effort">
+                                                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="w-4 h-4">
+                                                                    <path d="M3 16.5V12.5" />
+                                                                    <path d="M7.7 16.5V10" />
+                                                                    <path d="M12.3 16.5V7.5" />
+                                                                    <path d="M17 16.5V5" class="effort-muted" />
+                                                                </svg>
+                                                            </button>
+                                                            <button type="button" class="theme-toggle-btn reasoning-effort-btn" data-reasoning-effort="xhigh" aria-checked="false" aria-label="Heavy effort" title="Heavy effort">
+                                                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="w-4 h-4">
+                                                                    <path d="M3 16.5V12.5" />
+                                                                    <path d="M7.7 16.5V10" />
+                                                                    <path d="M12.3 16.5V7.5" />
+                                                                    <path d="M17 16.5V5" />
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <!-- Display section with flat mode and font toggles -->
+                                                <div class="mt-2 border-t border-border pt-2">
+                                                    <p class="px-3 pb-1.5 text-xs font-light tracking-wide text-muted-foreground">Display</p>
+                                                    <div class="px-3 pb-2 flex justify-center gap-4">
+                                                        <div id="flat-mode-toggle" class="display-toggle-container display-toggle-compact" role="radiogroup" aria-label="Display mode">
+                                                            <div class="display-toggle-indicator"></div>
+                                                            <!-- Flat mode: text lines without bubble -->
+                                                            <button type="button" class="display-toggle-btn" data-mode="flat" aria-checked="true" title="Flat mode">
+                                                                <svg class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                                                    <path stroke-linecap="round" d="M4 7h16M4 12h12M4 17h14"/>
+                                                                </svg>
+                                                            </button>
+                                                            <!-- Bubble mode: text lines inside chat bubble -->
+                                                            <button type="button" class="display-toggle-btn" data-mode="bubble" aria-checked="false" title="Bubble mode">
+                                                                <svg class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z"/>
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                        <div id="font-mode-toggle" class="display-toggle-container display-toggle-compact" role="radiogroup" aria-label="Font style">
+                                                            <div class="display-toggle-indicator"></div>
+                                                            <!-- Sans-serif font -->
+                                                            <button type="button" class="display-toggle-btn" data-font="sans" aria-checked="true" title="Sans-serif">
+                                                                <span class="text-sm font-medium" style="font-family: system-ui, sans-serif;">Aa</span>
+                                                            </button>
+                                                            <!-- Serif font -->
+                                                            <button type="button" class="display-toggle-btn" data-font="serif" aria-checked="false" title="Serif">
+                                                                <span class="text-sm font-medium" style="font-family: 'PT Serif', Georgia, serif;">Aa</span>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="border-t border-border pt-2">
+                                                    <p class="px-3 pb-1.5 text-xs font-light tracking-wide text-muted-foreground">Theme</p>
+                                                    <div class="px-3 pb-1">
+                                                        <div id="theme-toggle" class="theme-toggle-container" role="radiogroup" aria-label="Theme selection" data-theme="system">
+                                                            <div class="theme-toggle-indicator"></div>
+                                                            <!-- Light theme -->
+                                                            <button type="button" class="theme-toggle-btn" data-theme-option="light" aria-checked="false" title="Light">
+                                                                <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1.5m0 15V21m9-9h-1.5M4.5 12H3m15.364-6.364-1.06 1.06M6.697 17.303l-1.06 1.06m0-12.728 1.06 1.06m9.607 9.607 1.06 1.06M12 8.25a3.75 3.75 0 1 1 0 7.5 3.75 3.75 0 0 1 0-7.5z"></path>
+                                                                </svg>
+                                                            </button>
+                                                            <!-- Dark theme -->
+                                                            <button type="button" class="theme-toggle-btn" data-theme-option="dark" aria-checked="false" title="Dark">
+                                                                <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.79A9 9 0 0 1 11.21 3 7.5 7.5 0 1 0 21 12.79z"></path>
+                                                                </svg>
+                                                            </button>
+                                                            <!-- System theme -->
+                                                            <button type="button" class="theme-toggle-btn" data-theme-option="system" aria-checked="false" title="System">
+                                                                <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 17v2h6v-2m2 0h.75A2.25 2.25 0 0 0 20 14.75V7.25A2.25 2.25 0 0 0 17.75 5H6.25A2.25 2.25 0 0 0 4 7.25v7.5A2.25 2.25 0 0 0 6.25 17H7.5"></path>
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <p id="theme-effective-label" class="px-3 text-[11px] text-muted-foreground/80"></p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Search Toggle -->
+                                        <button id="search-toggle" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-7 w-7 cursor-pointer select-none search-active" data-tooltip="Web search" data-tooltip-position="top" aria-pressed="true">
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
+                                            </svg>
+                                        </button>
+                                        <div id="chat-mode-toggle" class="hidden chat-mode-toggle-container ml-2" role="radiogroup" aria-label="Chat mode" data-mode="chat" style="visibility: hidden;">
+                                            <div class="chat-mode-toggle-indicator"></div>
+                                            <button type="button" class="chat-mode-toggle-btn" data-mode-option="chat" aria-checked="true" data-tooltip="Chat" data-tooltip-position="top">
+                                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+                                                </svg>
+                                            </button>
+                                            <button type="button" class="chat-mode-toggle-btn" data-mode-option="memory" aria-checked="false" data-tooltip-position="top">
+                                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                                                </svg>
+                                                <span class="chat-mode-html-tooltip"><span data-memory-tooltip-text>Auto-attach relevant context</span> <span data-memory-tooltip-beta class="px-1 py-0.5 rounded text-[8px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400 uppercase tracking-wide">Beta</span></span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <button
+                                            id="send-btn"
+                                            class="inline-flex items-center justify-center rounded-full disabled:pointer-events-none disabled:opacity-40 bg-primary text-primary-foreground h-7 w-7 transition-colors hover:bg-primary/90"
+                                            disabled
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
+                                            </svg>
+                                        </button>
+
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Right Panel: Ticket System -->
+            <aside id="right-panel" class="right-panel-desktop fixed lg:relative right-0 top-0 h-full bg-background border-l border-border shadow-lg z-40 lg:flex-shrink-0 flex flex-col">
+                <div id="right-panel-content" class="h-full flex flex-col">
+                    <!-- Content will be rendered by RightPanel.js -->
+                </div>
+            </aside>
         </div>
-
-        <label>
-          Prompt
-          <textarea id="prompt-input" rows="3">hello from the zkAPI demo</textarea>
-        </label>
-
-        <div id="raw-fields" class="form-stack hidden">
-          <div class="form-row">
-            <label>
-              Method
-              <input id="raw-method" type="text" value="POST">
-            </label>
-            <label>
-              Path
-              <input id="raw-path" type="text" value="/v1/chat/completions">
-            </label>
-          </div>
-          <label>
-            Raw JSON body
-            <textarea id="raw-body" rows="6">{
-  "model": "zkapi-echo",
-  "messages": [{ "role": "user", "content": "hello" }]
-}</textarea>
-          </label>
-        </div>
-
-        <div class="button-row">
-          <button type="submit" class="primary">Send request</button>
-        </div>
-      </form>
-
-      <div id="request-result" class="response-card empty">No request sent yet.</div>
-
-      <div class="button-row" style="margin-top: 1rem;">
-        <button type="button" id="metamask-withdraw">Withdraw (mutual close) via MetaMask</button>
-      </div>
-      <div id="withdraw-status" class="hint hidden" style="margin-top: 0.5rem;"></div>
-
-      <details class="dev" id="request-trace-details">
-        <summary>proof trace &amp; server verification</summary>
-        <div class="dev-fields" style="margin-top: 0.75rem;">
-          <span class="f-label">payload hash</span><span class="f-value" id="trace-payload-hash">-</span>
-          <span class="f-label">nullifier</span><span class="f-value" id="trace-nullifier">-</span>
-          <span class="f-label">note leaf</span><span class="f-value" id="trace-leaf">-</span>
-          <span class="f-label">solvency bound</span><span class="f-value" id="trace-solvency">-</span>
-          <span class="f-label">active root</span><span class="f-value" id="trace-root">-</span>
-          <span class="f-label">next anchor</span><span class="f-value" id="trace-next-anchor">-</span>
-          <span class="f-label">charge applied</span><span class="f-value" id="trace-charge">-</span>
-          <span class="f-label">state signature</span><span class="f-value" id="trace-xmss">-</span>
-        </div>
-        <pre id="protocol-output" style="margin-top: 0.75rem;">Submit a request to capture the server transcript.</pre>
-      </details>
-    </section>
-
-    <!-- Transcript / service details (always at bottom, collapsed by default) -->
-    <details class="dev">
-      <summary>service endpoints &amp; runtime</summary>
-      <div class="dev-fields" style="margin-top: 0.75rem;">
-        <span class="f-label">auth daemon</span><span class="f-value" id="svc-auth">-</span>
-        <span class="f-label">indexer</span><span class="f-value" id="svc-indexer">-</span>
-        <span class="f-label">server</span><span class="f-value" id="svc-server">-</span>
-        <span class="f-label">proof backend</span><span class="f-value" id="svc-proof">-</span>
-      </div>
-      <pre id="attestation-output" style="margin-top: 0.75rem;">Loading attestation…</pre>
-    </details>
-
-    <div class="notice">
-      Requests use compact Groth16 BN254 proofs. This unaudited deployment and its one-party setup are for testnet use only.
     </div>
 
-    <footer>
-      <span>zkAPI local demo</span>
-      <span>
-        <a href="https://github.com/OpenAnonymity/ef-collaboration" target="_blank" rel="noopener">github</a>
-        · <button id="refresh-all" style="padding: 0.15rem 0.5rem; font-size: 11px;">refresh</button>
-      </span>
-    </footer>
-  </main>
+    <!-- Inline Link Preview Card -->
+    <div id="link-preview-card" class="link-preview-card hidden">
+        <div class="link-preview-loader">
+            <div class="link-preview-spinner"></div>
+            <span>Loading preview...</span>
+        </div>
+        <div class="link-preview-content">
+            <div class="link-preview-header">
+                <img class="link-preview-favicon" src="" alt="" />
+                <span class="link-preview-domain"></span>
+            </div>
+            <div class="link-preview-title"></div>
+            <div class="link-preview-description"></div>
+        </div>
+    </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
-  <script src="/funding/app.js"></script>
+    <!-- Delete History Confirmation Modal -->
+    <div id="delete-history-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"></div>
+    <template id="delete-history-modal-template">
+        <div role="dialog" aria-modal="true" aria-labelledby="delete-history-title" class="w-full max-w-md rounded-2xl border border-border bg-background shadow-2xl">
+            <div class="p-6">
+                <div class="flex items-start gap-3">
+                    <div class="flex h-6 w-18 items-center justify-center rounded-md bg-amber-100/80 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3l-6.928-12c-.77-1.333-2.694-1.333-3.464 0l-6.928 12c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <p id="delete-history-title" data-delete-history="title" class="text-base font-semibold text-foreground"></p>
+                        <p class="text-sm text-muted-foreground mt-1" data-delete-history="body"></p>
+                    </div>
+                </div>
+                <div class="mt-6 flex items-center justify-between rounded-lg border border-border/80 dark:border-border/60 bg-muted/30 dark:bg-muted/10 px-4 py-3 text-sm text-muted-foreground dark:text-muted-foreground/90">
+                    <div class="flex flex-col">
+                        <span class="font-medium text-foreground" data-delete-history="highlightHeading"></span>
+                        <span data-delete-history="highlightBody"></span>
+                    </div>
+                </div>
+                <div class="mt-6 flex justify-end gap-2">
+                    <button id="cancel-delete-history" class="btn-ghost-hover inline-flex items-center justify-center rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-all duration-200 hover:shadow-sm" type="button" data-delete-history="cancelLabel"></button>
+                    <button id="confirm-delete-history" class="btn-destructive-bright inline-flex items-center justify-center rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-destructive" type="button" data-delete-history="confirmLabel"></button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- API Key Verification Modal -->
+    <div id="verify-key-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"></div>
+
+    <!-- Account Modal -->
+    <div id="account-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"></div>
+
+    <!-- Memory Editor Modal -->
+    <div id="memory-editor-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"></div>
+
+    <!-- Welcome Panel Modal -->
+    <div id="welcome-panel" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"></div>
+
+    <!-- Model Picker Modal -->
+    <div id="model-picker-modal" class="hidden fixed inset-0 w-full h-full bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" tabindex="-1" data-slot="dialog-content" class="cursor-default relative w-full max-w-lg border border-border bg-background shadow-lg rounded-lg duration-0 overflow-hidden flex flex-col m-4" data-state="open">
+            <!-- Search Input -->
+            <div class="flex items-center border-b border-border px-3" cmdk-input-wrapper="">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4 text-muted-foreground mr-2 flex-shrink-0">
+                    <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 1 0 0 13.5 6.75 6.75 0 0 0 0-13.5ZM2.25 10.5a8.25 8.25 0 1 1 14.59 5.28l4.69 4.69a.75.75 0 1 1-1.06 1.06l-4.69-4.69A8.25 8.25 0 0 1 2.25 10.5Z" clip-rule="evenodd"></path>
+                </svg>
+                <input
+                    id="model-search"
+                    type="text"
+                    placeholder="Search models..."
+                    class="flex-1 bg-transparent outline-none text-sm py-2.5 text-foreground placeholder:text-muted-foreground"
+                    cmdk-input=""
+                />
+                <button id="close-modal-btn" class="ml-2 text-muted-foreground hover:text-foreground transition-colors p-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div id="model-list-scroll-area" class="overflow-y-auto p-2" style="height: 270px;">
+                <div id="models-list" class="space-y-1"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Prerender landing content early (skip if restoring a session) -->
+    <!-- BUNDLE:PRELUDE -->
+    <script type="module" src="prelude.js?v=dev"></script>
+    <!-- /BUNDLE:PRELUDE -->
+
+    <!-- Single entry point - app bootstraps -->
+    <!-- BUNDLE:APP -->
+    <script type="module" src="app.js?v=dev"></script>
+    <!-- /BUNDLE:APP -->
 </body>
 </html>

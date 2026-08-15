@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,6 +42,8 @@ struct OpenRouterState {
     inference_attempts: Arc<Mutex<usize>>,
     inference_failures_remaining: Arc<Mutex<usize>>,
     key_usage: Arc<Mutex<HashMap<String, usize>>>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Default)]
@@ -127,34 +130,42 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         let api_key = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if !api_key.is_some_and(|key| key.starts_with("sk-or-v1-runtime-test-")) {
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        if !api_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("sk-or-v1-runtime-test-"))
+        {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": { "message": "invalid key" } })),
             ));
         }
         *state.inference_attempts.lock().unwrap() += 1;
-        let mut failures = state.inference_failures_remaining.lock().unwrap();
-        if *failures > 0 {
-            *failures -= 1;
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "code": 502,
-                        "message": "provider temporarily unavailable",
-                        "metadata": { "error_type": "provider_unavailable" }
-                    }
-                })),
-            ));
+        {
+            let mut failures = state.inference_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": {
+                            "code": 502,
+                            "message": "provider temporarily unavailable",
+                            "metadata": { "error_type": "provider_unavailable" }
+                        }
+                    })),
+                ));
+            }
         }
-        drop(failures);
-        let api_key = api_key.unwrap().to_string();
+        let api_key = api_key.unwrap();
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string();
+        let active = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.max_in_flight.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
         state.prompts.lock().unwrap().push(prompt.clone());
         *state.key_usage.lock().unwrap().entry(api_key).or_default() += 1;
         if body.get("stream").and_then(Value::as_bool) == Some(true) {
@@ -180,8 +191,10 @@ fn openrouter_router(state: OpenRouterState) -> Router {
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
             );
+            state.in_flight.fetch_sub(1, Ordering::SeqCst);
             return Ok(response);
         }
+        state.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(Json(json!({
             "id": "chatcmpl-direct",
             "object": "chat.completion",
@@ -588,17 +601,25 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         json!(["proxy", "direct_openrouter"])
     );
 
-    let first = service
-        .execute_request(CoreRequest::post_json(
-            "/v1/chat/completions",
-            json!({
-                "model": "openai/gpt-4o-mini",
-                "messages": [{"role": "user", "content": "private prompt one"}]
-            }),
-        ))
-        .await
-        .unwrap();
-    if !live_openrouter {
+    let first_request = CoreRequest::post_json(
+        "/v1/chat/completions",
+        json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "private prompt one"}]
+        }),
+    );
+    let second_request = CoreRequest::post_json(
+        "/v1/responses",
+        json!({
+            "model": "openai/gpt-4o-mini",
+            "input": "private prompt two"
+        }),
+    );
+    let (first, second) = if live_openrouter {
+        let first = service.execute_request(first_request).await.unwrap();
+        let second = service.execute_request(second_request).await.unwrap();
+        (first, second)
+    } else {
         // Reproduce OpenRouter's intermittent provider_unavailable response.
         // The client should absorb the 502 and retry the exact inference on
         // the still-valid lease key.
@@ -606,17 +627,50 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .inference_failures_remaining
             .lock()
             .unwrap() = 1;
-    }
-    let second = service
-        .execute_request(CoreRequest::post_json(
-            "/v1/responses",
-            json!({
-                "model": "openai/gpt-4o-mini",
-                "input": "private prompt two"
-            }),
-        ))
+        let first_service = service.clone();
+        let first_task = tokio::spawn(async move {
+            first_service
+                .execute_request_in_session(first_request, Some("chat-one"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while openrouter_state.in_flight.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .unwrap();
+        .expect("first same-session request should reach inference");
+
+        let active_lease = service.zkapi_config().await.active_lease.unwrap();
+        assert_eq!(active_lease.session_id, "chat-one");
+        assert!(!serde_json::to_string(&active_lease)
+            .unwrap()
+            .contains("sk-or-v1-"));
+
+        let cross_chat = service
+            .execute_request_in_session(
+                CoreRequest::post_json(
+                    "/v1/chat/completions",
+                    json!({
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "must not share a key"}]
+                    }),
+                ),
+                Some("chat-two"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(cross_chat.status_code(), StatusCode::CONFLICT);
+        assert_eq!(cross_chat.code(), "lease_session_conflict");
+
+        let second = service
+            .execute_request_in_session(second_request, Some("chat-one"))
+            .await
+            .unwrap();
+        let first = first_task.await.unwrap().unwrap();
+        assert_eq!(openrouter_state.max_in_flight.load(Ordering::SeqCst), 2);
+        (first, second)
+    };
 
     if !live_openrouter {
         let local_client_url = spawn(zkapi_clientd::build_router(service.clone())).await;
@@ -750,15 +804,14 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             second.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
             "answer: private prompt two"
         );
+        let prompts = openrouter_state.prompts.lock().unwrap().clone();
+        let mut parallel_prompts = prompts[..2].to_vec();
+        parallel_prompts.sort();
         assert_eq!(
-            openrouter_state.prompts.lock().unwrap().as_slice(),
-            [
-                "private prompt one",
-                "private prompt two",
-                "stream prompt",
-                "ollama stream prompt",
-            ]
+            parallel_prompts,
+            ["private prompt one", "private prompt two"]
         );
+        assert_eq!(&prompts[2..], ["stream prompt", "ollama stream prompt"]);
         assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
         assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 2);
         for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {

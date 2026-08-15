@@ -1,6 +1,7 @@
 # Local client quickstart
 
-Prerequisites: Rust, Foundry (`cast`), `curl`, and `jq`. Clone and build:
+Prerequisite: Rust. Foundry's `cast` is optional for the headless funding flow.
+Clone and build:
 
 ```bash
 git clone https://github.com/OpenAnonymity/zkapi-EF-collab.git
@@ -13,10 +14,10 @@ Start the prompt-private local API on Ethereum Mainnet (real USDC and ETH for ga
 
 ```bash
 ./target/release/zkapi --require-oa-org-key-source client \
-  --mode direct-openrouter --initial-credits 100000
+  --mode direct-openrouter --initial-credits 2000000
 ```
 
-This deposits 100,000 base units (`0.10 USDC`). The selected wallet must
+The suggested deposit is 2,000,000 base units (`2 USDC`). The selected wallet must
 already hold at least that much USDC plus Mainnet ETH for approve, deposit,
 and withdrawal gas. For a small test, `0.003 ETH` provides reasonable
 headroom at low gas prices; check the current gas price before funding.
@@ -29,17 +30,24 @@ Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
   --mode direct-openrouter --initial-credits 5000000
 ```
 
-The client mints the Sepolia test token automatically, so only Sepolia ETH is
-needed beforehand. Fund about `0.02 Sepolia ETH` for a complete
-mint/approve/deposit/chat/mutual-withdrawal test; the exact requirement varies
-with gas prices.
+Open `http://127.0.0.1:11434/`, connect MetaMask, switch to the deployment's
+network when prompted, and deposit the suggested amount. The page shows the
+remaining and spent portions of the current note, its expiry, and a low-balance
+warning. It never asks for or stores a private key. For a headless environment,
+add `--fund-with-cast` to use the interactive terminal flow instead.
+On the public Sepolia deployment, the same button mints free ZKAPI test credits
+when the connected address needs them; the address still needs Sepolia ETH for
+transaction gas. About `0.02 Sepolia ETH` provides reasonable headroom for a
+complete mint, approve, deposit, chat, and mutual-withdrawal test at typical
+testnet gas prices.
 
 The larger Sepolia test-token deposit reserves enough for about 100
 maximum-cost lease windows at the demo's $0.05 cap. By default a child key
-serves at most five sequential LLM requests. Before serving request six, the
-client disables that key, settles its measured aggregate usage, and opens the
-next lease. Requests sharing a key are linkable to OpenRouter. To use one key
-per request, put `--openrouter-requests-per-key 1` before `client`:
+serves at most five requests for one chat session; those requests may run in
+parallel. Before serving request six, the client disables that key, settles its
+measured aggregate usage, and opens the next lease. Requests sharing a key are
+linkable to OpenRouter. To use one key per request, put
+`--openrouter-requests-per-key 1` before `client`:
 
 ```bash
 ./target/release/zkapi --require-oa-org-key-source \
@@ -49,23 +57,14 @@ per request, put `--openrouter-requests-per-key 1` before `client`:
 Add the same `--deployment ...` argument shown above after `client` when using
 Sepolia.
 
-Omit `--address` to let `cast` derive the address and prompt securely for the
-private key, or add `--address 0x...`. Funding prompts for the private key once,
-uses a temporary encrypted `cast` keystore for mint/approve/deposit, and removes
-that keystore as soon as funding finishes. The key is never stored in zkAPI's
-state directory.
-
-The client manages that directory as a stable active-wallet slot. When an
-existing note no longer has enough reserve for another maximum-cost request,
-normal startup preserves it under `retired/note_<id>` (where it remains
-available for withdrawal), funds a fresh note, and continues using the same
-client command. `--no-fund` disables both automatic funding and this rotation.
-
-Keep the client running, then call its local OpenAI-compatible API:
+Keep the client running, then use the bundled chat or call its local
+OpenAI-compatible API. Supply a stable session ID when an application can
+identify a conversation:
 
 ```bash
 curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -H 'content-type: application/json' \
+  -H 'x-zkapi-session-id: my-private-chat' \
   -d '{"model":"openai/gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":"Explain HTTPS briefly."}]}' | jq .
 ```
 
@@ -109,3 +108,26 @@ finalize it (repeat `--deployment ...` for Sepolia):
 ```bash
 ./target/release/zkapi withdraw --mode finalize-escape --note-id NOTE_ID
 ```
+
+In direct mode, calls with the same session ID share one bounded ephemeral key
+and may execute concurrently. Until that key expires and settles, a different
+session receives `409 lease_session_conflict` instead of being linkable to it.
+
+## Withdraw in the browser
+
+Open the system panel and choose **Withdraw balance**. The recommended mutual
+close obtains server clearance and returns the note's remaining billing tokens
+in one MetaMask transaction. The UI verifies the vault event before archiving
+the local note.
+
+The escape hatch is the unilateral recovery path. Its first transaction freezes
+the note and starts the vault's configured safety window (24 hours by default).
+The UI reads that duration from the vault and shows the exact deadline. Keep the
+daemon state directory: the note secret remains there until finalization, and
+the pending screen is restored after a browser or daemon restart. After the
+displayed deadline, reconnect the same destination account and choose
+**Finalize in MetaMask**. Anyone can submit that final transaction, but the
+tokens always go to the destination committed by the withdrawal proof. If the
+server challenges the escape during the window, **Check on-chain status**
+restores the active note. Chat requests are rejected while either withdrawal
+path is prepared or pending so the proven balance cannot be spent twice.

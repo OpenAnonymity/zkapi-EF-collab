@@ -18,8 +18,8 @@ use std::io;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
-use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -34,6 +34,8 @@ use crate::error::AuthError;
 use crate::service::{
     AuthService, ConfirmDepositRequest, CoreRequest, StreamingCoreResponse, WithdrawalMode,
 };
+
+const SESSION_ID_HEADER: &str = "x-zkapi-session-id";
 
 #[derive(Debug, Deserialize)]
 struct PrepareDepositBody {
@@ -51,6 +53,7 @@ struct WithdrawBody {
 pub fn build_router(service: Arc<AuthService>) -> Router {
     Router::new()
         .route("/", get(funding_index))
+        .route("/favicon.ico", get(funding_favicon))
         .route("/health", get(healthz))
         .route("/healthz", get(healthz))
         .route("/request", post(core_request))
@@ -70,7 +73,9 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/reset", post(wallet_reset))
         .route("/funding", get(funding_index))
         .route("/funding/", get(funding_index))
+        .route("/funding/OA_CHAT_LICENSE", get(funding_oa_license))
         .route("/funding/styles.css", get(funding_styles))
+        .route("/funding/wallet.js", get(funding_wallet))
         .route("/funding/app.js", get(funding_app))
         .route("/funding/api/status", get(wallet_status))
         .route("/funding/api/demo", get(demo_overview))
@@ -81,9 +86,15 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/recover", post(wallet_recover))
         .route("/wallet/withdraw", post(wallet_withdraw))
         .route("/funding/api/withdraw", post(wallet_withdraw))
+        .route("/wallet/withdraw/confirm", post(wallet_withdraw_confirm))
+        .route(
+            "/funding/api/withdraw/confirm",
+            post(wallet_withdraw_confirm),
+        )
         // Browser client endpoints: full zkAPI inspection per call.
         .route("/zkapi/v1/config", get(zkapi_config))
         .route("/zkapi/v1/inference", post(zkapi_inference))
+        .route("/funding/{*path}", get(funding_asset))
         .layer(local_cors_layer())
         .with_state(service)
 }
@@ -98,7 +109,10 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
 fn local_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            HeaderName::from_static(SESSION_ID_HEADER),
+        ])
         .allow_origin(AllowOrigin::predicate(|origin, _request| {
             let origin = origin.as_bytes();
             origin.starts_with(b"http://localhost") || origin.starts_with(b"http://127.0.0.1")
@@ -138,11 +152,15 @@ async fn core_request(
 
 async fn chat_completions(
     State(service): State<Arc<AuthService>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     if compat::stream_requested(&body) {
         return match service
-            .execute_streaming_request(compat::core_request("/v1/chat/completions", body))
+            .execute_streaming_request_in_session(
+                compat::core_request("/v1/chat/completions", body),
+                session_id(&headers),
+            )
             .await
         {
             Ok(upstream) => streaming_openrouter_response(upstream),
@@ -151,7 +169,10 @@ async fn chat_completions(
     }
     let model = compat::extract_model(&body, service.default_model());
     match service
-        .execute_request(compat::core_request("/v1/chat/completions", body))
+        .execute_request_in_session(
+            compat::core_request("/v1/chat/completions", body),
+            session_id(&headers),
+        )
         .await
     {
         Ok(response) => Json(compat::chat_completion(&model, &response)).into_response(),
@@ -183,11 +204,15 @@ fn streaming_openrouter_response(upstream: StreamingCoreResponse) -> Response {
 
 async fn responses_api(
     State(service): State<Arc<AuthService>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let model = compat::extract_model(&body, service.default_model());
     match service
-        .execute_request(compat::core_request("/v1/responses", body))
+        .execute_request_in_session(
+            compat::core_request("/v1/responses", body),
+            session_id(&headers),
+        )
         .await
     {
         Ok(response) => Json(compat::responses_api(&model, &response)).into_response(),
@@ -195,7 +220,11 @@ async fn responses_api(
     }
 }
 
-async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<Value>) -> Response {
+async fn ollama_chat(
+    State(service): State<Arc<AuthService>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     let model = compat::extract_model(&body, service.default_model());
     if compat::ollama_stream_requested(&body) {
         let mut body = body;
@@ -205,7 +234,10 @@ async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<V
             object.insert("stream".to_string(), Value::Bool(true));
         }
         return match service
-            .execute_streaming_request(compat::core_request("/api/chat", body))
+            .execute_streaming_request_in_session(
+                compat::core_request("/api/chat", body),
+                session_id(&headers),
+            )
             .await
         {
             Ok(upstream) => streaming_ollama_response(upstream, model),
@@ -213,7 +245,10 @@ async fn ollama_chat(State(service): State<Arc<AuthService>>, Json(body): Json<V
         };
     }
     match service
-        .execute_request(compat::core_request("/api/chat", body))
+        .execute_request_in_session(
+            compat::core_request("/api/chat", body),
+            session_id(&headers),
+        )
         .await
     {
         Ok(response) => Json(compat::ollama_chat(&model, &response)).into_response(),
@@ -482,6 +517,13 @@ async fn wallet_withdraw(
     }
 }
 
+async fn wallet_withdraw_confirm(State(service): State<Arc<AuthService>>) -> Response {
+    match service.confirm_withdrawal().await {
+        Ok(status) => Json(status).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
 fn parse_destination(value: &str) -> Result<[u8; 20], String> {
     let hex = value.strip_prefix("0x").unwrap_or(value);
     if hex.len() != 40 {
@@ -507,11 +549,37 @@ async fn funding_config(State(service): State<Arc<AuthService>>) -> Json<Value> 
 }
 
 async fn funding_index(State(service): State<Arc<AuthService>>) -> Response {
-    Html(service.funding_index_html()).into_response()
+    let mut response = Html(service.funding_index_html()).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+    );
+    add_local_asset_headers(&mut response);
+    response
+}
+
+async fn funding_favicon(State(service): State<Arc<AuthService>>) -> Response {
+    match service.funding_asset("favicon.svg") {
+        Some((body, content_type)) => {
+            let mut response = Response::new(axum::body::Body::from(body));
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            add_local_asset_headers(&mut response);
+            response
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn funding_styles(State(service): State<Arc<AuthService>>) -> Response {
     static_asset(service.funding_styles_css(), "text/css; charset=utf-8")
+}
+
+async fn funding_oa_license(State(service): State<Arc<AuthService>>) -> Response {
+    static_asset(service.funding_oa_license(), "text/plain; charset=utf-8")
 }
 
 async fn funding_app(State(service): State<Arc<AuthService>>) -> Response {
@@ -519,6 +587,30 @@ async fn funding_app(State(service): State<Arc<AuthService>>) -> Response {
         service.funding_app_js(),
         "application/javascript; charset=utf-8",
     )
+}
+
+async fn funding_wallet(State(service): State<Arc<AuthService>>) -> Response {
+    static_asset(
+        service.funding_wallet_js(),
+        "application/javascript; charset=utf-8",
+    )
+}
+
+async fn funding_asset(
+    State(service): State<Arc<AuthService>>,
+    AxumPath(path): AxumPath<String>,
+) -> Response {
+    match service.funding_asset(path.trim_start_matches('/')) {
+        Some((body, content_type)) => {
+            let mut response = Response::new(axum::body::Body::from(body));
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            add_local_asset_headers(&mut response);
+            response
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn prepare_deposit(
@@ -567,18 +659,27 @@ async fn zkapi_config(State(service): State<Arc<AuthService>>) -> Response {
     Json(service.zkapi_config().await).into_response()
 }
 
-/// POST /zkapi/v1/inference -- run an OpenAI-style chat
-/// completion through the full zkAPI proof+billing path and return both the
-/// completion and the complete zkAPI inspection (`RequestDemoResult`).
+/// POST /zkapi/v1/inference -- run an OpenAI-style chat through the configured
+/// proxy/direct request mode and return the daemon's core response envelope.
 async fn zkapi_inference(
     State(service): State<Arc<AuthService>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let request = CoreRequest::post_json("/v1/chat/completions", body);
-    match service.execute_request_demo(request).await {
+    match service
+        .execute_request_in_session(request, session_id(&headers))
+        .await
+    {
         Ok(result) => Json(result).into_response(),
         Err(err) => generic_error(err),
     }
+}
+
+fn session_id(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
 }
 
 fn static_asset(body: &'static str, content_type: &'static str) -> Response {
@@ -586,7 +687,18 @@ fn static_asset(body: &'static str, content_type: &'static str) -> Response {
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    add_local_asset_headers(&mut response);
     response
+}
+
+fn add_local_asset_headers(response: &mut Response) {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
 }
 
 fn generic_error(err: AuthError) -> Response {
@@ -652,9 +764,10 @@ mod tests {
         let service = AuthService::new(AuthConfig {
             state_dir,
             models: vec![ModelDescriptor::new("demo-model")],
+            suggested_deposit_amount: 2468,
             demo_rpc_url: Some("http://127.0.0.1:48654".to_string()),
             demo_billing_token_address: Some("0xabc".to_string()),
-            demo_private_key: Some("0xpriv".to_string()),
+            demo_mint_enabled: true,
             demo_note_ttl_seconds: Some(1234),
             ..Default::default()
         })
@@ -672,6 +785,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(funding.status(), StatusCode::OK);
+        assert_eq!(funding.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(funding
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("script-src 'self'")));
+        let body = funding.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<title>oa-chat</title>"));
+        assert!(html.contains("id=\"new-chat-btn\""));
+        assert!(html.contains("id=\"message-input\""));
+        assert!(html.contains("id=\"right-panel\""));
+        assert!(html.contains("data-private-balance-label"));
+        assert!(html.contains("href=\"styles.css\""));
+        assert!(html.contains("src=\"wallet.js\""));
+        assert!(html.contains("420e4cb0e68cbd2dfe44fd7c93274fbc327a040e"));
+        assert!(!html.contains("zkAPI chat"));
+        assert!(!html.contains(">Tickets<"));
+        assert!(!html.contains("id=\"private-key\""));
+        assert!(!html.contains("https://cdn.jsdelivr.net"));
+
+        let wallet_script = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/funding/wallet.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wallet_script.status(), StatusCode::OK);
+
+        for path in [
+            "/favicon.ico",
+            "/funding/zkapi.css",
+            "/funding/components/ChatInput.js",
+            "/funding/services/zkapiClient.js",
+            "/funding/vendor/marked/marked.min.js",
+            "/funding/fonts/fonts.css",
+        ] {
+            let asset = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(asset.status(), StatusCode::OK, "{path}");
+            assert_eq!(asset.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(asset.headers()["x-content-type-options"], "nosniff");
+        }
+
+        for (path, expected) in [
+            (
+                "/funding/components/AccountModal.js",
+                ["Mutual close", "Escape hatch", "Add ZKAPI to MetaMask"],
+            ),
+            (
+                "/funding/services/zkapiClient.js",
+                [
+                    "/wallet/withdraw/confirm",
+                    "/wallet/withdraw",
+                    "zkapi-withdrawal-v2",
+                ],
+            ),
+        ] {
+            let asset = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = asset.into_body().collect().await.unwrap().to_bytes();
+            let source = String::from_utf8(body.to_vec()).unwrap();
+            for needle in expected {
+                assert!(source.contains(needle), "{path} missing {needle}");
+            }
+        }
+
+        for path in ["/funding/OA_CHAT_LICENSE"] {
+            let asset = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(asset.status(), StatusCode::OK, "{path}");
+            assert_eq!(asset.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(asset.headers()["x-content-type-options"], "nosniff");
+        }
 
         let models = router
             .clone()
@@ -728,7 +943,9 @@ mod tests {
         assert_eq!(value["chain_id"], 1);
         assert_eq!(value["demo_rpc_url"], "http://127.0.0.1:48654");
         assert_eq!(value["demo_billing_token_address"], "0xabc");
-        assert_eq!(value["demo_private_key"], "0xpriv");
+        assert_eq!(value["demo_mint_enabled"], true);
+        assert_eq!(value["suggested_deposit_amount"], 2468);
+        assert!(value.get("demo_private_key").is_none());
         assert_eq!(value["demo_note_ttl_seconds"], 1234);
 
         for path in ["/zkapi/v1/ephemeral/issue", "/zkapi/v1/ephemeral/settle"] {
@@ -745,6 +962,19 @@ mod tests {
                 .unwrap();
             assert_eq!(removed.status(), StatusCode::NOT_FOUND);
         }
+
+        let withdrawal_confirm = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/wallet/withdraw/confirm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(withdrawal_confirm.status(), StatusCode::PAYMENT_REQUIRED);
 
         let demo = router
             .oneshot(

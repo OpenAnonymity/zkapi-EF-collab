@@ -50,9 +50,12 @@ pub struct AuthConfig {
     pub listen_addr: String,
     pub state_dir: PathBuf,
     pub models: Vec<ModelDescriptor>,
+    /// Fresh-note amount suggested by the bundled browser UI, in billing-token
+    /// base units.
+    pub suggested_deposit_amount: u128,
     pub demo_rpc_url: Option<String>,
     pub demo_billing_token_address: Option<String>,
-    pub demo_private_key: Option<String>,
+    pub demo_mint_enabled: bool,
     pub demo_note_ttl_seconds: Option<u64>,
     /// Retired v1 compatibility field; v2 always uses Groth16 BN254.
     pub proof_mode: String,
@@ -103,9 +106,10 @@ impl Default for AuthConfig {
             listen_addr: "127.0.0.1:11434".to_string(),
             state_dir: PathBuf::from(".zkapi"),
             models: vec![ModelDescriptor::new("zkapi-echo")],
+            suggested_deposit_amount: 2_000_000,
             demo_rpc_url: None,
             demo_billing_token_address: None,
-            demo_private_key: None,
+            demo_mint_enabled: false,
             demo_note_ttl_seconds: None,
             proof_mode: "groth16_bn254".to_string(),
             cairo_dir: "protocol/cairo".to_string(),

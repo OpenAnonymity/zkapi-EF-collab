@@ -1,0 +1,1178 @@
+/**
+ * Ticket Client -- inference ticket lifecycle and ephemeral API key requests.
+ *
+ * Unlinkability model (for auditors):
+ *
+ * This module talks to the org API for ticket issuance and ephemeral API key requests.
+ * The org does NOT need to be trusted for unlinkability:
+ *
+ * 1. All blinding/unblinding runs client-side (privacyPass.js). The org
+ *    only ever sees blinded requests at issuance and finalized (unblinded)
+ *    tickets at redemption -- these are cryptographically unlinkable.
+ *
+ * 2. Even a fully malicious org cannot link issuance to redemption, cannot see
+ *    inference prompts/responses, and cannot deanonymize users. Its worst case
+ *    is denial of service, not privacy breach.
+ *
+ * 3. The org being closed-source does not affect unlinkability -- the
+ *    security-critical crypto runs client-side via @cloudflare/privacypass-ts
+ *    (Apache-2.0, auditable pure JS, no WASM).
+ *
+ * 4. Defense-in-depth: even if blind signature unlinkability were somehow
+ *    weakened through side channels (timing, IP), no OA system sees prompts or
+ *    responses (sent directly from browser to provider), so inference remains
+ *    unlinkable regardless.
+ *
+ * See docs/PRIVACY_MODEL.md, docs/UNLINKABILITY_PROOF.md, and
+ * https://openanonymity.ai/blog/unlinkable-inference/
+ */
+
+import privacyPassProvider from './privacyPass.js';
+import networkLogger from './networkLogger.js';
+import networkProxy from './networkProxy.js';
+import ticketStore from './ticketStore.js';
+import { ORG_API_BASE } from '../config.js';
+
+class TicketClient {
+    constructor() {
+        console.log('🚀 Initializing TicketClient');
+        this.ppExtension = privacyPassProvider;
+        this.ticketStore = ticketStore;
+
+        console.log(`📊 TicketClient ready with ${this.ticketStore.getCount()} tickets`);
+    }
+
+    getNextTicket() {
+        return this.ticketStore.peekTicket();
+    }
+
+    /**
+     * Get multiple available tickets for multi-ticket requests.
+     * @param {number} count - Number of tickets to retrieve
+     * @returns {Array} Array of available tickets (may be fewer than requested)
+     */
+    getNextTickets(count = 1) {
+        return this.ticketStore.peekTickets(count);
+    }
+
+    getTickets() {
+        return this.ticketStore.getTickets();
+    }
+
+    getTicketCount() {
+        return this.ticketStore.getCount();
+    }
+
+    getArchivedTicketCount() {
+        return this.ticketStore.getArchiveCount();
+    }
+
+    clearTickets() {
+        console.log('🗑️  All tickets cleared');
+        return this.ticketStore.clearTickets();
+    }
+
+    async importTickets(payload) {
+        return this.ticketStore.importTickets(payload);
+    }
+
+    getRetryAfterSeconds(response, data) {
+        const bodySeconds = Number.parseInt(data?.retry_after_seconds, 10);
+        if (Number.isFinite(bodySeconds) && bodySeconds > 0) {
+            return bodySeconds;
+        }
+
+        const retryAfterHeader = response?.headers?.get?.('Retry-After');
+        if (!retryAfterHeader) return null;
+
+        const retryAfterSeconds = Number.parseInt(retryAfterHeader, 10);
+        if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+            return retryAfterSeconds;
+        }
+
+        const retryAfterDate = Date.parse(retryAfterHeader);
+        if (Number.isFinite(retryAfterDate)) {
+            const ms = retryAfterDate - Date.now();
+            if (ms > 0) {
+                return Math.ceil(ms / 1000);
+            }
+        }
+
+        return null;
+    }
+
+    createFreeAccessError(message, options = {}) {
+        const error = new Error(message);
+        if (options.code) error.code = options.code;
+        if (Number.isFinite(options.status)) error.status = options.status;
+        if (Number.isFinite(options.retryAfterSeconds) && options.retryAfterSeconds > 0) {
+            error.retryAfterSeconds = options.retryAfterSeconds;
+        }
+        return error;
+    }
+
+    createWaitlistError(message, options = {}) {
+        const error = new Error(message);
+        if (options.code) error.code = options.code;
+        if (Number.isFinite(options.status)) error.status = options.status;
+        if (Number.isFinite(options.retryAfterSeconds) && options.retryAfterSeconds > 0) {
+            error.retryAfterSeconds = options.retryAfterSeconds;
+        }
+        return error;
+    }
+
+    isValidEmailInput(value) {
+        const trimmed = (value || '').trim();
+        if (!trimmed || trimmed.length > 254) return false;
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+    }
+
+    getQueryParams() {
+        if (typeof window === 'undefined') return {};
+        const params = new URLSearchParams(window.location.search);
+        const result = {};
+        params.forEach((value, key) => {
+            if (value !== '') result[key] = value;
+        });
+        return result;
+    }
+
+    cleanPayload(payload) {
+        return Object.fromEntries(
+            Object.entries(payload).filter(([, value]) => value !== undefined && value !== null && value !== '')
+        );
+    }
+
+    getWaitlistAccessToken() {
+        if (typeof window === 'undefined') return null;
+        return typeof window.OA_ACCESS_TOKEN === 'string' && window.OA_ACCESS_TOKEN.trim()
+            ? window.OA_ACCESS_TOKEN.trim()
+            : null;
+    }
+
+    async joinWaitlist(options = {}) {
+        const email = (options.email || '').trim();
+        if (!this.isValidEmailInput(email)) {
+            throw this.createWaitlistError('Please enter a valid email address.', {
+                code: 'WAITLIST_INVALID_EMAIL'
+            });
+        }
+
+        const queryParams = this.getQueryParams();
+        const utmKeys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+        const queryUtm = utmKeys.reduce((acc, key) => {
+            const value = queryParams[key];
+            if (value) acc[key] = value;
+            return acc;
+        }, {});
+
+        const referralFromQuery =
+            queryParams.referral_code ||
+            queryParams.ref ||
+            queryParams.referral ||
+            null;
+
+        const payload = this.cleanPayload({
+            email,
+            name: (options.name || '').trim(),
+            affiliation: (options.affiliation || '').trim(),
+            source: (options.source || queryParams.source || 'beta').trim(),
+            referral_code: (options.referralCode || referralFromQuery || '').trim(),
+            ...queryUtm
+        });
+
+        const waitlistUrl = `${ORG_API_BASE}/api/waitlist/join`;
+        const accessToken = this.getWaitlistAccessToken();
+        const requestHeaders = {
+            'Content-Type': 'application/json',
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
+        };
+
+        let response;
+        let data;
+        let text;
+
+        try {
+            ({ response, data, text } = await networkProxy.fetchWithRetryJson(
+                waitlistUrl,
+                {
+                    method: 'POST',
+                    headers: requestHeaders,
+                    body: JSON.stringify(payload)
+                },
+                {
+                    context: 'Waitlist join',
+                    maxAttempts: 1,
+                    timeoutMs: 15000,
+                    proxyConfig: { bypassProxy: true }
+                }
+            ));
+        } catch (error) {
+            networkLogger.logRequest({
+                type: 'ticket',
+                method: 'POST',
+                url: waitlistUrl,
+                status: 0,
+                request: {
+                    headers: networkLogger.sanitizeHeaders(requestHeaders),
+                    body: {
+                        email: '***',
+                        source: payload.source || null,
+                        has_referral: !!payload.referral_code,
+                        has_name: !!payload.name,
+                        has_affiliation: !!payload.affiliation
+                    }
+                },
+                error: error.message
+            });
+
+            throw this.createWaitlistError('Unable to submit right now. Please try again.', {
+                code: 'WAITLIST_SUBMIT_FAILED'
+            });
+        }
+
+        networkLogger.logRequest({
+            type: 'ticket',
+            method: 'POST',
+            url: waitlistUrl,
+            status: response.status,
+            request: {
+                headers: networkLogger.sanitizeHeaders(requestHeaders),
+                body: {
+                    email: '***',
+                    source: payload.source || null,
+                    has_referral: !!payload.referral_code,
+                    has_name: !!payload.name,
+                    has_affiliation: !!payload.affiliation
+                }
+            },
+            response: data
+        });
+
+        if (response.ok) {
+            return {
+                message: data?.message || "Thanks for joining! We'll be in touch soon.",
+                waitlistEntryId: data?.waitlist_entry_id || data?.entry_id || null,
+                waitlistStatus: data?.status || null
+            };
+        }
+
+        if (response.status === 429) {
+            const retryAfterSeconds = this.getRetryAfterSeconds(response, data);
+            throw this.createWaitlistError(
+                'You are submitting too quickly. Please try again in a moment.',
+                {
+                    code: 'WAITLIST_RATE_LIMITED',
+                    status: response.status,
+                    retryAfterSeconds
+                }
+            );
+        }
+
+        if (response.status === 422) {
+            throw this.createWaitlistError(
+                'Please enter a valid email address.',
+                {
+                    code: 'WAITLIST_INVALID_PAYLOAD',
+                    status: response.status
+                }
+            );
+        }
+
+        throw this.createWaitlistError(
+            data?.message || data?.error || data?.detail || text || 'Something went wrong. Please try again.',
+            {
+                code: data?.code || 'WAITLIST_SUBMIT_FAILED',
+                status: response.status
+            }
+        );
+    }
+
+    async isFreeAccessAvailable() {
+        const availabilityUrl = `${ORG_API_BASE}/chat/free_access/availability`;
+        const requestHeaders = { 'Accept': 'application/json' };
+
+        try {
+            const { response, data } = await networkProxy.fetchWithRetryJson(
+                availabilityUrl,
+                {
+                    method: 'GET',
+                    headers: requestHeaders
+                },
+                {
+                    context: 'Free access availability',
+                    maxAttempts: 1,
+                    timeoutMs: 10000,
+                    proxyConfig: { bypassProxy: true }
+                }
+            );
+
+            networkLogger.logRequest({
+                type: 'ticket',
+                method: 'GET',
+                url: availabilityUrl,
+                status: response.status,
+                request: {
+                    headers: networkLogger.sanitizeHeaders(requestHeaders)
+                },
+                response: data
+            });
+
+            if (!response.ok) {
+                return {
+                    available: false,
+                    reasonCode: data?.reason_code || data?.code || `HTTP_${response.status}`,
+                    retryAfterSeconds: this.getRetryAfterSeconds(response, data),
+                    issuanceEnabled: typeof data?.issuance_enabled === 'boolean' ? data.issuance_enabled : null
+                };
+            }
+
+            return {
+                available: data?.available === true,
+                reasonCode: data?.reason_code || (data?.available === true ? 'OK' : 'UNAVAILABLE'),
+                retryAfterSeconds: this.getRetryAfterSeconds(response, data),
+                issuanceEnabled: typeof data?.issuance_enabled === 'boolean' ? data.issuance_enabled : null
+            };
+        } catch (error) {
+            networkLogger.logRequest({
+                type: 'ticket',
+                method: 'GET',
+                url: availabilityUrl,
+                status: 0,
+                request: {
+                    headers: networkLogger.sanitizeHeaders(requestHeaders)
+                },
+                error: error.message
+            });
+
+            console.warn('Free access availability check failed:', error);
+            return {
+                available: false,
+                reasonCode: 'UNAVAILABLE',
+                retryAfterSeconds: null,
+                issuanceEnabled: null
+            };
+        }
+    }
+
+    // Unlinkability: the org learns the email here. It will know email -> credential
+    // -> N blinded tickets. However, blind signatures still prevent the org from
+    // linking specific redeemed finalized tickets back to this email, because blinded
+    // requests are cryptographically unlinkable to finalized tickets.
+    async requestFreeAccess(email, { cfTurnstileResponse } = {}) {
+        const freeAccessUrl = `${ORG_API_BASE}/chat/free_access`;
+        const requestHeaders = { 'Content-Type': 'application/json' };
+        const requestBody = { email };
+        if (cfTurnstileResponse) {
+            requestBody.cf_turnstile_response = cfTurnstileResponse;
+        }
+
+        let response;
+        let data;
+        let text;
+
+        try {
+            ({ response, data, text } = await networkProxy.fetchWithRetryJson(
+                freeAccessUrl,
+                {
+                    method: 'POST',
+                    headers: requestHeaders,
+                    body: JSON.stringify(requestBody)
+                },
+                {
+                    context: 'Free access request',
+                    maxAttempts: 1,
+                    timeoutMs: 15000,
+                    proxyConfig: { bypassProxy: true }
+                }
+            ));
+        } catch (error) {
+            networkLogger.logRequest({
+                type: 'ticket',
+                method: 'POST',
+                url: freeAccessUrl,
+                status: 0,
+                request: {
+                    headers: networkLogger.sanitizeHeaders(requestHeaders),
+                    body: { email: '***' }
+                },
+                error: error.message
+            });
+            throw this.createFreeAccessError('Failed to request free access. Please try again.', {
+                code: 'FREE_ACCESS_REQUEST_FAILED'
+            });
+        }
+
+        networkLogger.logRequest({
+            type: 'ticket',
+            method: 'POST',
+            url: freeAccessUrl,
+            status: response.status,
+            request: {
+                headers: networkLogger.sanitizeHeaders(requestHeaders),
+                body: { email: '***' }
+            },
+            response: data
+        });
+
+        if (response.status === 200) {
+            const accessCode = typeof data?.access_code === 'string'
+                ? data.access_code.trim()
+                : null;
+            return {
+                accessCode: accessCode || null,
+                ticketsGranted: Number.isFinite(data?.tickets_granted) ? data.tickets_granted : 0,
+                waitlistEntryId: data?.waitlist_entry_id || null,
+                waitlistStatus: data?.waitlist_status || null,
+                waitlistOnly: data?.waitlist_only === true,
+                message: data?.message || null
+            };
+        }
+
+        if (response.status === 409) {
+            throw this.createFreeAccessError(
+                data?.error || 'Email is already used.',
+                {
+                    code: data?.code || 'FREE_ACCESS_EMAIL_USED',
+                    status: response.status
+                }
+            );
+        }
+
+        if (response.status === 429) {
+            const retryAfterSeconds = this.getRetryAfterSeconds(response, data);
+            const retryLabel = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+                ? ` Please retry in about ${retryAfterSeconds} seconds.`
+                : '';
+            throw this.createFreeAccessError(
+                `${data?.error || 'Free access is limited right now.'}${retryLabel}`,
+                {
+                    code: data?.code || 'FREE_ACCESS_LIMITED',
+                    status: response.status,
+                    retryAfterSeconds
+                }
+            );
+        }
+
+        if (response.status === 422) {
+            throw this.createFreeAccessError(
+                'Please enter a valid email address.',
+                {
+                    code: 'FREE_ACCESS_INVALID_PAYLOAD',
+                    status: response.status
+                }
+            );
+        }
+
+        throw this.createFreeAccessError(
+            data?.detail || data?.error || data?.message || text || `Free access request failed (${response.status})`,
+            {
+                code: data?.code || 'FREE_ACCESS_REQUEST_FAILED',
+                status: response.status
+            }
+        );
+    }
+
+    async alphaRegister(invitationCode, progressCallback) {
+        console.log('=== Starting alphaRegister ===');
+
+        // Yield to browser rendering pipeline so rAF-driven progress bar can paint
+        const yieldToUI = () => new Promise(resolve => setTimeout(resolve, 0));
+
+        try {
+            if (progressCallback) progressCallback('Validating ticket code...', 1);
+
+            if (!invitationCode || invitationCode.length !== 24) {
+                throw new Error('Invalid ticket code format (must be 24 characters)');
+            }
+
+            const suffix = invitationCode.slice(20, 24);
+            const ticketCount = parseInt(suffix, 16);
+
+            if (isNaN(ticketCount) || ticketCount === 0) {
+                throw new Error('Invalid ticket code: unable to determine ticket count');
+            }
+
+            if (progressCallback) progressCallback('Initializing Privacy Pass...', 2);
+
+            const hasProvider = await this.ppExtension.checkAvailability();
+
+            if (!hasProvider) {
+                throw new Error('Privacy Pass is not available. Please check your configuration.');
+            }
+
+            if (progressCallback) progressCallback('Getting issuer public key...', 3);
+            await yieldToUI();
+
+            // Public key consistency: this endpoint is publicly accessible and
+            // unauthenticated. Any user (or third party) can call it at any time
+            // to record the current public key and compare it against the key used
+            // in their own ticket issuance -- or against keys observed by others.
+            // Since these verification calls are made independently and at
+            // unpredictable times, the org cannot serve per-user keys without
+            // detection. Future: automated transparency log for key consistency.
+            let publicKey;
+            try {
+                const { data: keyData } = await networkProxy.fetchWithRetryJson(
+                    `${ORG_API_BASE}/api/ticket/issue/public-key`,
+                    {},
+                    { context: 'Public key', maxAttempts: 3, timeoutMs: 10000 }
+                );
+                publicKey = keyData.public_key;
+
+                if (!publicKey) {
+                    throw new Error('Station did not return public key');
+                }
+            } catch (error) {
+                throw new Error(`Failed to get public key: ${error.message}`);
+            }
+
+            if (progressCallback) progressCallback(`Blinding ${ticketCount} tickets...`, 5);
+            await yieldToUI();
+
+            const challenge = await this.ppExtension.createChallenge("oa-station", ["oa-station-api"]);
+
+            const indexedBlindedRequests = [];
+            const clientStates = [];
+
+            // Yield every N tickets so the browser can paint progress updates
+            const blindYieldInterval = Math.max(1, Math.min(8, Math.floor(ticketCount / 50)));
+
+            for (let i = 0; i < ticketCount; i++) {
+                const result = await this.ppExtension.createSingleTokenRequest(publicKey, challenge);
+                const { blindedRequest, state } = result;
+                indexedBlindedRequests.push([i, blindedRequest]);
+                clientStates.push([i, state]);
+
+                if (progressCallback) {
+                    const progressPct = 5 + Math.round(((i + 1) / ticketCount) * 60);
+                    progressCallback(`Blinding tickets... (${i + 1}/${ticketCount})`, progressPct);
+                }
+
+                if (i % blindYieldInterval === 0) await yieldToUI();
+            }
+
+            // Log blinded tickets creation
+            networkLogger.logRequest({
+                type: 'local',
+                method: 'LOCAL',
+                status: 200,
+                action: 'tickets-blind',
+                response: {
+                    ticket_count: ticketCount,
+                    blinded_requests_created: indexedBlindedRequests.length
+                }
+            });
+
+            if (progressCallback) progressCallback('Sending blinded tickets to server for signing...', 65);
+            await yieldToUI();
+
+            // Unlinkability: the org receives the credential and blinded requests here.
+            // It knows "credential X -> N blinded requests" but only ever sees the
+            // blinded form. At redemption (/api/request_key), the org will see finalized
+            // (unblinded) tickets for the first time -- cryptographically unlinkable to
+            // these blinded requests. Even with complete records, the org cannot correlate
+            // issuance to redemption. This is the core guarantee of blind signatures.
+            const registerUrl = `${ORG_API_BASE}/api/alpha-register`;
+            const registerBody = {
+                credential: invitationCode,
+                blinded_requests: indexedBlindedRequests
+            };
+
+            let signData;
+            try {
+                const { response: signResponse, data } = await networkProxy.fetchWithRetryJson(
+                    registerUrl,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(registerBody)
+                    },
+                    {
+                        context: 'Alpha register',
+                        maxAttempts: 1,  // No retry - blinded tickets consumed on success
+                        timeoutMs: Math.max(120000, ticketCount * 50)
+                    }
+                );
+
+                signData = data;
+
+                // Log the request
+                networkLogger.logRequest({
+                    type: 'ticket',
+                    method: 'POST',
+                    url: registerUrl,
+                    status: signResponse.status,
+                    request: {
+                        headers: { 'Content-Type': 'application/json' },
+                        body: { credential: '***', blinded_requests: `${indexedBlindedRequests.length} tickets` }
+                    },
+                    response: signData
+                });
+
+                if (!signResponse.ok) {
+                    throw new Error(signData.detail || signData.error || signData.message || 'Server error during registration');
+                }
+            } catch (error) {
+                // Log failed request
+                networkLogger.logRequest({
+                    type: 'ticket',
+                    method: 'POST',
+                    url: registerUrl,
+                    status: 0,
+                    request: {
+                        headers: { 'Content-Type': 'application/json' },
+                        body: { credential: '***', blinded_requests: `${indexedBlindedRequests.length} tickets` }
+                    },
+                    error: error.message
+                });
+                throw error;
+            }
+
+            if (progressCallback) progressCallback('Signed tickets received...', 67);
+
+            const indexedSignedResponses = signData.signed_responses;
+
+            if (!indexedSignedResponses || indexedSignedResponses.length === 0) {
+                throw new Error('Station did not return signed responses');
+            }
+
+            // Log receipt of signed tickets
+            networkLogger.logRequest({
+                type: 'local',
+                method: 'LOCAL',
+                status: 200,
+                action: 'tickets-signed',
+                response: {
+                    signed_tickets_received: indexedSignedResponses.length
+                }
+            });
+
+            const responseMap = {};
+            indexedSignedResponses.forEach(([idx, signedResp]) => {
+                responseMap[idx] = signedResp;
+            });
+
+            if (progressCallback) progressCallback('Unblinding tickets...', 67);
+            await yieldToUI();
+
+            const tickets = [];
+
+            // Yield every N tickets so the browser can paint progress updates
+            const unblindYieldInterval = Math.max(1, Math.min(8, Math.floor(clientStates.length / 50)));
+
+            for (let i = 0; i < clientStates.length; i++) {
+                const [idx, state] = clientStates[i];
+
+                if (!(idx in responseMap)) {
+                    throw new Error(`Missing signed response for ticket index ${idx}`);
+                }
+
+                const signedResponse = responseMap[idx];
+                const blindedRequest = indexedBlindedRequests[idx][1];
+
+                const finalizedTicket = await this.ppExtension.finalizeToken(signedResponse, state);
+
+                tickets.push({
+                    blinded_request: blindedRequest,
+                    signed_response: signedResponse,
+                    finalized_ticket: finalizedTicket,
+                    created_at: new Date().toISOString(),
+                });
+
+                if (progressCallback) {
+                    const progressPct = 67 + Math.round(((i + 1) / clientStates.length) * 30);
+                    progressCallback(`Unblinding tickets... (${i + 1}/${clientStates.length})`, progressPct);
+                }
+
+                if (i % unblindYieldInterval === 0) await yieldToUI();
+            }
+
+            if (progressCallback) progressCallback('Saving tickets...', 97);
+
+            // Log ticket unblinding completion
+            networkLogger.logRequest({
+                type: 'local',
+                method: 'LOCAL',
+                status: 200,
+                action: 'tickets-unblind',
+                response: {
+                    tickets_finalized: tickets.length,
+                    tickets_ready: tickets.length
+                }
+            });
+
+            await this.ticketStore.addTickets(tickets);
+
+            if (progressCallback) progressCallback('Code redeemed!', 100);
+
+            return {
+                success: true,
+                tickets_issued: tickets.length,
+                credential: invitationCode,
+                expires_at: signData.expires_at,
+            };
+
+        } catch (error) {
+            console.error('Alpha register error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Split inference tickets into a ticket code.
+     * @param {number} ticketCount - Number of tickets to split (default: 1)
+     * @returns {Promise<{code: string, ticketsConsumed: number, expiresAt: string|number|null}>}
+     */
+    async splitTickets(ticketCount = 1) {
+        try {
+            const parsedCount = Number.parseInt(ticketCount, 10);
+            if (!Number.isFinite(parsedCount) || parsedCount <= 0) {
+                throw new Error('Ticket count must be greater than zero.');
+            }
+            if (parsedCount > 50) {
+                throw new Error('You can split at most 50 tickets at a time.');
+            }
+
+            const { tickets, result } = await this.ticketStore.consumeTickets(
+                parsedCount,
+                async ({ tickets, totalCount, remainingCount }) => {
+                    const startIndex = Math.max(1, totalCount - tickets.length + 1);
+                    networkLogger.logRequest({
+                        type: 'local',
+                        method: 'LOCAL',
+                        status: 200,
+                        action: 'ticket-select-split',
+                        response: {
+                            tickets_selected: tickets.length,
+                            total_tickets: totalCount,
+                            unused_tickets: remainingCount,
+                            ticket_index: startIndex,
+                            selection_order: 'tail'
+                        }
+                    });
+
+                    const tokenValues = tickets.map(t => t.finalized_ticket).join(',');
+                    const authHeader = tickets.length === 1
+                        ? `InferenceTicket token=${tokenValues}`
+                        : `InferenceTicket tokens=${tokenValues}`;
+
+                    const splitUrl = `${ORG_API_BASE}/api/split_tickets`;
+                    const requestHeaders = {
+                        'Content-Type': 'application/json',
+                        'Authorization': authHeader,
+                    };
+                    const requestBody = { count: tickets.length };
+
+                    let response;
+                    let data;
+                    let text;
+                    try {
+                        ({ response, data, text } = await networkProxy.fetchWithRetryJson(
+                            splitUrl,
+                            {
+                                method: 'POST',
+                                headers: requestHeaders,
+                                body: JSON.stringify(requestBody)
+                            },
+                            {
+                                context: 'Ticket split',
+                                maxAttempts: 3,
+                                timeoutMs: 30000
+                            }
+                        ));
+                    } catch (error) {
+                        networkLogger.logRequest({
+                            type: 'ticket',
+                            method: 'POST',
+                            url: splitUrl,
+                            status: 0,
+                            request: {
+                                headers: networkLogger.sanitizeHeaders(requestHeaders),
+                                body: requestBody
+                            },
+                            error: error.message
+                        });
+                        throw error;
+                    }
+
+                    networkLogger.logRequest({
+                        type: 'ticket',
+                        method: 'POST',
+                        url: splitUrl,
+                        status: response.status,
+                        request: {
+                            headers: networkLogger.sanitizeHeaders(requestHeaders),
+                            body: requestBody
+                        },
+                        response: data
+                    });
+
+                    if (!response.ok) {
+                        const errorMessage = data?.detail || data?.error || data?.message ||
+                            (typeof data === 'string' ? data : null) ||
+                            text ||
+                            `Failed to split tickets (${response.status})`;
+                        const errorMessageLower = String(errorMessage || '').toLowerCase();
+
+                        if (response.status === 401 ||
+                            errorMessageLower.includes('double') ||
+                            errorMessageLower.includes('spent') ||
+                            errorMessageLower.includes('used')) {
+                            const ticketError = new Error('One or more tickets were already used. Please try again.');
+                            ticketError.code = 'TICKET_USED';
+                            ticketError.consumeTickets = true;
+                            throw ticketError;
+                        }
+
+                        throw new Error(errorMessage);
+                    }
+
+                    const code = data?.code || data?.invitation_code || data?.credential;
+                    const normalizedCode = typeof code === 'string' ? code.trim() : '';
+                    if (!normalizedCode || normalizedCode.length !== 24) {
+                        const codeError = new Error('Invalid ticket code returned by server.');
+                        throw codeError;
+                    }
+
+                    return { response, data, code: normalizedCode };
+                },
+                { order: 'tail' }
+            );
+
+            const { data, code } = result;
+
+            const ticketsConsumed = Number.isFinite(data?.tickets_consumed)
+                ? data.tickets_consumed
+                : tickets.length;
+            if (!Number.isFinite(ticketsConsumed) || ticketsConsumed <= 0) {
+                throw new Error('Ticket code was not issued because no valid tickets were found.');
+            }
+
+            return {
+                code,
+                ticketsConsumed,
+                ticketsInvalid: data?.tickets_invalid ?? 0,
+                expiresAt: data?.expires_at || data?.expires_at_unix || null
+            };
+        } catch (error) {
+            console.error('Ticket split error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Request an API key by redeeming inference tickets.
+     *
+     * Unlinkability: the org/station receives finalized tickets and returns an API key.
+     * The finalized ticket is the output of blind signature unblinding -- it is
+     * cryptographically unlinkable to the blind-signing event. No party except the
+     * user has ever seen this finalized ticket before this request. Even though this
+     * request routes through the org API, the finalized tickets presented here are
+     * seen by the org for the first time and are cryptographically unlinkable to the
+     * blinded requests from the earlier alphaRegister call. The org therefore cannot
+     * correlate "I signed blind request B" to "ticket T was redeemed for key K."
+     * The issued API key carries no user identity.
+     *
+     * @param {number} ticketCount - Number of tickets to use (default: 1)
+     * @param {Object} options - Optional request controls
+     * @param {AbortSignal} options.signal - Cancels the key request before completion
+     * @returns {Promise<Object>} API key data with verification signatures
+     */
+    async requestApiKey(ticketCount = 1, options = {}) {
+        try {
+            const { signal = null } = options;
+            if (signal?.aborted) {
+                const error = new Error('Request aborted');
+                error.name = 'AbortError';
+                error.isCancelled = true;
+                throw error;
+            }
+
+            const { tickets, result } = await this.ticketStore.consumeTickets(
+                ticketCount,
+                async ({ tickets, totalCount, remainingCount }) => {
+                    if (signal?.aborted) {
+                        const error = new Error('Request aborted');
+                        error.name = 'AbortError';
+                        error.isCancelled = true;
+                        throw error;
+                    }
+
+                    networkLogger.logRequest({
+                        type: 'local',
+                        method: 'LOCAL',
+                        status: 200,
+                        action: 'ticket-select',
+                        response: {
+                            tickets_selected: tickets.length,
+                            total_tickets: totalCount,
+                            unused_tickets: remainingCount,
+                            ticket_index: Math.max(1, totalCount - remainingCount - tickets.length + 1)
+                        }
+                    });
+
+                    const tokenValues = tickets.map(t => t.finalized_ticket).join(',');
+                    const authHeader = tickets.length === 1
+                        ? `InferenceTicket token=${tokenValues}`
+                        : `InferenceTicket tokens=${tokenValues}`;
+
+                    const requestKeyUrl = `${ORG_API_BASE}/api/request_key`;
+                    const requestHeaders = {
+                        'Authorization': authHeader,
+                    };
+
+                    console.log(`🔑 Requesting API key from org (${tickets.length} ticket${tickets.length > 1 ? 's' : ''})...`);
+
+                    let response;
+                    let data;
+
+                    try {
+                        ({ response, data } = await networkProxy.fetchWithRetryJson(
+                            requestKeyUrl,
+                            {
+                                method: 'POST',
+                                headers: requestHeaders,
+                            },
+                            {
+                                context: 'Org API key',
+                                maxAttempts: 3,    // Retry transient failures (network/5xx/429)
+                                timeoutMs: 30000,  // 30s timeout - org has internal station timeout
+                                signal
+                            }
+                        ));
+                    } catch (error) {
+                        networkLogger.logRequest({
+                            type: 'api-key',
+                            method: 'POST',
+                            url: requestKeyUrl,
+                            status: 0,
+                            request: {
+                                headers: networkLogger.sanitizeHeaders(requestHeaders),
+                            },
+                            error: error.message
+                        });
+                        throw error;
+                    }
+
+                    networkLogger.logRequest({
+                        type: 'api-key',
+                        method: 'POST',
+                        url: requestKeyUrl,
+                        status: response.status,
+                        request: {
+                            headers: networkLogger.sanitizeHeaders(requestHeaders),
+                        },
+                        response: data
+                    });
+
+                    if (!response.ok) {
+                        const errorMessage = data.detail || data.error || data.message ||
+                            (typeof data === 'string' ? data : null) ||
+                            `Failed to request API key (${response.status})`;
+
+                        if (response.status === 401 || errorMessage.includes('double-spending')) {
+                            const ticketError = new Error('One or more tickets were already used. Please try again.');
+                            ticketError.code = 'TICKET_USED';
+                            ticketError.consumeTickets = true;
+                            throw ticketError;
+                        }
+
+                        throw new Error(errorMessage);
+                    }
+
+                    const missingFields = [];
+                    if (!data?.key) missingFields.push('key');
+                    if (!data?.station_id) missingFields.push('station_id');
+                    if (!data?.station_signature) missingFields.push('station_signature');
+                    if (!data?.org_signature) missingFields.push('org_signature');
+                    if (!data?.expires_at_unix) missingFields.push('expires_at_unix');
+
+                    if (missingFields.length > 0) {
+                        const responseMessage = `${data?.detail || data?.error || data?.message || ''}`;
+                        const responseMessageLower = responseMessage.toLowerCase();
+                        if (responseMessageLower.includes('double') ||
+                            responseMessageLower.includes('spent') ||
+                            responseMessageLower.includes('used')) {
+                            const ticketError = new Error('One or more tickets were already used. Please try again.');
+                            ticketError.code = 'TICKET_USED';
+                            ticketError.consumeTickets = true;
+                            throw ticketError;
+                        }
+
+                        throw new Error(responseMessage || `Invalid key response from server (missing ${missingFields.join(', ')})`);
+                    }
+
+                    return { response, data };
+                }
+            );
+
+            const { data } = result;
+
+            return {
+                key: data.key,
+                keyHash: data.key_hash,
+                ticketsConsumed: data.tickets_consumed || tickets.length,
+                creditLimit: data.credit_limit,
+                durationMinutes: data.duration_minutes,
+                expiresAt: data.expires_at,
+                expiresAtUnix: data.expires_at_unix,
+                stationId: data.station_id,
+                stationUrl: data.station_url,
+                recentlyAttested: data.station_recently_attested || false,
+                stationSignature: data.station_signature,
+                orgSignature: data.org_signature,
+                ticketsUsed: tickets.map(t => ({
+                    blindedRequest: t.blinded_request,
+                    signedResponse: t.signed_response,
+                    finalizedTicket: t.finalized_ticket,
+                }))
+            };
+        } catch (error) {
+            console.error('Request API key error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Request a confidential API key by redeeming inference tickets.
+     * @param {number} ticketCount - Number of tickets to use (default: 1)
+     * @param {Object} options - Optional request controls
+     * @param {AbortSignal} options.signal - Cancels the confidential key request before completion
+     * @returns {Promise<Object>} API key data
+     */
+    async requestConfidentialApiKey(ticketCount = 1, options = {}) {
+        try {
+            const { signal = null } = options;
+            if (signal?.aborted) {
+                const error = new Error('Request aborted');
+                error.name = 'AbortError';
+                error.isCancelled = true;
+                throw error;
+            }
+
+            const { tickets, result } = await this.ticketStore.consumeTickets(
+                ticketCount,
+                async ({ tickets, totalCount, remainingCount }) => {
+                    if (signal?.aborted) {
+                        const error = new Error('Request aborted');
+                        error.name = 'AbortError';
+                        error.isCancelled = true;
+                        throw error;
+                    }
+
+                    networkLogger.logRequest({
+                        type: 'local',
+                        method: 'LOCAL',
+                        status: 200,
+                        action: 'ticket-select',
+                        response: {
+                            tickets_selected: tickets.length,
+                            total_tickets: totalCount,
+                            unused_tickets: remainingCount,
+                            ticket_index: Math.max(1, totalCount - remainingCount - tickets.length + 1)
+                        }
+                    });
+
+                    const tokenValues = tickets.map(t => t.finalized_ticket).join(',');
+                    const authHeader = tickets.length === 1
+                        ? `InferenceTicket token=${tokenValues}`
+                        : `InferenceTicket tokens=${tokenValues}`;
+
+                    const requestKeyUrl = `${ORG_API_BASE}/api/request_confidential_key`;
+                    const requestHeaders = {
+                        'Authorization': authHeader,
+                    };
+
+                    console.log(`🔐 Requesting confidential API key (${tickets.length} ticket${tickets.length > 1 ? 's' : ''})...`);
+
+                    let response;
+                    let data;
+
+                    try {
+                        ({ response, data } = await networkProxy.fetchWithRetryJson(
+                            requestKeyUrl,
+                            {
+                                method: 'POST',
+                                headers: requestHeaders,
+                            },
+                            {
+                                context: 'Org confidential API key',
+                                maxAttempts: 3,
+                                timeoutMs: 30000,
+                                signal
+                            }
+                        ));
+                    } catch (error) {
+                        networkLogger.logRequest({
+                            type: 'api-key',
+                            method: 'POST',
+                            url: requestKeyUrl,
+                            status: 0,
+                            request: {
+                                headers: networkLogger.sanitizeHeaders(requestHeaders),
+                            },
+                            error: error.message
+                        });
+                        throw error;
+                    }
+
+                    networkLogger.logRequest({
+                        type: 'api-key',
+                        method: 'POST',
+                        url: requestKeyUrl,
+                        status: response.status,
+                        request: {
+                            headers: networkLogger.sanitizeHeaders(requestHeaders),
+                        },
+                        response: data
+                    });
+
+                    if (!response.ok) {
+                        const errorMessage = data.detail || data.error || data.message ||
+                            (typeof data === 'string' ? data : null) ||
+                            `Failed to request confidential API key (${response.status})`;
+
+                        if (response.status === 401 || errorMessage.includes('double-spending')) {
+                            const ticketError = new Error('One or more tickets were already used. Please try again.');
+                            ticketError.code = 'TICKET_USED';
+                            ticketError.consumeTickets = true;
+                            throw ticketError;
+                        }
+
+                        throw new Error(errorMessage);
+                    }
+
+                    const missingFields = [];
+                    if (!data?.key) missingFields.push('key');
+                    if (missingFields.length > 0) {
+                        throw new Error(`Confidential key response missing: ${missingFields.join(', ')}`);
+                    }
+
+                    return data;
+                }
+            );
+
+            if (!result) {
+                throw new Error('Failed to request confidential API key.');
+            }
+
+            return result;
+        } catch (error) {
+            console.error('Request confidential API key error:', error);
+            throw error;
+        }
+    }
+
+}
+
+// Export singleton instance
+const ticketClient = new TicketClient();
+
+// Make available in console for debugging
+if (typeof window !== 'undefined') {
+    window.ticketClient = ticketClient;
+    window.stationClient = ticketClient;
+}
+
+export default ticketClient;

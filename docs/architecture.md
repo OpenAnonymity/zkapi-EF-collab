@@ -28,10 +28,13 @@ key's aggregate dollar usage. It stores durable reservations and non-secret
 lease metadata for crash recovery, updates the anonymous balance commitment,
 and signs the next state with the deployment's pinned Baby-JubJub key.
 
-One direct lease can cover several OpenRouter calls. The wallet cannot spend
-again while that lease's nullifier is reserved; it advances only after expiry
-and authoritative usage settlement. The key's provider-enforced limit bounds
-the interval's spend by the amount authorized in that single proof.
+One direct lease can cover several OpenRouter calls. `zkapi-clientd` binds its
+in-memory key to an application-supplied chat session ID. Calls in that session
+share the key and run concurrently; another session is rejected rather than
+being silently linked. The wallet cannot spend again while that lease's
+nullifier is reserved; it advances only after expiry and authoritative usage
+settlement. The key's provider-enforced limit bounds the interval's spend by
+the amount authorized in that single proof.
 
 `zkapi-indexerd` reconstructs the depth-32 active-note tree from vault events.
 It exposes the current root, next note ID, and paths. A future privacy hardening
@@ -42,6 +45,15 @@ not learn which note ID a client queried.
 mutual close, challengeable escape close, and expiry claims. Its proof adapter
 and state/clearance public keys are immutable. The real adapter verifies the
 same Groth16 statements checked off-chain.
+
+Withdrawal preparation is restart-safe client state. `zkapi-clientd` persists
+one idempotent proof plan, refuses new inference while it exists, and reconciles
+it against the vault before clearing any secret. Mutual close can complete
+immediately with server clearance. An escape initiation moves the vault note to
+`PendingWithdrawal`; the client retains the secret and destination through the
+deployment-configured challenge window (24 hours by default), then archives
+the note only after finalization is confirmed on-chain. A successful server
+challenge returns the note to active use and clears the escape plan.
 
 The user-facing compatibility routes remain `/v1/chat/completions`,
 `/v1/responses`, `/v1/models`, and `/api/chat` because they follow existing API

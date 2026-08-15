@@ -14,6 +14,15 @@ pub enum AuthError {
     PendingRequest,
     #[error("OpenRouter lease pending: {0}")]
     LeasePending(String),
+    #[error("withdrawal pending: {0}")]
+    WithdrawalPending(String),
+    #[error(
+        "another chat ({active_session_id}) owns the current ephemeral key until {expires_at}"
+    )]
+    LeaseSessionConflict {
+        active_session_id: String,
+        expires_at: u64,
+    },
     #[error("upstream error: {0}")]
     Upstream(String),
     #[error("upstream returned {status}: {message}")]
@@ -35,7 +44,10 @@ impl AuthError {
         match self {
             Self::WalletBusy => StatusCode::CONFLICT,
             Self::NoActiveNote | Self::InsufficientBalance => StatusCode::PAYMENT_REQUIRED,
-            Self::PendingRequest | Self::LeasePending(_) => StatusCode::CONFLICT,
+            Self::PendingRequest
+            | Self::LeasePending(_)
+            | Self::WithdrawalPending(_)
+            | Self::LeaseSessionConflict { .. } => StatusCode::CONFLICT,
             Self::InvalidInput(_) | Self::Serialization(_) => StatusCode::BAD_REQUEST,
             Self::UpstreamResponse { status, .. } => *status,
             Self::Wallet(_) | Self::Indexer(_) | Self::Upstream(_) | Self::KeyVerification(_) => {
@@ -51,6 +63,8 @@ impl AuthError {
             Self::InsufficientBalance => "insufficient_balance",
             Self::PendingRequest => "pending_request",
             Self::LeasePending(_) => "lease_pending",
+            Self::WithdrawalPending(_) => "withdrawal_pending",
+            Self::LeaseSessionConflict { .. } => "lease_session_conflict",
             Self::Upstream(_) | Self::UpstreamResponse { .. } => "upstream_error",
             Self::KeyVerification(_) => "key_verification_failed",
             Self::InvalidInput(_) => "invalid_input",

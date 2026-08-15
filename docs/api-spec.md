@@ -12,7 +12,21 @@ details to application code:
 | GET | `/v1/models` | OpenAI-compatible model list |
 | POST | `/api/chat` | Ollama-compatible chat |
 | GET | `/health` | daemon and wallet status |
-| GET | `/funding` | bundled testnet funding UI |
+| GET | `/` or `/funding` | bundled chat and MetaMask funding UI |
+| POST | `/wallet/withdraw` | prepare an idempotent `mutual` or `escape` withdrawal proof |
+| POST | `/wallet/withdraw/confirm` | reconcile the prepared withdrawal with canonical vault state |
+
+The withdrawal routes are also available under `/funding/api/withdraw` and
+`/funding/api/withdraw/confirm`. Preparing either mode persists the proof and
+blocks inference with `409 withdrawal_pending`. Confirmation archives the local
+note only after the vault reports it closed; a pending escape instead returns
+its challenge deadline while retaining the note secret for finalization.
+
+Applications may send `X-ZkAPI-Session-Id` on the three inference routes. In
+direct OpenRouter mode, the daemon binds the active ephemeral key to that ID,
+allows same-ID calls to run in parallel, and returns `409
+lease_session_conflict` for a different ID until the lease expires. Omitting the
+header uses the compatibility ID `default`.
 
 The CLI `request --path ... --json ...` operation invokes the same wallet flow
 without running a long-lived local daemon.
@@ -85,8 +99,11 @@ successful `201` response contains `api_key`, `openrouter_api_base`,
 `verification` object with `verifier_url`, `station_id`,
 `station_recently_attested`, `key_valid_till`, `station_signature`, and
 `org_signature`. The client requires that URL to match its independently
-configured OA verifier and submits the same `/submit_key` payload as oa-chat
-before using the key. The plaintext key is returned once and is not persisted.
+configured OA verifier, requires the signed validity window to cover the whole
+lease with at most 60 seconds of later-expiry skew, and submits the same
+`/submit_key` payload as oa-chat before using the key. Signature encoding and
+cryptographic validity are decided by that pinned verifier. The plaintext key
+is returned once and is not persisted.
 
 The client may send several sequential inference calls through a lease, up to
 its locally configured request-count limit (five by default). Calls sharing a

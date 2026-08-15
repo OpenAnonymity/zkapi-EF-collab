@@ -51,7 +51,7 @@ const DIRECT_REMOTE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const DIRECT_REMOTE_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 const DIRECT_LEASE_RETIRE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const DIRECT_LEASE_RETIRE_MAX_WAIT: Duration = Duration::from_secs(45);
-const MAX_OA_LEASE_EXPIRY_SAFETY_SECONDS: u64 = 30;
+include!(concat!(env!("OUT_DIR"), "/embedded_funding_assets.rs"));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoreRequest {
@@ -117,12 +117,14 @@ pub struct FundingConfig {
     pub indexer_url: String,
     pub protocol_server_url: String,
     pub models: Vec<ModelDescriptor>,
+    /// Suggested ERC-20 base-unit amount for a fresh note. The browser can
+    /// override this, but should present a safe default with request headroom.
+    pub suggested_deposit_amount: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub demo_rpc_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub demo_billing_token_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub demo_private_key: Option<String>,
+    pub demo_mint_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub demo_note_ttl_seconds: Option<u64>,
 }
@@ -145,6 +147,31 @@ pub struct ZkapiConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_kind: Option<String>,
     pub direct_openrouter_available: bool,
+    pub request_mode: RequestMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_lease: Option<DirectLeaseStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_withdrawal: Option<PreparedWithdrawalStatus>,
+}
+
+/// Non-secret metadata for the prompt-private key currently held in memory.
+/// The API key itself is intentionally never exposed by the local daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectLeaseStatus {
+    pub session_id: String,
+    pub client_request_id: String,
+    pub expires_at: u64,
+    pub settle_after: u64,
+}
+
+/// Non-secret metadata for an on-chain withdrawal prepared by the daemon.
+/// The full proof stays in memory and is returned idempotently only from the
+/// withdrawal endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedWithdrawalStatus {
+    pub mode: WithdrawalMode,
+    pub note_id: u32,
+    pub destination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -280,10 +307,12 @@ pub struct RecoverResult {
 
 #[derive(Clone)]
 struct ActiveOpenRouterLease {
+    session_id: String,
     client_request_id: String,
     api_key: String,
     openrouter_api_base: String,
     expires_at: u64,
+    settle_after: u64,
     verification: Option<OaKeyVerificationEvidence>,
     verified: bool,
     requests_served: u32,
@@ -304,7 +333,7 @@ pub struct StreamingCoreResponse {
 struct DirectOpenRouterStreamFinalizer {
     service: Arc<AuthService>,
     client_request_id: Option<String>,
-    request_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    request_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl Drop for DirectOpenRouterStreamFinalizer {
@@ -322,10 +351,11 @@ impl Drop for DirectOpenRouterStreamFinalizer {
             return;
         };
         runtime.spawn(async move {
+            drop(request_guard);
+            let _request_guard = service.direct_request_mutex.clone().write_owned().await;
             service
                 .finish_direct_openrouter_lease(client_request_id)
                 .await;
-            drop(request_guard);
         });
     }
 }
@@ -347,6 +377,43 @@ struct OaKeyVerificationEvidence {
     key_valid_till: u64,
     station_signature: String,
     org_signature: String,
+}
+
+const MAX_OA_SIGNATURE_ENCODING_LEN: usize = 4_096;
+const MAX_OA_EVIDENCE_EXPIRY_SKEW_SECONDS: u64 = 60;
+
+fn validate_oa_key_evidence(
+    expires_at: u64,
+    evidence: &OaKeyVerificationEvidence,
+) -> Result<(), AuthError> {
+    if evidence.station_id.trim().is_empty() {
+        return Err(AuthError::KeyVerification(
+            "OA key evidence omitted the station ID".to_string(),
+        ));
+    }
+    let expiry_skew = evidence.key_valid_till.saturating_sub(expires_at);
+    if evidence.key_valid_till < expires_at || expiry_skew > MAX_OA_EVIDENCE_EXPIRY_SKEW_SECONDS {
+        return Err(AuthError::KeyVerification(format!(
+            "OA key evidence expiry {} does not safely cover lease expiry {expires_at}",
+            evidence.key_valid_till
+        )));
+    }
+    for (label, signature) in [
+        ("station", evidence.station_signature.as_str()),
+        ("org", evidence.org_signature.as_str()),
+    ] {
+        if signature.is_empty() {
+            return Err(AuthError::KeyVerification(format!(
+                "OA key evidence omitted the {label} signature"
+            )));
+        }
+        if signature.len() > MAX_OA_SIGNATURE_ENCODING_LEN {
+            return Err(AuthError::KeyVerification(format!(
+                "OA key evidence {label} signature encoding is oversized"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn default_openrouter_key_source() -> String {
@@ -391,13 +458,23 @@ pub struct WithdrawalPlan {
     pub proof: Groth16ProofWire,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WithdrawalChainStatus {
+    pub note_id: u32,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_deadline: Option<u64>,
+    pub wallet: WalletStatus,
+}
+
 pub struct AuthService {
     config: AuthConfig,
     wallet_mutex: Arc<Mutex<()>>,
     indexer: IndexerClient,
     http: reqwest::Client,
     direct_lease: tokio::sync::Mutex<Option<ActiveOpenRouterLease>>,
-    direct_request_mutex: Arc<tokio::sync::Mutex<()>>,
+    direct_request_mutex: Arc<tokio::sync::RwLock<()>>,
+    prepared_withdrawal: tokio::sync::Mutex<Option<WithdrawalPlan>>,
 }
 
 impl AuthService {
@@ -409,6 +486,7 @@ impl AuthService {
         }
         std::fs::create_dir_all(&config.state_dir)
             .map_err(|err| AuthError::Wallet(err.to_string()))?;
+        let prepared_withdrawal = load_prepared_withdrawal(&config.state_dir)?;
         Ok(Arc::new(Self {
             indexer: IndexerClient::new(config.indexer_url.clone()),
             config,
@@ -419,7 +497,8 @@ impl AuthService {
                 .build()
                 .map_err(|error| AuthError::Wallet(error.to_string()))?,
             direct_lease: tokio::sync::Mutex::new(None),
-            direct_request_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            direct_request_mutex: Arc::new(tokio::sync::RwLock::new(())),
+            prepared_withdrawal: tokio::sync::Mutex::new(prepared_withdrawal),
         }))
     }
 
@@ -597,7 +676,11 @@ impl AuthService {
             "{}/v1/dashboard/summary",
             self.config.protocol_server_url.trim_end_matches('/')
         );
-        let summary = fetch_json::<Value>(&summary_url).await.ok();
+        let summary =
+            tokio::time::timeout(Duration::from_secs(2), fetch_json::<Value>(&summary_url))
+                .await
+                .ok()
+                .and_then(Result::ok);
         let server = summary.as_ref().map(|s| &s["server"]);
         let upstream_kind = server
             .and_then(|s| s["upstream_kind"].as_str())
@@ -609,6 +692,27 @@ impl AuthService {
         let direct_openrouter_available = server
             .and_then(|server| server["openrouter_leases_enabled"].as_bool())
             .unwrap_or(false);
+        let active_lease = self
+            .direct_lease
+            .lock()
+            .await
+            .as_ref()
+            .map(|lease| DirectLeaseStatus {
+                session_id: lease.session_id.clone(),
+                client_request_id: lease.client_request_id.clone(),
+                expires_at: lease.expires_at,
+                settle_after: lease.settle_after,
+            });
+        let prepared_withdrawal =
+            self.prepared_withdrawal
+                .lock()
+                .await
+                .as_ref()
+                .map(|plan| PreparedWithdrawalStatus {
+                    mode: plan.mode,
+                    note_id: plan.public_inputs.note_id,
+                    destination: format_address(&plan.public_inputs.destination),
+                });
 
         ZkapiConfig {
             credits_per_usd,
@@ -619,6 +723,9 @@ impl AuthService {
             funding: self.funding_config(),
             upstream_kind,
             direct_openrouter_available,
+            request_mode: self.config.request_mode,
+            active_lease,
+            prepared_withdrawal,
         }
     }
 
@@ -656,13 +763,14 @@ impl AuthService {
     pub async fn reset_wallet(&self) -> Result<WalletStatus, AuthError> {
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
-        spawn_blocking(move || {
+        let status = spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
             let _lockfile = acquire_wallet_lock(&config.state_dir)?;
             let state_path = config.state_dir.join("note_state.json");
             let journal_path = config.state_dir.join("pending_journal.json");
+            let prepared_path = prepared_withdrawal_path(&config.state_dir);
             if state_path.exists() {
                 // Best-effort archive (moves to archive/note_<id>_closed.json),
                 // then ensure the active state file is gone.
@@ -674,10 +782,14 @@ impl AuthService {
                 let _ = std::fs::remove_file(&state_path);
             }
             let _ = std::fs::remove_file(&journal_path);
+            let _ = std::fs::remove_file(&prepared_path);
             let wallet = load_wallet(&config, Vec::new())?;
             Ok(wallet_status(&wallet))
         })
-        .await
+        .await?;
+        *self.prepared_withdrawal.lock().await = None;
+        *self.direct_lease.lock().await = None;
+        Ok(status)
     }
 
     pub fn funding_config(&self) -> FundingConfig {
@@ -687,9 +799,10 @@ impl AuthService {
             indexer_url: self.config.indexer_url.clone(),
             protocol_server_url: self.config.protocol_server_url.clone(),
             models: self.config.models.clone(),
+            suggested_deposit_amount: self.config.suggested_deposit_amount,
             demo_rpc_url: self.config.demo_rpc_url.clone(),
             demo_billing_token_address: self.config.demo_billing_token_address.clone(),
-            demo_private_key: self.config.demo_private_key.clone(),
+            demo_mint_enabled: self.config.demo_mint_enabled,
             demo_note_ttl_seconds: self.config.demo_note_ttl_seconds,
         }
     }
@@ -698,9 +811,31 @@ impl AuthService {
         self: &Arc<Self>,
         request: CoreRequest,
     ) -> Result<CoreResponse, AuthError> {
+        self.execute_request_in_session(request, None).await
+    }
+
+    /// Execute an application request, binding direct-mode key reuse to an
+    /// explicit chat session. Calls with the same session ID share one bounded
+    /// ephemeral key and may run concurrently; a different session cannot
+    /// silently inherit that key.
+    pub async fn execute_request_in_session(
+        self: &Arc<Self>,
+        request: CoreRequest,
+        session_id: Option<&str>,
+    ) -> Result<CoreResponse, AuthError> {
+        if let Some(plan) = self.prepared_withdrawal.lock().await.as_ref() {
+            return Err(AuthError::WithdrawalPending(format!(
+                "{} withdrawal for note {} is prepared; finish it before sending more requests",
+                withdrawal_mode_label(plan.mode),
+                plan.public_inputs.note_id
+            )));
+        }
         match self.config.request_mode {
             RequestMode::Proxy => Ok(self.execute_request_demo(request).await?.response),
-            RequestMode::DirectOpenrouter => self.execute_direct_openrouter(request).await,
+            RequestMode::DirectOpenrouter => {
+                let session_id = normalize_session_id(session_id)?;
+                self.execute_direct_openrouter(request, session_id).await
+            }
         }
     }
 
@@ -712,9 +847,27 @@ impl AuthService {
         self: &Arc<Self>,
         request: CoreRequest,
     ) -> Result<StreamingCoreResponse, AuthError> {
+        self.execute_streaming_request_in_session(request, None)
+            .await
+    }
+
+    pub async fn execute_streaming_request_in_session(
+        self: &Arc<Self>,
+        request: CoreRequest,
+        session_id: Option<&str>,
+    ) -> Result<StreamingCoreResponse, AuthError> {
+        if let Some(plan) = self.prepared_withdrawal.lock().await.as_ref() {
+            return Err(AuthError::WithdrawalPending(format!(
+                "{} withdrawal for note {} is prepared; finish it before sending more requests",
+                withdrawal_mode_label(plan.mode),
+                plan.public_inputs.note_id
+            )));
+        }
         match self.config.request_mode {
             RequestMode::DirectOpenrouter => {
-                self.execute_direct_openrouter_streaming(request).await
+                let session_id = normalize_session_id(session_id)?;
+                self.execute_direct_openrouter_streaming(request, session_id)
+                    .await
             }
             RequestMode::Proxy => Err(AuthError::InvalidInput(
                 "streaming is available only in direct-openrouter mode".to_string(),
@@ -731,7 +884,7 @@ impl AuthService {
         }
         // A streaming response owns this lock through its final body chunk.
         // Do not race its lease state with periodic crash recovery.
-        let Ok(_request_guard) = self.direct_request_mutex.try_lock() else {
+        let Ok(_request_guard) = self.direct_request_mutex.try_write() else {
             return;
         };
         match self.recover().await {
@@ -750,7 +903,7 @@ impl AuthService {
     /// child key immediately, so withdrawal charges measured usage without
     /// waiting for the provider-enforced lease expiry.
     pub async fn settle_for_withdrawal(&self) -> Result<WalletStatus, AuthError> {
-        let _request_guard = self.direct_request_mutex.lock().await;
+        let _request_guard = self.direct_request_mutex.write().await;
 
         if self.config.request_mode == RequestMode::DirectOpenrouter {
             let live_lease_id = self
@@ -882,16 +1035,10 @@ impl AuthService {
     async fn execute_direct_openrouter(
         self: &Arc<Self>,
         request: CoreRequest,
+        session_id: String,
     ) -> Result<CoreResponse, AuthError> {
-        self.ensure_scheme_agreement().await?;
-        let request_guard = self.direct_request_mutex.clone().lock_owned().await;
-        let mut lease_guard = self.direct_lease.lock().await;
-        self.ensure_direct_openrouter_lease(&mut lease_guard)
-            .await?;
-        let (upstream_path, upstream_body) =
-            crate::compat::openrouter_request(&request.path, request.body);
-        let (client_request_id, upstream, retire_after_response) = self
-            .send_on_active_openrouter_lease(&mut lease_guard, &upstream_path, &upstream_body)
+        let (client_request_id, upstream, retire_after_response, request_guard) = self
+            .open_direct_openrouter_response(request, &session_id)
             .await?;
         let status = upstream.status();
         let result = upstream
@@ -899,21 +1046,11 @@ impl AuthService {
             .await
             .map(|raw_payload| (status, raw_payload))
             .map_err(|error| AuthError::Upstream(error.to_string()));
-        if retire_after_response
-            && lease_guard
-                .as_ref()
-                .is_some_and(|lease| lease.client_request_id == client_request_id)
-        {
-            *lease_guard = None;
-        }
-        drop(lease_guard);
         if retire_after_response {
-            let service = self.clone();
-            let retirement_id = client_request_id.clone();
-            tokio::spawn(async move {
-                service.finish_direct_openrouter_lease(retirement_id).await;
-                drop(request_guard);
-            });
+            drop(request_guard);
+            let _request_guard = self.direct_request_mutex.clone().write_owned().await;
+            self.finish_direct_openrouter_lease(client_request_id.clone())
+                .await;
         } else {
             drop(request_guard);
         }
@@ -941,11 +1078,19 @@ impl AuthService {
     async fn ensure_direct_openrouter_lease(
         &self,
         lease_slot: &mut Option<ActiveOpenRouterLease>,
+        session_id: &str,
     ) -> Result<(), AuthError> {
         if lease_slot.as_ref().is_some_and(|lease| {
             now_seconds().saturating_add(1) < lease.expires_at
                 && lease.requests_served < self.config.openrouter_requests_per_key
         }) {
+            let lease = lease_slot.as_ref().expect("checked above");
+            if lease.session_id != session_id {
+                return Err(AuthError::LeaseSessionConflict {
+                    active_session_id: lease.session_id.clone(),
+                    expires_at: lease.expires_at,
+                });
+            }
             return Ok(());
         }
 
@@ -966,33 +1111,21 @@ impl AuthService {
         // reused until the configured request count, its provider-enforced
         // expiration, or a key rejection.
         let _ = self.recover().await?;
-        *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
+        *lease_slot = Some(
+            self.issue_direct_openrouter_lease(session_id.to_string())
+                .await?,
+        );
         Ok(())
     }
 
     async fn execute_direct_openrouter_streaming(
         self: &Arc<Self>,
         request: CoreRequest,
+        session_id: String,
     ) -> Result<StreamingCoreResponse, AuthError> {
-        self.ensure_scheme_agreement().await?;
-        let request_guard = self.direct_request_mutex.clone().lock_owned().await;
-        let mut lease_guard = self.direct_lease.lock().await;
-        self.ensure_direct_openrouter_lease(&mut lease_guard)
+        let (client_request_id, upstream, retire_after_response, request_guard) = self
+            .open_direct_openrouter_response(request, &session_id)
             .await?;
-        let (upstream_path, upstream_body) =
-            crate::compat::openrouter_request(&request.path, request.body);
-        let upstream = self
-            .send_on_active_openrouter_lease(&mut lease_guard, &upstream_path, &upstream_body)
-            .await;
-        let (client_request_id, upstream, retire_after_response) = upstream?;
-        if retire_after_response
-            && lease_guard
-                .as_ref()
-                .is_some_and(|lease| lease.client_request_id == client_request_id)
-        {
-            *lease_guard = None;
-        }
-        drop(lease_guard);
         let status = upstream.status();
         let content_type = upstream
             .headers()
@@ -1033,32 +1166,75 @@ impl AuthService {
         })
     }
 
-    async fn send_on_active_openrouter_lease(
-        &self,
-        lease_slot: &mut Option<ActiveOpenRouterLease>,
-        upstream_path: &str,
-        upstream_body: &Value,
-    ) -> Result<(String, reqwest::Response, bool), AuthError> {
+    async fn open_direct_openrouter_response(
+        self: &Arc<Self>,
+        request: CoreRequest,
+        session_id: &str,
+    ) -> Result<
+        (
+            String,
+            reqwest::Response,
+            bool,
+            tokio::sync::OwnedRwLockReadGuard<()>,
+        ),
+        AuthError,
+    > {
+        self.ensure_scheme_agreement().await?;
+        let (upstream_path, upstream_body) =
+            crate::compat::openrouter_request(&request.path, request.body);
         let mut replaced_rejected_key = false;
         loop {
+            let request_guard = self.direct_request_mutex.clone().read_owned().await;
+            let mut lease_slot = self.direct_lease.lock().await;
+            self.ensure_direct_openrouter_lease(&mut lease_slot, session_id)
+                .await?;
             let lease = lease_slot
                 .as_mut()
                 .ok_or_else(|| AuthError::Wallet("OpenRouter lease disappeared".to_string()))?;
+            if !lease.verified {
+                let evidence = lease.verification.clone().ok_or_else(|| {
+                    AuthError::KeyVerification(
+                        "OA lease lost its verification evidence".to_string(),
+                    )
+                })?;
+                self.verify_oa_key(&lease.api_key, lease.expires_at, &evidence)
+                    .await?;
+                if now_seconds().saturating_add(1) >= lease.expires_at {
+                    return Err(AuthError::KeyVerification(
+                        "OA key expired while verification was in progress".to_string(),
+                    ));
+                }
+                lease.verified = true;
+            }
             let client_request_id = lease.client_request_id.clone();
+            let mut reserved_lease = lease.clone();
+            lease.requests_served = lease.requests_served.saturating_add(1);
+            let retire_after_response =
+                lease.requests_served >= self.config.openrouter_requests_per_key;
+            if retire_after_response {
+                *lease_slot = None;
+            }
+            drop(lease_slot);
             match self
-                .send_verified_openrouter_request(lease, upstream_path, upstream_body)
+                .send_verified_openrouter_request(
+                    &mut reserved_lease,
+                    &upstream_path,
+                    &upstream_body,
+                )
                 .await
             {
                 Ok(response) => {
-                    lease.requests_served = lease.requests_served.saturating_add(1);
-                    let request_limit_reached =
-                        lease.requests_served >= self.config.openrouter_requests_per_key;
-                    return Ok((client_request_id, response, request_limit_reached));
+                    return Ok((
+                        client_request_id,
+                        response,
+                        retire_after_response,
+                        request_guard,
+                    ))
                 }
                 Err(error)
                     if !replaced_rejected_key
                         && (is_rejected_openrouter_key(&error)
-                            || (lease.requests_served > 0
+                            || (reserved_lease.requests_served > 0
                                 && is_exhausted_openrouter_key(&error))) =>
                 {
                     tracing::warn!(
@@ -1066,14 +1242,31 @@ impl AuthService {
                         error = %error,
                         "retiring rejected OpenRouter lease and opening one replacement"
                     );
-                    *lease_slot = None;
+                    drop(request_guard);
+                    let _request_guard = self.direct_request_mutex.clone().write_owned().await;
+                    let mut lease_slot = self.direct_lease.lock().await;
+                    if lease_slot
+                        .as_ref()
+                        .is_some_and(|lease| lease.client_request_id == client_request_id)
+                    {
+                        *lease_slot = None;
+                    }
+                    drop(lease_slot);
                     self.retire_direct_openrouter_lease(&client_request_id)
                         .await?;
-                    *lease_slot = Some(self.issue_direct_openrouter_lease().await?);
                     replaced_rejected_key = true;
                 }
                 Err(error) => {
-                    *lease_slot = None;
+                    drop(request_guard);
+                    let _request_guard = self.direct_request_mutex.clone().write_owned().await;
+                    let mut lease_slot = self.direct_lease.lock().await;
+                    if lease_slot
+                        .as_ref()
+                        .is_some_and(|lease| lease.client_request_id == client_request_id)
+                    {
+                        *lease_slot = None;
+                    }
+                    drop(lease_slot);
                     if let Err(cleanup_error) = self
                         .retire_direct_openrouter_lease(&client_request_id)
                         .await
@@ -1184,7 +1377,10 @@ impl AuthService {
         ))
     }
 
-    async fn issue_direct_openrouter_lease(&self) -> Result<ActiveOpenRouterLease, AuthError> {
+    async fn issue_direct_openrouter_lease(
+        &self,
+        session_id: String,
+    ) -> Result<ActiveOpenRouterLease, AuthError> {
         let mut retried_stale_root = false;
         let mut reconciled_lost_key = false;
         loop {
@@ -1255,10 +1451,12 @@ impl AuthService {
                     "opened prompt-private OpenRouter lease"
                 );
                 return Ok(ActiveOpenRouterLease {
+                    session_id,
                     client_request_id: lease.client_request_id,
                     api_key: lease.api_key,
                     openrouter_api_base: lease.openrouter_api_base,
                     expires_at: lease.expires_at,
+                    settle_after: lease.settle_after,
                     verification,
                     verified,
                     requests_served: 0,
@@ -1337,17 +1535,7 @@ impl AuthService {
                 "lease verifier does not match the client's trusted OA verifier".to_string(),
             ));
         }
-        if evidence.station_id.is_empty()
-            || evidence.key_valid_till < expires_at
-            || evidence.key_valid_till.saturating_sub(expires_at)
-                > MAX_OA_LEASE_EXPIRY_SAFETY_SECONDS
-            || evidence.station_signature.len() != 128
-            || evidence.org_signature.len() != 128
-        {
-            return Err(AuthError::KeyVerification(
-                "OA key evidence is incomplete or inconsistent".to_string(),
-            ));
-        }
+        validate_oa_key_evidence(expires_at, evidence)?;
         let url = format!("{expected_verifier}/submit_key");
         let request = serde_json::json!({
             "station_id": evidence.station_id,
@@ -1795,11 +1983,45 @@ impl AuthService {
         mode: WithdrawalMode,
         destination: [u8; 20],
     ) -> Result<WithdrawalPlan, AuthError> {
+        let mut prepared = self.prepared_withdrawal.lock().await;
+        if let Some(plan) = prepared.as_ref() {
+            let same_destination = plan.public_inputs.destination == destination;
+            if plan.mode == mode && same_destination {
+                return Ok(plan.clone());
+            }
+            // A cancelled mutual close cannot safely return to ordinary
+            // spending because its clearance nullifier has been reserved by
+            // the server. Falling back to the unilateral escape path for the
+            // same destination is the recovery mechanism.
+            if !(plan.mode == WithdrawalMode::Mutual
+                && mode == WithdrawalMode::Escape
+                && same_destination)
+            {
+                return Err(AuthError::WithdrawalPending(format!(
+                    "{} withdrawal for note {} is already prepared for {}",
+                    withdrawal_mode_label(plan.mode),
+                    plan.public_inputs.note_id,
+                    format_address(&plan.public_inputs.destination)
+                )));
+            }
+        }
+
+        // A proof must bind the authoritative post-lease wallet state. Hold
+        // the prepared-withdrawal lock while reconciling so no new UI/API
+        // request can pass the withdrawal guard and open a competing lease.
+        self.reconcile_direct_openrouter().await;
+        if let Some(lease) = self.direct_lease.lock().await.as_ref() {
+            return Err(AuthError::LeasePending(format!(
+                "chat {} owns an unsettled key until {}; wait for settlement before withdrawing",
+                lease.session_id, lease.expires_at
+            )));
+        }
+
         let config = self.config.clone();
         let wallet_mutex = self.wallet_mutex.clone();
         let indexer = self.indexer.clone();
         let trusted_roots = self.trusted_roots();
-        spawn_blocking(move || {
+        let plan = spawn_blocking(move || {
             let _guard = wallet_mutex
                 .lock()
                 .map_err(|err| AuthError::Wallet(err.to_string()))?;
@@ -1831,7 +2053,145 @@ impl AuthService {
                 })
             })
         })
-        .await
+        .await?;
+        *prepared = Some(plan.clone());
+        persist_prepared_withdrawal(&self.config.state_dir, &plan)?;
+        Ok(plan)
+    }
+
+    /// Read the vault's canonical note status before changing local wallet
+    /// state. Closed notes are archived locally; pending escape withdrawals
+    /// retain their secret until finalization; challenged escapes return to
+    /// active use and clear the prepared-withdrawal guard.
+    pub async fn confirm_withdrawal(&self) -> Result<WithdrawalChainStatus, AuthError> {
+        let wallet_before = self.status().await?;
+        let note_id = wallet_before
+            .note
+            .as_ref()
+            .ok_or(AuthError::NoActiveNote)?
+            .note_id;
+        let (status, challenge_deadline) = self.onchain_withdrawal_status(note_id).await?;
+        match status.as_str() {
+            "closed" => {
+                *self.prepared_withdrawal.lock().await = None;
+                *self.direct_lease.lock().await = None;
+                let wallet = self.reset_wallet().await?;
+                Ok(WithdrawalChainStatus {
+                    note_id,
+                    status,
+                    challenge_deadline: None,
+                    wallet,
+                })
+            }
+            "active" => {
+                // An escape withdrawal can return to Active only after a
+                // successful challenge. Its old proof must never be reused.
+                let mut prepared = self.prepared_withdrawal.lock().await;
+                if prepared
+                    .as_ref()
+                    .is_some_and(|plan| plan.mode == WithdrawalMode::Escape)
+                {
+                    *prepared = None;
+                    remove_prepared_withdrawal(&self.config.state_dir)?;
+                }
+                Ok(WithdrawalChainStatus {
+                    note_id,
+                    status,
+                    challenge_deadline: None,
+                    wallet: wallet_before,
+                })
+            }
+            "pending_withdrawal" => Ok(WithdrawalChainStatus {
+                note_id,
+                status,
+                challenge_deadline,
+                wallet: wallet_before,
+            }),
+            other => Err(AuthError::Wallet(format!(
+                "vault returned unsupported note status {other}"
+            ))),
+        }
+    }
+
+    async fn onchain_withdrawal_status(
+        &self,
+        note_id: u32,
+    ) -> Result<(String, Option<u64>), AuthError> {
+        let notes_data = format!("0x9f18e4ed{:064x}", note_id);
+        let encoded_note = self.vault_eth_call(&notes_data).await?;
+        let note_words = abi_words(&encoded_note)?;
+        if note_words.len() < 4 {
+            return Err(AuthError::Wallet(
+                "vault notes() returned a truncated response".to_string(),
+            ));
+        }
+        let raw_status = abi_word_u64(note_words[3])?;
+        match raw_status {
+            1 => Ok(("active".to_string(), None)),
+            2 => {
+                let pending_data = format!("0xa2f9f1ce{:064x}", note_id);
+                let encoded_pending = self.vault_eth_call(&pending_data).await?;
+                let pending_words = abi_words(&encoded_pending)?;
+                if pending_words.len() < 6 || abi_word_u64(pending_words[0])? != 1 {
+                    return Err(AuthError::Wallet(
+                        "vault pending-withdrawal record is missing".to_string(),
+                    ));
+                }
+                Ok((
+                    "pending_withdrawal".to_string(),
+                    Some(abi_word_u64(pending_words[5])?),
+                ))
+            }
+            3 => Ok(("closed".to_string(), None)),
+            0 => Err(AuthError::Wallet(format!(
+                "vault note {note_id} is uninitialized"
+            ))),
+            other => Err(AuthError::Wallet(format!(
+                "vault note {note_id} has unknown status {other}"
+            ))),
+        }
+    }
+
+    async fn vault_eth_call(&self, data: &str) -> Result<String, AuthError> {
+        let rpc_url = self.config.demo_rpc_url.as_ref().ok_or_else(|| {
+            AuthError::InvalidInput(
+                "deployment does not advertise an RPC URL for withdrawal confirmation".to_string(),
+            )
+        })?;
+        let response = self
+            .http
+            .post(rpc_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{
+                    "to": format_felt_address(&self.config.contract_address),
+                    "data": data,
+                }, "latest"],
+            }))
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(format!("RPC call failed: {error}")))?;
+        let status = response.status();
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|error| AuthError::Wallet(format!("invalid RPC response: {error}")))?;
+        if !status.is_success() || payload.get("error").is_some() {
+            return Err(AuthError::Wallet(format!(
+                "RPC eth_call failed: {}",
+                payload
+                    .get("error")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(status.to_string()))
+            )));
+        }
+        payload
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| AuthError::Wallet("RPC eth_call omitted result".to_string()))
     }
 
     pub fn funding_index_html(&self) -> &'static str {
@@ -1842,8 +2202,20 @@ impl AuthService {
         include_str!("../../../funding-page/styles.css")
     }
 
+    pub fn funding_oa_license(&self) -> &'static str {
+        include_str!("../../../funding-page/OA_CHAT_LICENSE")
+    }
+
     pub fn funding_app_js(&self) -> &'static str {
         include_str!("../../../funding-page/app.js")
+    }
+
+    pub fn funding_wallet_js(&self) -> &'static str {
+        include_str!("../../../funding-page/wallet.js")
+    }
+
+    pub fn funding_asset(&self, path: &str) -> Option<(&'static [u8], &'static str)> {
+        embedded_funding_asset(path)
     }
 
     async fn fetch_indexer_snapshot(&self) -> IndexerSnapshot {
@@ -1978,6 +2350,57 @@ fn wallet_status(wallet: &Wallet) -> WalletStatus {
     }
 }
 
+fn withdrawal_mode_label(mode: WithdrawalMode) -> &'static str {
+    match mode {
+        WithdrawalMode::Mutual => "mutual-close",
+        WithdrawalMode::Escape => "escape-hatch",
+    }
+}
+
+fn format_address(address: &[u8; 20]) -> String {
+    let body = address
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("0x{body}")
+}
+
+fn format_felt_address(address: &Felt252) -> String {
+    let raw = address.to_hex();
+    let body = raw.strip_prefix("0x").unwrap_or(&raw);
+    format!("0x{body:0>40}")
+}
+
+fn abi_words(value: &str) -> Result<Vec<&str>, AuthError> {
+    let encoded = value.strip_prefix("0x").unwrap_or(value);
+    if encoded.is_empty() || encoded.len() % 64 != 0 || !encoded.is_ascii() {
+        return Err(AuthError::Wallet(
+            "RPC returned malformed ABI data".to_string(),
+        ));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(64)
+        .map(|chunk| {
+            std::str::from_utf8(chunk)
+                .map_err(|_| AuthError::Wallet("RPC returned malformed ABI data".to_string()))
+        })
+        .collect()
+}
+
+fn abi_word_u64(word: &str) -> Result<u64, AuthError> {
+    if word.len() != 64
+        || !word.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || word[..48].bytes().any(|byte| byte != b'0')
+    {
+        return Err(AuthError::Wallet(
+            "RPC ABI integer does not fit in u64".to_string(),
+        ));
+    }
+    u64::from_str_radix(&word[48..], 16)
+        .map_err(|_| AuthError::Wallet("RPC returned malformed ABI integer".to_string()))
+}
+
 fn hash_payload(payload: &str) -> Felt252 {
     compute_payload_hash(payload.as_bytes())
 }
@@ -1987,6 +2410,26 @@ fn now_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn normalize_session_id(session_id: Option<&str>) -> Result<String, AuthError> {
+    const DEFAULT_SESSION: &str = "default";
+    let value = session_id.unwrap_or(DEFAULT_SESSION).trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(AuthError::InvalidInput(
+            "x-zkapi-session-id must contain 1 to 128 characters".to_string(),
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(AuthError::InvalidInput(
+            "x-zkapi-session-id may contain only letters, digits, '-', '_', '.', and ':'"
+                .to_string(),
+        ));
+    }
+    Ok(value.to_string())
 }
 
 fn truncate_for_error(value: &str, max: usize) -> String {
@@ -2157,6 +2600,64 @@ fn create_private_dir(path: &Path) -> Result<(), AuthError> {
     Ok(())
 }
 
+fn prepared_withdrawal_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("prepared_withdrawal.json")
+}
+
+fn load_prepared_withdrawal(state_dir: &Path) -> Result<Option<WithdrawalPlan>, AuthError> {
+    let path = prepared_withdrawal_path(state_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let encoded = std::fs::read(&path).map_err(|error| {
+        AuthError::Wallet(format!("failed to read {}: {error}", path.display()))
+    })?;
+    serde_json::from_slice(&encoded).map(Some).map_err(|error| {
+        AuthError::Wallet(format!(
+            "prepared withdrawal state {} is invalid: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn persist_prepared_withdrawal(state_dir: &Path, plan: &WithdrawalPlan) -> Result<(), AuthError> {
+    let path = prepared_withdrawal_path(state_dir);
+    let temporary = state_dir.join("prepared_withdrawal.json.tmp");
+    let encoded = serde_json::to_vec_pretty(plan)
+        .map_err(|error| AuthError::Serialization(error.to_string()))?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| AuthError::Wallet(error.to_string()))?;
+    use std::io::Write;
+    file.write_all(&encoded)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| AuthError::Wallet(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| AuthError::Wallet(error.to_string()))?;
+    }
+    drop(file);
+    std::fs::rename(&temporary, &path).map_err(|error| AuthError::Wallet(error.to_string()))
+}
+
+fn remove_prepared_withdrawal(state_dir: &Path) -> Result<(), AuthError> {
+    let path = prepared_withdrawal_path(state_dir);
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AuthError::Wallet(error.to_string())),
+    }
+}
+
 fn client_config(config: &AuthConfig, trusted_epoch_roots: Vec<EpochRoots>) -> ClientConfig {
     ClientConfig {
         protocol_version: config.protocol_version,
@@ -2247,10 +2748,14 @@ mod security_tests {
     use reqwest::StatusCode;
 
     use super::{
-        direct_remote_retry_delay, enforce_required_key_source, is_exhausted_openrouter_key,
+        abi_word_u64, abi_words, direct_remote_retry_delay, enforce_required_key_source,
+        format_address, format_felt_address, is_exhausted_openrouter_key,
         is_rejected_openrouter_key, is_transient_remote_status, matches_trusted_url,
+        normalize_session_id, validate_oa_key_evidence, OaKeyVerificationEvidence,
+        MAX_OA_EVIDENCE_EXPIRY_SKEW_SECONDS, MAX_OA_SIGNATURE_ENCODING_LEN,
     };
     use crate::error::AuthError;
+    use zkapi_types::Felt252;
 
     #[test]
     fn endpoint_pinning_rejects_inference_origin_substitution() {
@@ -2316,6 +2821,70 @@ mod security_tests {
                 .to_string(),
         };
         assert!(!is_rejected_openrouter_key(&permission_denied));
+    }
+
+    #[test]
+    fn session_ids_are_bounded_and_header_safe() {
+        assert_eq!(normalize_session_id(None).unwrap(), "default");
+        assert_eq!(
+            normalize_session_id(Some("chat:abc-123")).unwrap(),
+            "chat:abc-123"
+        );
+        assert!(normalize_session_id(Some("")).is_err());
+        assert!(normalize_session_id(Some("contains spaces")).is_err());
+        assert!(normalize_session_id(Some(&"x".repeat(129))).is_err());
+    }
+
+    #[test]
+    fn withdrawal_rpc_abi_helpers_are_strict() {
+        let encoded = format!("0x{:064x}{:064x}", 1u64, u64::MAX);
+        let words = abi_words(&encoded).unwrap();
+        assert_eq!(words.len(), 2);
+        assert_eq!(abi_word_u64(words[0]).unwrap(), 1);
+        assert_eq!(abi_word_u64(words[1]).unwrap(), u64::MAX);
+        assert!(abi_words("0x1234").is_err());
+        assert!(abi_word_u64(&format!("1{:063x}", 0)).is_err());
+    }
+
+    #[test]
+    fn withdrawal_addresses_are_canonical() {
+        assert_eq!(
+            format_address(&[0x22; 20]),
+            "0x2222222222222222222222222222222222222222"
+        );
+        assert_eq!(
+            format_felt_address(&Felt252::from_u64(0x1234)),
+            "0x0000000000000000000000000000000000001234"
+        );
+    }
+
+    #[test]
+    fn oa_evidence_defers_signature_encoding_to_the_pinned_verifier() {
+        let evidence = OaKeyVerificationEvidence {
+            verifier_url: "https://verifier.example".to_string(),
+            station_id: "station-1".to_string(),
+            station_recently_attested: true,
+            key_valid_till: 123,
+            station_signature: "provider-specific-encoding".to_string(),
+            org_signature: "another-provider-specific-encoding".to_string(),
+        };
+
+        assert!(validate_oa_key_evidence(123, &evidence).is_ok());
+        assert!(validate_oa_key_evidence(124, &evidence).is_err());
+
+        let mut bounded_skew = evidence.clone();
+        bounded_skew.key_valid_till = 123 + MAX_OA_EVIDENCE_EXPIRY_SKEW_SECONDS;
+        assert!(validate_oa_key_evidence(123, &bounded_skew).is_ok());
+        bounded_skew.key_valid_till += 1;
+        assert!(validate_oa_key_evidence(123, &bounded_skew).is_err());
+
+        let mut missing = evidence.clone();
+        missing.org_signature.clear();
+        assert!(validate_oa_key_evidence(123, &missing).is_err());
+
+        let mut oversized = evidence;
+        oversized.station_signature = "x".repeat(MAX_OA_SIGNATURE_ENCODING_LEN + 1);
+        assert!(validate_oa_key_evidence(123, &oversized).is_err());
     }
 }
 

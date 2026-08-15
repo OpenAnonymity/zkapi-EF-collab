@@ -1,0 +1,133 @@
+import zkapiAPI from '../../../api.js';
+
+const zkapiBackend = {
+    id: 'zkapi',
+    label: 'Private inference',
+    accessLabel: 'private session',
+    accessShortLabel: 'session',
+    accessType: 'zkapi-session',
+    requiresTickets: false,
+    refreshOnCreditExhaustion: false,
+    baseUrl: window.location.origin,
+    defaultModelId: 'openai/gpt-4o-mini',
+    defaultModelName: 'OpenAI: gpt-4o-mini',
+    tls: null,
+
+    getCachedModels: () => zkapiAPI.getCachedModels(),
+    fetchModels: () => zkapiAPI.fetchModels(),
+    getDisplayName: (modelId, fallback) => zkapiAPI.getDisplayName(modelId, fallback),
+    sendCompletion: (messages, modelId, token) => zkapiAPI.sendCompletion(messages, modelId, token),
+    generateSessionTitle: (prompt, token, options) => zkapiAPI.generateSessionTitle(prompt, token, options),
+    streamCompletion: (
+        messages,
+        modelId,
+        token,
+        onChunk,
+        onTokenUpdate,
+        files,
+        searchEnabled,
+        abortController,
+        onStreamOpen,
+        onReasoningChunk,
+        reasoningEnabled,
+        reasoningEffort
+    ) => zkapiAPI.streamCompletion(
+        messages,
+        modelId,
+        token,
+        onChunk,
+        onTokenUpdate,
+        files,
+        searchEnabled,
+        abortController,
+        onStreamOpen,
+        onReasoningChunk,
+        reasoningEnabled,
+        reasoningEffort
+    ),
+
+    getAccessInfo(session) {
+        if (!session) return null;
+        return {
+            token: session.zkapiSessionId || session.apiKey || null,
+            info: session.apiKeyInfo || null,
+            expiresAt: null
+        };
+    },
+
+    getAccessToken(session) {
+        return session?.zkapiSessionId || session?.apiKey || null;
+    },
+
+    setAccessInfo(session, accessInfo) {
+        if (!session) return;
+        const token = accessInfo?.key || accessInfo?.token || session.id;
+        session.zkapiSessionId = token;
+        session.apiKey = token;
+        session.apiKeyInfo = {
+            ...(accessInfo || {}),
+            key: token,
+            backendId: zkapiBackend.id,
+            sessionBound: true
+        };
+        session.expiresAt = null;
+        session.currentEphemeralKeyId = token;
+    },
+
+    clearAccessInfo(session) {
+        if (!session) return;
+        session.apiKey = null;
+        session.apiKeyInfo = null;
+        session.expiresAt = null;
+        session.currentEphemeralKeyId = null;
+    },
+
+    isAccessExpired(session) {
+        return !this.getAccessToken(session);
+    },
+
+    async requestAccess({ session, signal } = {}) {
+        if (signal?.aborted) {
+            const error = new Error('Request aborted');
+            error.name = 'AbortError';
+            error.isCancelled = true;
+            throw error;
+        }
+        if (!session?.id) throw new Error('No active chat is available.');
+        const token = session.zkapiSessionId || session.apiKey || session.id;
+        return {
+            key: token,
+            token,
+            backendId: zkapiBackend.id,
+            sessionBound: true
+        };
+    },
+
+    verification: { supports: false },
+
+    maskAccessToken(token) {
+        if (!token) return '';
+        return token.length > 16 ? `${token.slice(0, 8)}…${token.slice(-6)}` : token;
+    },
+
+    buildCurlCommand(token, modelId) {
+        return `curl ${window.location.origin}/v1/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -H "x-zkapi-session-id: ${token}" \\\n  -d '{"model":"${modelId}","messages":[{"role":"user","content":"Hi"}]}'`;
+    },
+
+    async testAccessToken(token, modelId) {
+        return fetch('/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'x-zkapi-session-id': token
+            },
+            body: JSON.stringify({
+                model: modelId,
+                messages: [{ role: 'user', content: 'Hi' }],
+                stream: false
+            })
+        });
+    }
+};
+
+export default zkapiBackend;

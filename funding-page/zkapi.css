@@ -1,0 +1,214 @@
+/*
+ * zkAPI adapter styles for the pinned OA Chat client.
+ * These use OA's existing color tokens, type scale, spacing, radii, and motion.
+ */
+
+.zkapi-primary-button,
+.zkapi-secondary-button {
+    display: inline-flex;
+    min-height: 2.25rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1rem;
+    transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease,
+        opacity 150ms ease, transform 150ms ease;
+}
+
+.zkapi-primary-button {
+    border: 1px solid hsl(var(--primary));
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+}
+
+.zkapi-primary-button:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+.zkapi-secondary-button {
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+}
+
+.zkapi-secondary-button:hover:not(:disabled) {
+    background: hsl(var(--accent));
+}
+
+.zkapi-primary-button:disabled,
+.zkapi-secondary-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.zkapi-balance-card {
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.75rem;
+    background: hsl(var(--muted) / 0.18);
+    padding: 1rem;
+}
+
+.zkapi-details,
+.zkapi-panel-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-size: 0.6875rem;
+}
+
+.zkapi-details > div,
+.zkapi-panel-details > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.zkapi-details dt,
+.zkapi-panel-details dt {
+    color: hsl(var(--muted-foreground));
+}
+
+.zkapi-details dd,
+.zkapi-panel-details dd {
+    max-width: 65%;
+    overflow: hidden;
+    color: hsl(var(--foreground));
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zkapi-choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.625rem;
+    padding: 0.75rem;
+    cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.zkapi-choice:hover {
+    background: hsl(var(--accent) / 0.55);
+}
+
+.zkapi-choice.selected {
+    border-color: hsl(var(--primary) / 0.55);
+    background: hsl(var(--primary) / 0.05);
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.08);
+}
+
+.zkapi-choice input {
+    margin-top: 0.125rem;
+}
+
+.zkapi-choice span {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.zkapi-choice strong {
+    color: hsl(var(--foreground));
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.zkapi-choice small {
+    color: hsl(var(--muted-foreground));
+    font-size: 0.6875rem;
+    line-height: 1rem;
+}
+
+.zkapi-status-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    flex: none;
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.5);
+}
+
+.zkapi-status-dot.online {
+    background: rgb(34 197 94);
+    box-shadow: 0 0 0 3px rgb(34 197 94 / 0.12);
+}
+
+.zkapi-status-dot.error {
+    background: hsl(var(--destructive));
+    box-shadow: 0 0 0 3px hsl(var(--destructive) / 0.12);
+}
+
+.zkapi-progress-indeterminate {
+    width: 45%;
+    animation: zkapi-progress 1.3s ease-in-out infinite;
+}
+
+@keyframes zkapi-progress {
+    0% { transform: translateX(-110%); }
+    50% { transform: translateX(75%); }
+    100% { transform: translateX(225%); }
+}
+
+#right-panel {
+    overflow: hidden;
+    transition: width 220ms ease, min-width 220ms ease, border-width 220ms ease,
+        transform 220ms ease;
+}
+
+#right-panel-content {
+    width: 18rem;
+    min-width: 18rem;
+}
+
+#account-tab-btn [data-private-balance-label] {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#scrubber-shortcut-hint,
+#scrubber-preview-hint,
+#scrubber-settings-section,
+#memory-settings-section,
+#chat-mode-toggle {
+    display: none !important;
+}
+
+@media (max-width: 1023px) {
+    #right-panel {
+        position: fixed;
+        width: 18rem !important;
+        min-width: 18rem !important;
+        transform: translateX(100%);
+    }
+
+    #right-panel.right-panel-visible {
+        transform: translateX(0);
+    }
+}
+
+@media (max-width: 480px) {
+    #right-panel {
+        width: min(18rem, 90vw) !important;
+        min-width: min(18rem, 90vw) !important;
+    }
+
+    #right-panel-content {
+        width: min(18rem, 90vw);
+        min-width: min(18rem, 90vw);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .zkapi-progress-indeterminate {
+        animation-duration: 2.6s;
+    }
+}
