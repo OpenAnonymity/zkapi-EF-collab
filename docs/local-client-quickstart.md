@@ -1,6 +1,6 @@
 # Local client quickstart
 
-Prerequisites: Rust and Foundry (`cast`). Clone and build:
+Prerequisites: Rust, Foundry (`cast`), `curl`, and `jq`. Clone and build:
 
 ```bash
 git clone https://github.com/OpenAnonymity/zkapi-EF-collab.git
@@ -16,6 +16,11 @@ Start the prompt-private local API on Ethereum Mainnet (real USDC and ETH for ga
   --mode direct-openrouter --initial-credits 100000
 ```
 
+This deposits 100,000 base units (`0.10 USDC`). The selected wallet must
+already hold at least that much USDC plus Mainnet ETH for approve, deposit,
+and withdrawal gas. For a small test, `0.003 ETH` provides reasonable
+headroom at low gas prices; check the current gas price before funding.
+
 Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
 
 ```bash
@@ -24,17 +29,25 @@ Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
   --mode direct-openrouter --initial-credits 5000000
 ```
 
+The client mints the Sepolia test token automatically, so only Sepolia ETH is
+needed beforehand. Fund about `0.02 Sepolia ETH` for a complete
+mint/approve/deposit/chat/mutual-withdrawal test; the exact requirement varies
+with gas prices.
+
 The larger Sepolia test-token deposit reserves enough for about 100
 maximum-cost lease windows at the demo's $0.05 cap. By default a child key
-serves at most five sequential LLM
-requests before the client disables it, settles measured aggregate usage, and
-opens the next lease. Requests sharing a key are linkable to OpenRouter. To use
-one key per request, put `--openrouter-requests-per-key 1` before `client`:
+serves at most five sequential LLM requests. Before serving request six, the
+client disables that key, settles its measured aggregate usage, and opens the
+next lease. Requests sharing a key are linkable to OpenRouter. To use one key
+per request, put `--openrouter-requests-per-key 1` before `client`:
 
 ```bash
 ./target/release/zkapi --require-oa-org-key-source \
   --openrouter-requests-per-key 1 client --mode direct-openrouter
 ```
+
+Add the same `--deployment ...` argument shown above after `client` when using
+Sepolia.
 
 Omit `--address` to let `cast` derive the address and prompt securely for the
 private key, or add `--address 0x...`. Funding prompts for the private key once,
