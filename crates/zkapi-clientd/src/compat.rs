@@ -15,10 +15,11 @@ use crate::config::ModelDescriptor;
 use crate::service::{CoreRequest, CoreResponse};
 
 // Lease keys have a small proof-bound dollar limit. Leaving a model's output
-// unconstrained makes OpenRouter reserve headroom for its full model maximum
-// (16K tokens for the Sepolia quick-start model), so a key with plenty of
-// actual credit can start returning 402 after only a few short requests.
-const DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS: u64 = 1024;
+// unconstrained makes OpenRouter reserve headroom for its full model maximum,
+// while a 1024-token fallback can exceed the $0.01 mainnet lease limit for
+// otherwise valid requests. Keep the implicit ceiling conservative; callers
+// that need longer answers can still provide an explicit completion limit.
+const DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS: u64 = 256;
 
 pub fn core_request(path: &str, body: Value) -> CoreRequest {
     CoreRequest::post_json(path, body)
@@ -392,6 +393,25 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "secret prompt");
         assert_eq!(body["max_tokens"], DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS);
         assert_eq!(body["stream"], false);
+
+        let (_, chat) = openrouter_request(
+            "/v1/chat/completions",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "secret prompt"}]
+            }),
+        );
+        assert_eq!(chat["max_tokens"], DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS);
+
+        let (_, ollama) = openrouter_request(
+            "/api/chat",
+            json!({
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "secret prompt"}],
+                "stream": false
+            }),
+        );
+        assert_eq!(ollama["max_tokens"], DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS);
     }
 
     #[test]
