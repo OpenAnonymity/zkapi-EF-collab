@@ -31,7 +31,7 @@ use zkapi_client::wallet::Wallet;
 use zkapi_core::v2 as core_v2;
 use zkapi_types::wire::{
     ApiRequestV2, ErrorResponse, Groth16ProofWire, OpenRouterLeaseAuthorization,
-    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RequestResponseV2,
+    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::{EpochRoots, Felt252, WithdrawalPublicInputsV2};
 
@@ -745,6 +745,140 @@ impl AuthService {
         }
     }
 
+    /// Finish any request that still owns the wallet before producing a
+    /// withdrawal proof. In direct mode this deliberately retires a live
+    /// child key immediately, so withdrawal charges measured usage without
+    /// waiting for the provider-enforced lease expiry.
+    pub async fn settle_for_withdrawal(&self) -> Result<WalletStatus, AuthError> {
+        let _request_guard = self.direct_request_mutex.lock().await;
+
+        if self.config.request_mode == RequestMode::DirectOpenrouter {
+            let live_lease_id = self
+                .direct_lease
+                .lock()
+                .await
+                .take()
+                .map(|lease| lease.client_request_id);
+
+            if let Some(client_request_id) = live_lease_id {
+                tracing::info!(
+                    %client_request_id,
+                    "retiring active OpenRouter lease before withdrawal"
+                );
+                self.retire_direct_openrouter_lease(&client_request_id)
+                    .await?;
+            } else if self.status().await?.pending_request {
+                // After a daemon restart the plaintext child key is gone, but
+                // the retryable prompt-free proof remains in the wallet
+                // journal. Use it to retire or recover the authoritative
+                // server-side lease.
+                let request = self.prepare_direct_lease_request().await?;
+                let Some(lease) = self.find_direct_lease_for_withdrawal(&request).await? else {
+                    tracing::warn!(
+                        client_request_id = %request.client_request_id,
+                        "clearing an orphaned local lease proof that the server never accepted"
+                    );
+                    self.clear_pending_request().await?;
+                    let status = self.status().await?;
+                    if status.pending_request {
+                        return Err(AuthError::PendingRequest);
+                    }
+                    return Ok(status);
+                };
+                match lease.status.as_str() {
+                    "active" => {
+                        self.retire_direct_openrouter_lease(&request.client_request_id)
+                            .await?;
+                    }
+                    "finalized" => {
+                        let recovered = self.recover().await?;
+                        if !recovered.recovered && recovered.wallet.pending_request {
+                            return Err(AuthError::LeasePending(format!(
+                                "finalized lease {} is not yet recoverable",
+                                request.client_request_id
+                            )));
+                        }
+                    }
+                    status => {
+                        return Err(AuthError::LeasePending(format!(
+                            "lease {} is {status}; key expiry {}, settlement after {}",
+                            request.client_request_id, lease.expires_at, lease.settle_after
+                        )));
+                    }
+                }
+            }
+        } else if self.status().await?.pending_request {
+            let recovered = self.recover().await?;
+            if !recovered.recovered && recovered.wallet.pending_request {
+                return Err(AuthError::PendingRequest);
+            }
+        }
+
+        let status = self.status().await?;
+        if status.pending_request {
+            return Err(AuthError::PendingRequest);
+        }
+        Ok(status)
+    }
+
+    /// Resolve an interrupted lease issuance without guessing. A missing
+    /// lease is considered safely orphaned only when the current request is
+    /// unknown and its nullifier is either also unknown or already reserved
+    /// by an idempotently retryable mutual withdrawal.
+    async fn find_direct_lease_for_withdrawal(
+        &self,
+        request: &ApiRequestV2,
+    ) -> Result<Option<OpenRouterLeaseStatusResponse>, AuthError> {
+        const ATTEMPTS: usize = 3;
+        let client_request_id = &request.client_request_id;
+        for attempt in 0..ATTEMPTS {
+            if let Some(lease) = self
+                .fetch_optional_direct_lease_status(client_request_id)
+                .await?
+            {
+                return Ok(Some(lease));
+            }
+            let recovery = self.fetch_request_recovery(client_request_id).await?;
+            if recovery.request_response.is_some() || recovery.nullifier_status == "finalized" {
+                let recovered = self.recover().await?;
+                if recovered.recovered || !recovered.wallet.pending_request {
+                    return Ok(None);
+                }
+                return Err(AuthError::LeasePending(format!(
+                    "request {client_request_id} is finalized but not yet recoverable"
+                )));
+            }
+            if recovery.status != "not_found" || recovery.nullifier_status != "unknown" {
+                return Err(AuthError::LeasePending(format!(
+                    "request {client_request_id} has server status {} and nullifier status {}",
+                    recovery.status, recovery.nullifier_status
+                )));
+            }
+            let nullifier_recovery = self
+                .fetch_nullifier_recovery(&request.public_inputs.request_nullifier)
+                .await?;
+            if nullifier_recovery.nullifier_status == "clearance_reserved" {
+                // A previously prepared mutual withdrawal intentionally owns
+                // this deterministic state nullifier. The rejected lease was
+                // never accepted, so clearing only its local journal is safe
+                // and lets withdrawal preparation resume idempotently.
+                return Ok(None);
+            }
+            if nullifier_recovery.status != "not_found"
+                || nullifier_recovery.nullifier_status != "unknown"
+            {
+                return Err(AuthError::LeasePending(format!(
+                    "request {client_request_id} is unknown, but its nullifier has server status {} and nullifier status {}",
+                    nullifier_recovery.status, nullifier_recovery.nullifier_status
+                )));
+            }
+            if attempt + 1 < ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        Ok(None)
+    }
+
     async fn execute_direct_openrouter(
         self: &Arc<Self>,
         request: CoreRequest,
@@ -1378,6 +1512,71 @@ impl AuthService {
             .get(format!(
                 "{}/v2/openrouter/leases/{client_request_id}",
                 self.config.protocol_server_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| AuthError::Serialization(error.to_string()))
+    }
+
+    async fn fetch_optional_direct_lease_status(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<OpenRouterLeaseStatusResponse>, AuthError> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/v2/openrouter/leases/{client_request_id}",
+                self.config.protocol_server_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| AuthError::Wallet(error.to_string()))?;
+        response
+            .json()
+            .await
+            .map(Some)
+            .map_err(|error| AuthError::Serialization(error.to_string()))
+    }
+
+    async fn fetch_request_recovery(
+        &self,
+        client_request_id: &str,
+    ) -> Result<RecoveryResponseV2, AuthError> {
+        self.http
+            .get(format!(
+                "{}/v2/requests/{client_request_id}",
+                self.config.protocol_server_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| AuthError::Wallet(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| AuthError::Serialization(error.to_string()))
+    }
+
+    async fn fetch_nullifier_recovery(
+        &self,
+        nullifier: &Felt252,
+    ) -> Result<RecoveryResponseV2, AuthError> {
+        self.http
+            .get(format!(
+                "{}/v2/nullifiers/{}",
+                self.config.protocol_server_url.trim_end_matches('/'),
+                nullifier
             ))
             .send()
             .await

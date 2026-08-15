@@ -1095,6 +1095,15 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
                 .status,
             "active"
         );
+        let settled = restarted.settle_for_withdrawal().await.unwrap();
+        assert!(!settled.pending_request);
+        assert_eq!(
+            store
+                .lookup_openrouter_lease(&after_restart.client_request_id)
+                .unwrap()
+                .status,
+            "finalized"
+        );
         assert_eq!(flow.org_requests.lock().unwrap().len(), 3);
         assert_eq!(
             flow.prompts.lock().unwrap().as_slice(),

@@ -19,6 +19,7 @@ zkapi-core = { path = "../../protocol/rust/crates/zkapi-core" }
 zkapi-types = { path = "../../protocol/rust/crates/zkapi-types" }
 zkapi-proof = { path = "../../protocol/rust/crates/zkapi-proof" }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

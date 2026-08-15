@@ -65,6 +65,7 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/config", get(funding_config))
         .route("/wallet/status", get(wallet_status))
         .route("/wallet/recover", post(wallet_recover))
+        .route("/wallet/settle", post(wallet_settle))
         .route("/wallet/reset", post(wallet_reset))
         .route("/funding/api/reset", post(wallet_reset))
         .route("/funding", get(funding_index))
@@ -444,6 +445,13 @@ async fn wallet_recover(State(service): State<Arc<AuthService>>) -> Response {
     }
 }
 
+async fn wallet_settle(State(service): State<Arc<AuthService>>) -> Response {
+    match service.settle_for_withdrawal().await {
+        Ok(status) => Json(status).into_response(),
+        Err(err) => generic_error(err),
+    }
+}
+
 async fn wallet_reset(State(service): State<Arc<AuthService>>) -> Response {
     match service.reset_wallet().await {
         Ok(status) => Json(status).into_response(),
@@ -690,6 +698,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+
+        let settled = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/wallet/settle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled.status(), StatusCode::OK);
 
         let config = router
             .clone()

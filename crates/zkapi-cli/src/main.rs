@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
@@ -11,13 +12,14 @@ use zeroize::Zeroizing;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
-    run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, ModelDescriptor, RequestMode,
-    WithdrawalMode, DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
+    run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, FundingConfig,
+    ModelDescriptor, RequestMode, WalletStatus, WithdrawalMode, WithdrawalPlan,
+    DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
 };
 use zkapi_serverd::config::{
     MeteredConfig, OpenRouterLeaseConfig, OpenRouterLeaseSourceConfig, ProviderKind, ServerConfig,
 };
-use zkapi_types::wire::CurvePointWire;
+use zkapi_types::wire::{CurvePointWire, ProofBackendWire};
 use zkapi_types::{EpochRoots, Felt252};
 
 const PUBLIC_MAINNET_MANIFEST: &str = "https://d27v1dvkaxfc09.cloudfront.net/config.json";
@@ -251,18 +253,33 @@ enum Commands {
         body_file: Option<PathBuf>,
     },
     Recover,
+    /// Settle active usage and withdraw the current managed note on chain.
     Withdraw {
+        /// Payout address. Required for mutual and escape initiation.
         #[arg(long)]
-        destination: String,
+        destination: Option<String>,
         #[arg(long, value_enum, default_value_t = WithdrawalModeArg::Mutual)]
         mode: WithdrawalModeArg,
+        /// Deployment manifest URL or local JSON path.
+        #[arg(long, default_value = PUBLIC_MAINNET_MANIFEST)]
+        deployment: String,
+        /// Running local zkAPI client gateway.
+        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        client_url: String,
+        /// Note to finalize. Defaults to the local client's active note.
+        #[arg(long)]
+        note_id: Option<u32>,
+        /// Simulate without submitting. Mutual mode still reserves server clearance and makes the note withdrawal-only.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum WithdrawalModeArg {
     Mutual,
     Escape,
+    FinalizeEscape,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -568,12 +585,23 @@ async fn main() -> anyhow::Result<()> {
             let service = build_auth_service(&cli)?;
             print_json(&service.recover().await?)?
         }
-        Commands::Withdraw { destination, mode } => {
-            let service = build_auth_service(&cli)?;
-            let result = service
-                .create_withdrawal(mode.into(), parse_destination(&destination)?)
-                .await?;
-            print_json(&result)?;
+        Commands::Withdraw {
+            destination,
+            mode,
+            deployment,
+            client_url,
+            note_id,
+            dry_run,
+        } => {
+            run_managed_withdrawal(ManagedWithdrawalOptions {
+                deployment: &deployment,
+                client_url: &client_url,
+                destination: destination.as_deref(),
+                mode,
+                note_id,
+                dry_run,
+            })
+            .await?;
         }
     }
 
@@ -1033,6 +1061,550 @@ async fn fund_public_deployment(
     Ok(())
 }
 
+struct ManagedWithdrawalOptions<'a> {
+    deployment: &'a str,
+    client_url: &'a str,
+    destination: Option<&'a str>,
+    mode: WithdrawalModeArg,
+    note_id: Option<u32>,
+    dry_run: bool,
+}
+
+async fn run_managed_withdrawal(options: ManagedWithdrawalOptions<'_>) -> anyhow::Result<()> {
+    let manifest = load_deployment_manifest(options.deployment).await?;
+    validate_deployment_manifest(&manifest)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()?;
+    let funding: FundingConfig = local_client_request(
+        &client,
+        reqwest::Method::GET,
+        options.client_url,
+        "/funding/config",
+        None,
+    )
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "cannot reach the managed zkAPI client at {}: {error}. Start `zkapi client` first",
+            options.client_url
+        )
+    })?;
+    validate_client_deployment(&funding, &manifest)?;
+
+    if options.mode == WithdrawalModeArg::FinalizeEscape {
+        if options.destination.is_some() {
+            anyhow::bail!("--destination is not used with --mode finalize-escape");
+        }
+        return finalize_escape_withdrawal(&client, &manifest, &options).await;
+    }
+    if options.note_id.is_some() {
+        anyhow::bail!("--note-id is only used with --mode finalize-escape");
+    }
+
+    let destination = options.destination.ok_or_else(|| {
+        anyhow::anyhow!("--destination is required for mutual and escape withdrawals")
+    })?;
+    let destination = normalize_address(destination)?;
+
+    eprintln!("Settling any active zkAPI request or OpenRouter key before withdrawal...");
+    let settled: WalletStatus = local_client_request(
+        &client,
+        reqwest::Method::POST,
+        options.client_url,
+        "/wallet/settle",
+        None,
+    )
+    .await?;
+    let local_note = settled
+        .note
+        .ok_or_else(|| anyhow::anyhow!("the local client has no active note to withdraw"))?;
+    if settled.pending_request {
+        anyhow::bail!("the local client still has a pending request after settlement");
+    }
+
+    let mode = match options.mode {
+        WithdrawalModeArg::Mutual => WithdrawalMode::Mutual,
+        WithdrawalModeArg::Escape => WithdrawalMode::Escape,
+        WithdrawalModeArg::FinalizeEscape => unreachable!("handled above"),
+    };
+    eprintln!("Generating the Groth16 withdrawal proof...");
+    let plan: WithdrawalPlan = local_client_request(
+        &client,
+        reqwest::Method::POST,
+        options.client_url,
+        "/wallet/withdraw",
+        Some(serde_json::json!({
+            "mode": match mode {
+                WithdrawalMode::Mutual => "mutual",
+                WithdrawalMode::Escape => "escape",
+            },
+            "destination": destination,
+        })),
+    )
+    .await?;
+    validate_withdrawal_plan(&plan, &manifest, mode, &destination)?;
+    if plan.public_inputs.note_id != local_note.note_id {
+        anyhow::bail!(
+            "the withdrawal proof is for note {}, but the settled local note is {}",
+            plan.public_inputs.note_id,
+            local_note.note_id
+        );
+    }
+
+    run_withdrawal_contract_call(&manifest, &plan, options.dry_run)?;
+    if options.dry_run {
+        if mode == WithdrawalMode::Mutual {
+            eprintln!(
+                "Mutual-close clearance is now reserved. This note cannot make more LLM requests; rerun this command without --dry-run to withdraw it."
+            );
+        }
+        return print_json(&serde_json::json!({
+            "deployment": manifest.deployment_id,
+            "mode": plan.mode,
+            "note_id": plan.public_inputs.note_id,
+            "destination": destination,
+            "final_balance": plan.public_inputs.final_balance,
+            "simulation": "succeeded",
+            "submitted": false,
+            "note_usage": if mode == WithdrawalMode::Mutual { "withdrawal_only" } else { "unchanged" },
+        }));
+    }
+
+    let expected_status = match mode {
+        WithdrawalMode::Mutual => 3,
+        WithdrawalMode::Escape => 2,
+    };
+    wait_for_note_status(&manifest, plan.public_inputs.note_id, expected_status).await?;
+
+    if mode == WithdrawalMode::Mutual {
+        let reset: WalletStatus = local_client_request(
+            &client,
+            reqwest::Method::POST,
+            options.client_url,
+            "/wallet/reset",
+            None,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "the on-chain withdrawal succeeded, but local wallet cleanup failed: {error}"
+            )
+        })?;
+        if reset.has_note {
+            anyhow::bail!(
+                "the on-chain withdrawal succeeded, but the local client still reports an active note"
+            );
+        }
+        print_json(&serde_json::json!({
+            "deployment": manifest.deployment_id,
+            "mode": plan.mode,
+            "note_id": plan.public_inputs.note_id,
+            "destination": destination,
+            "final_balance": plan.public_inputs.final_balance,
+            "onchain_status": "closed",
+            "local_wallet_reset": true,
+            "submitted": true,
+        }))
+    } else {
+        let challenge_deadline = read_escape_deadline(&manifest, plan.public_inputs.note_id)?;
+        print_json(&serde_json::json!({
+            "deployment": manifest.deployment_id,
+            "mode": plan.mode,
+            "note_id": plan.public_inputs.note_id,
+            "destination": destination,
+            "final_balance": plan.public_inputs.final_balance,
+            "onchain_status": "pending_withdrawal",
+            "challenge_deadline": challenge_deadline,
+            "local_wallet_reset": false,
+            "submitted": true,
+            "next": format!(
+                "After the challenge deadline, run: zkapi withdraw --deployment {} --mode finalize-escape --note-id {}",
+                options.deployment, plan.public_inputs.note_id
+            ),
+        }))
+    }
+}
+
+async fn finalize_escape_withdrawal(
+    client: &reqwest::Client,
+    manifest: &DeploymentManifest,
+    options: &ManagedWithdrawalOptions<'_>,
+) -> anyhow::Result<()> {
+    let local: WalletStatus = local_client_request(
+        client,
+        reqwest::Method::GET,
+        options.client_url,
+        "/wallet/status",
+        None,
+    )
+    .await?;
+    let local_note_id = local.note.as_ref().map(|note| note.note_id);
+    let note_id = options.note_id.or(local_note_id).ok_or_else(|| {
+        anyhow::anyhow!("--note-id is required when the local client has no active note")
+    })?;
+    if let Some(local_note_id) = local_note_id {
+        if local_note_id != note_id {
+            anyhow::bail!(
+                "--note-id {note_id} does not match the local client's note {local_note_id}"
+            );
+        }
+    }
+
+    let current_status = read_note_status(manifest, note_id)?;
+    if current_status != 2 && current_status != 3 {
+        anyhow::bail!(
+            "note {note_id} is not pending an escape withdrawal (on-chain status {current_status})"
+        );
+    }
+
+    if current_status == 2 {
+        run_finalize_escape_call(manifest, note_id, options.dry_run)?;
+        if options.dry_run {
+            return print_json(&serde_json::json!({
+                "deployment": manifest.deployment_id,
+                "mode": "finalize_escape",
+                "note_id": note_id,
+                "simulation": "succeeded",
+                "submitted": false,
+            }));
+        }
+        wait_for_note_status(manifest, note_id, 3).await?;
+    } else if options.dry_run {
+        anyhow::bail!("note {note_id} is already closed; there is nothing to simulate");
+    }
+
+    let local_wallet_reset = if local_note_id == Some(note_id) {
+        let reset: WalletStatus = local_client_request(
+            client,
+            reqwest::Method::POST,
+            options.client_url,
+            "/wallet/reset",
+            None,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "escape finalization succeeded, but local wallet cleanup failed: {error}"
+            )
+        })?;
+        if reset.has_note {
+            anyhow::bail!(
+                "escape finalization succeeded, but the local client still reports an active note"
+            );
+        }
+        true
+    } else {
+        false
+    };
+
+    print_json(&serde_json::json!({
+        "deployment": manifest.deployment_id,
+        "mode": "finalize_escape",
+        "note_id": note_id,
+        "onchain_status": "closed",
+        "local_wallet_reset": local_wallet_reset,
+        "submitted": current_status == 2,
+    }))
+}
+
+async fn local_client_request<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    client_url: &str,
+    path: &str,
+    body: Option<Value>,
+) -> anyhow::Result<T> {
+    let endpoint = local_client_endpoint(client_url, path)?;
+    let mut request = client.request(method, endpoint.clone());
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("request to {endpoint} failed: {error}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| anyhow::anyhow!("could not read {endpoint}: {error}"))?;
+    if !status.is_success() {
+        let message = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value["error"]["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_string());
+        anyhow::bail!("local client returned HTTP {status}: {message}");
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("local client returned invalid JSON: {error}"))
+}
+
+fn local_client_endpoint(client_url: &str, path: &str) -> anyhow::Result<String> {
+    let mut url = reqwest::Url::parse(client_url)
+        .map_err(|error| anyhow::anyhow!("invalid --client-url: {error}"))?;
+    let local_host = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
+    if url.scheme() != "http"
+        || !local_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        anyhow::bail!("--client-url must be an unauthenticated loopback HTTP URL");
+    }
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+fn validate_client_deployment(
+    funding: &FundingConfig,
+    manifest: &DeploymentManifest,
+) -> anyhow::Result<()> {
+    let manifest_contract = parse_felt("deployment contract address", &manifest.contract_address)?;
+    if funding.chain_id != manifest.chain_id || funding.contract_address != manifest_contract {
+        anyhow::bail!(
+            "the running client uses chain {} contract {}, but --deployment selects chain {} contract {}; use the same manifest for `client` and `withdraw`",
+            funding.chain_id,
+            funding.contract_address,
+            manifest.chain_id,
+            manifest.contract_address
+        );
+    }
+    Ok(())
+}
+
+fn validate_withdrawal_plan(
+    plan: &WithdrawalPlan,
+    manifest: &DeploymentManifest,
+    mode: WithdrawalMode,
+    destination: &str,
+) -> anyhow::Result<()> {
+    let inputs = &plan.public_inputs;
+    if plan.mode != mode {
+        anyhow::bail!("local client returned the wrong withdrawal mode");
+    }
+    if inputs.protocol_version != manifest.protocol_version
+        || inputs.chain_id != manifest.chain_id
+        || inputs.contract_address
+            != parse_felt("deployment contract address", &manifest.contract_address)?
+    {
+        anyhow::bail!("withdrawal proof does not match the selected deployment");
+    }
+    if normalize_address(destination)? != format!("0x{}", hex::encode(inputs.destination)) {
+        anyhow::bail!("withdrawal proof does not match --destination");
+    }
+    let expected_clearance = mode == WithdrawalMode::Mutual;
+    if inputs.has_clearance != expected_clearance {
+        anyhow::bail!("withdrawal proof has an invalid clearance mode");
+    }
+    if plan.siblings.len() != 32 {
+        anyhow::bail!(
+            "withdrawal proof returned {} Merkle siblings; expected 32",
+            plan.siblings.len()
+        );
+    }
+    if plan.proof.backend != ProofBackendWire::Groth16Bn254 {
+        anyhow::bail!("withdrawal proof is not Groth16 BN254");
+    }
+    let proof = base64::engine::general_purpose::STANDARD
+        .decode(&plan.proof.proof)
+        .map_err(|error| anyhow::anyhow!("withdrawal proof is invalid base64: {error}"))?;
+    if proof.is_empty() {
+        anyhow::bail!("withdrawal proof is empty");
+    }
+    Ok(())
+}
+
+const WITHDRAWAL_INPUTS_ABI: &str = "(uint16,uint64,address,uint256,uint256,uint256,uint256,uint256,uint32,uint128,address,uint256,bool,uint256)";
+
+fn run_withdrawal_contract_call(
+    manifest: &DeploymentManifest,
+    plan: &WithdrawalPlan,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let function = match plan.mode {
+        WithdrawalMode::Mutual => format!("mutualClose({WITHDRAWAL_INPUTS_ABI},bytes,uint256[32])"),
+        WithdrawalMode::Escape => {
+            format!("initiateEscapeWithdrawal({WITHDRAWAL_INPUTS_ABI},bytes,uint256[32])")
+        }
+    };
+    let inputs = withdrawal_inputs_argument(plan)?;
+    let proof = base64::engine::general_purpose::STANDARD
+        .decode(&plan.proof.proof)
+        .map_err(|error| anyhow::anyhow!("withdrawal proof is invalid base64: {error}"))?;
+    let args = vec![
+        if dry_run { "call" } else { "send" }.to_string(),
+        "--rpc-url".to_string(),
+        manifest.rpc_url.clone(),
+        manifest.contract_address.clone(),
+        function,
+        inputs,
+        format!("0x{}", hex::encode(proof)),
+        felt_array_argument(&plan.siblings),
+    ];
+    if dry_run {
+        eprintln!("Simulating the withdrawal against the selected deployment...");
+    } else {
+        eprintln!(
+            "Enter a private key for an account with enough ETH to pay gas. The payout still goes to the requested destination."
+        );
+    }
+    run_cast_transaction(&args, !dry_run, "withdrawal")
+}
+
+fn withdrawal_inputs_argument(plan: &WithdrawalPlan) -> anyhow::Result<String> {
+    let inputs = &plan.public_inputs;
+    let contract_address = felt_as_address(&inputs.contract_address)?;
+    let destination = format!("0x{}", hex::encode(inputs.destination));
+    Ok(format!(
+        "({},{},{},{},{},{},{},{},{},{},{},{},{},{})",
+        inputs.protocol_version,
+        inputs.chain_id,
+        contract_address,
+        inputs.active_root,
+        inputs.state_signing_key_x,
+        inputs.state_signing_key_y,
+        inputs.clearance_signing_key_x,
+        inputs.clearance_signing_key_y,
+        inputs.note_id,
+        inputs.final_balance,
+        destination,
+        inputs.withdrawal_nullifier,
+        inputs.has_clearance,
+        inputs.withdrawal_tag,
+    ))
+}
+
+fn run_finalize_escape_call(
+    manifest: &DeploymentManifest,
+    note_id: u32,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let args = vec![
+        if dry_run { "call" } else { "send" }.to_string(),
+        "--rpc-url".to_string(),
+        manifest.rpc_url.clone(),
+        manifest.contract_address.clone(),
+        "finalizeEscapeWithdrawal(uint32)".to_string(),
+        note_id.to_string(),
+    ];
+    if !dry_run {
+        eprintln!("Enter a private key for an account with enough ETH to pay gas.");
+    }
+    run_cast_transaction(&args, !dry_run, "escape finalization")
+}
+
+fn run_cast_transaction(args: &[String], interactive: bool, operation: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("cast");
+    command.args(args);
+    if interactive {
+        command.arg("--interactive");
+    }
+    let status = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|error| {
+            anyhow::anyhow!("failed to run cast; install Foundry's cast command: {error}")
+        })?;
+    if !status.success() {
+        anyhow::bail!("cast {operation} failed; wallet state was preserved so you can retry");
+    }
+    Ok(())
+}
+
+fn felt_as_address(value: &Felt252) -> anyhow::Result<String> {
+    let bytes = value.as_bytes();
+    if bytes[..12].iter().any(|byte| *byte != 0) {
+        anyhow::bail!("withdrawal proof contains a value that is not an Ethereum address");
+    }
+    Ok(format!("0x{}", hex::encode(&bytes[12..])))
+}
+
+async fn wait_for_note_status(
+    manifest: &DeploymentManifest,
+    note_id: u32,
+    expected: u64,
+) -> anyhow::Result<()> {
+    let mut last = None;
+    for _ in 0..20 {
+        match read_note_status(manifest, note_id) {
+            Ok(status) if status == expected => return Ok(()),
+            Ok(status) => last = Some(status),
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!(
+        "transaction was submitted, but note {note_id} did not reach on-chain status {expected} (last observed {last:?}); local wallet state was preserved"
+    )
+}
+
+fn read_note_status(manifest: &DeploymentManifest, note_id: u32) -> anyhow::Result<u64> {
+    let values = read_cast_json_values(
+        manifest,
+        "notes(uint32)(bytes32,uint128,uint64,uint8)",
+        &[note_id.to_string()],
+    )?;
+    value_as_u64(values.get(3), "note status")
+}
+
+fn read_escape_deadline(manifest: &DeploymentManifest, note_id: u32) -> anyhow::Result<u64> {
+    let values = read_cast_json_values(
+        manifest,
+        "pendingWithdrawals(uint32)(bool,uint256,uint256,uint128,address,uint64)",
+        &[note_id.to_string()],
+    )?;
+    value_as_u64(values.get(5), "escape challenge deadline")
+}
+
+fn read_cast_json_values(
+    manifest: &DeploymentManifest,
+    signature: &str,
+    arguments: &[String],
+) -> anyhow::Result<Vec<Value>> {
+    let mut command = Command::new("cast");
+    command.args([
+        "call",
+        "--rpc-url",
+        &manifest.rpc_url,
+        "--json",
+        &manifest.contract_address,
+        signature,
+    ]);
+    command.args(arguments);
+    let output = command.output().map_err(|error| {
+        anyhow::anyhow!("failed to run cast; install Foundry's cast command: {error}")
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cast could not read vault state: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| anyhow::anyhow!("cast returned invalid vault JSON: {error}"))
+}
+
+fn value_as_u64(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let value = value.ok_or_else(|| anyhow::anyhow!("vault getter returned no {label}"))?;
+    if let Some(number) = value.as_u64() {
+        return Ok(number);
+    }
+    if let Some(string) = value.as_str() {
+        if let Some(hex) = string.strip_prefix("0x") {
+            return u64::from_str_radix(hex, 16)
+                .map_err(|error| anyhow::anyhow!("invalid {label} {string}: {error}"));
+        }
+        return string
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid {label} {string}: {error}"));
+    }
+    anyhow::bail!("vault getter returned invalid {label}: {value}")
+}
+
 fn read_erc20_u128(
     rpc_url: &str,
     token: &str,
@@ -1357,15 +1929,6 @@ fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
-impl From<WithdrawalModeArg> for WithdrawalMode {
-    fn from(value: WithdrawalModeArg) -> Self {
-        match value {
-            WithdrawalModeArg::Mutual => WithdrawalMode::Mutual,
-            WithdrawalModeArg::Escape => WithdrawalMode::Escape,
-        }
-    }
-}
-
 impl From<ClientModeArg> for RequestMode {
     fn from(value: ClientModeArg) -> Self {
         match value {
@@ -1528,6 +2091,61 @@ mod tests {
     }
 
     #[test]
+    fn withdraw_defaults_to_managed_mainnet_mutual_close() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "withdraw",
+            "--destination",
+            "0x1111111111111111111111111111111111111111",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Withdraw {
+                destination,
+                mode,
+                deployment,
+                client_url,
+                note_id,
+                dry_run,
+            } => {
+                assert_eq!(
+                    destination.as_deref(),
+                    Some("0x1111111111111111111111111111111111111111")
+                );
+                assert_eq!(mode, WithdrawalModeArg::Mutual);
+                assert_eq!(deployment, PUBLIC_MAINNET_MANIFEST);
+                assert_eq!(client_url, "http://127.0.0.1:11434");
+                assert_eq!(note_id, None);
+                assert!(!dry_run);
+            }
+            other => panic!("expected withdraw command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn withdraw_accepts_escape_finalization() {
+        let cli = Cli::try_parse_from([
+            "zkapi",
+            "withdraw",
+            "--mode",
+            "finalize-escape",
+            "--note-id",
+            "7",
+            "--deployment",
+            "sepolia.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Withdraw {
+                mode: WithdrawalModeArg::FinalizeEscape,
+                note_id: Some(7),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn server_accepts_independent_openrouter_management_key() {
         let cli = Cli::try_parse_from([
             "zkapi",
@@ -1654,6 +2272,18 @@ mod tests {
         assert_eq!(prefixed, [0x11; 20]);
         assert_eq!(bare, [0x22; 20]);
         assert!(parse_destination("0x1234").is_err());
+    }
+
+    #[test]
+    fn withdrawal_control_url_is_loopback_only() {
+        assert_eq!(
+            local_client_endpoint("http://127.0.0.1:11434", "/wallet/settle").unwrap(),
+            "http://127.0.0.1:11434/wallet/settle"
+        );
+        assert!(local_client_endpoint("https://example.com", "/wallet/settle").is_err());
+        assert!(
+            local_client_endpoint("http://127.0.0.1:11434@evil.test", "/wallet/settle").is_err()
+        );
     }
 
     #[test]

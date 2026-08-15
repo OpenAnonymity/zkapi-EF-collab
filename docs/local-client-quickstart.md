@@ -63,66 +63,36 @@ Ollama's default of streaming when the field is omitted).
 
 ## Withdraw
 
-Keep the local client running, stop sending LLM requests, and wait for any
-active ephemeral-key lease to settle. This can take the remainder of its
-five-minute lifetime if it has not reached the configured request limit:
+Keep the local client running and withdraw the active note from another
+terminal. The command retires any active ephemeral key, settles its measured
+usage, builds the proof, securely prompts for a gas-payer private key, submits
+the transaction, verifies that the note closed, and clears the local note:
 
 ```bash
-until curl -fsS http://127.0.0.1:11434/wallet/status \
-  | jq -e '.pending_request == false' >/dev/null; do sleep 5; done
+./target/release/zkapi withdraw --destination 0xYourPayoutAddress
 ```
 
-Set the payout address and the deployment manifest used to start the client.
-The default below is Ethereum Mainnet; replace it with the Sepolia manifest
-from above when using Sepolia.
+For a client running against Sepolia, select the same manifest:
 
 ```bash
-DESTINATION=0xYourPayoutAddress
-DEPLOYMENT=${DEPLOYMENT:-https://d27v1dvkaxfc09.cloudfront.net/config.json}
-DEPLOYMENT_JSON=$(curl -fsS "$DEPLOYMENT")
-RPC_URL=$(jq -r .rpc_url <<<"$DEPLOYMENT_JSON")
-VAULT=$(jq -r .contract_address <<<"$DEPLOYMENT_JSON")
-PLAN=$(mktemp)
-trap 'rm -f "$PLAN"' EXIT
-
-curl -fsS http://127.0.0.1:11434/wallet/withdraw \
-  -H 'content-type: application/json' \
-  -d "{\"mode\":\"mutual\",\"destination\":\"$DESTINATION\"}" >"$PLAN"
+./target/release/zkapi withdraw \
+  --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
+  --destination 0xYourPayoutAddress
 ```
 
-Encode the returned Groth16 proof and submit the mutual close. `cast send
---interactive` prompts for a private key; this account only pays transaction
-gas and does not need to match the note owner or payout address.
+The prompted account only pays ETH gas; it does not need to be the depositor or
+the payout address.
+
+If the zkAPI server is unavailable, initiate the escape hatch instead:
 
 ```bash
-p() { jq -r ".public_inputs.$1" "$PLAN"; }
-INPUTS="($(p protocol_version),$(p chain_id),$(p contract_address),$(p active_root),$(p state_signing_key_x),$(p state_signing_key_y),$(p clearance_signing_key_x),$(p clearance_signing_key_y),$(p note_id),$(p final_balance),$DESTINATION,$(p withdrawal_nullifier),$(p has_clearance),$(p withdrawal_tag))"
-PROOF_HEX="0x$(jq -r .proof.proof "$PLAN" | openssl base64 -d -A | xxd -p -c 9999)"
-SIBLINGS=$(jq -r '"[" + (.siblings | join(",")) + "]"' "$PLAN")
-
-cast send "$VAULT" \
-  'mutualClose((uint16,uint64,address,uint256,uint256,uint256,uint256,uint256,uint32,uint128,address,uint256,bool,uint256),bytes,uint256[32])' \
-  "$INPUTS" "$PROOF_HEX" "$SIBLINGS" \
-  --rpc-url "$RPC_URL" --interactive
+./target/release/zkapi withdraw --mode escape \
+  --destination 0xYourPayoutAddress
 ```
 
-If the transaction reports a stale root, regenerate the plan and retry. Only
-after `cast` reports a successful receipt, archive and clear the closed local
-note so the next client start can fund a new one:
+The result prints the note ID and challenge deadline. After the deadline,
+finalize it (repeat `--deployment ...` for Sepolia):
 
 ```bash
-curl -fsS -X POST http://127.0.0.1:11434/wallet/reset | jq .
+./target/release/zkapi withdraw --mode finalize-escape --note-id NOTE_ID
 ```
-
-If the zkAPI server is unavailable, generate a plan with `"mode":"escape"`
-instead and replace `mutualClose` above with
-`initiateEscapeWithdrawal` using the same argument types and values. Stop the
-client after initiation. After the contract's 24-hour challenge period, finish
-the withdrawal with:
-
-```bash
-cast send "$VAULT" 'finalizeEscapeWithdrawal(uint32)' "$(p note_id)" \
-  --rpc-url "$RPC_URL" --interactive
-```
-
-Do not reset the local note until that finalization transaction succeeds.
