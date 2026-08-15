@@ -22,7 +22,7 @@ use crate::dashboard::{
 };
 use crate::error::ServerError;
 use crate::nullifier_store::{NullifierStore, TranscriptRecord};
-use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner};
+use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner, OaOrgUsage};
 use crate::openrouter::OpenRouterProvisioner;
 use crate::pricing;
 use crate::provider::{ApiProvider, ProviderResponse, UsageInfo};
@@ -387,7 +387,7 @@ impl RequestProcessor {
                         "direct OpenRouter settlement credential is unavailable".to_string(),
                     )),
                 },
-                "oa_org" => self.settle_oa_org_lease(&lease),
+                "oa_org" => self.settle_oa_org_lease(&lease).await,
                 source => Err(ServerError::Internal(format!(
                     "unsupported lease key source {source}"
                 ))),
@@ -441,7 +441,7 @@ impl RequestProcessor {
                     })?;
                     self.settle_openrouter_lease(&lease, provisioner).await?;
                 }
-                "oa_org" => self.settle_oa_org_lease(&lease)?,
+                "oa_org" => self.settle_oa_org_lease(&lease).await?,
                 source => {
                     return Err(ServerError::Internal(format!(
                         "unsupported lease key source {source}"
@@ -454,10 +454,9 @@ impl RequestProcessor {
             .ok_or_else(|| ServerError::Internal("retired lease disappeared".to_string()))
     }
 
-    /// OA stations own the management account and delete expired keys. zkAPI
-    /// therefore cannot read account usage; it settles the proof-bound amount
-    /// reserved as the child key's hard spending limit.
-    fn settle_oa_org_lease(
+    /// Ask the OA org for the station-signed final child-key usage. Pending or
+    /// unavailable receipts are retried; the reserved cap is never substituted.
+    async fn settle_oa_org_lease(
         &self,
         lease: &crate::nullifier_store::OpenRouterLeaseRecord,
     ) -> Result<(), ServerError> {
@@ -466,26 +465,60 @@ impl RequestProcessor {
             .lookup_by_nullifier(&lease.request_nullifier)
             .filter(|record| record.status == NullifierStatus::Finalized)
         {
-            let reserved_limit_usd = record
+            let usage_credits = record
                 .response_payload
                 .as_deref()
                 .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                .and_then(|payload| payload["reserved_limit_usd"].as_f64())
-                .unwrap_or(lease.spending_limit_usd);
+                .and_then(|payload| payload["usage_credits"].as_u64())
+                .map(u128::from)
+                .unwrap_or_default();
             self.store.finalize_openrouter_lease(
                 &lease.client_request_id,
-                reserved_limit_usd,
+                pricing::credits_to_usd(usage_credits),
                 record.charge_applied.unwrap_or_default(),
             )?;
             return Ok(());
         }
-        let charge =
-            pricing::usd_to_credits(lease.spending_limit_usd).min(self.config.request_charge_cap);
+        let key_hash = lease.key_hash.as_deref().ok_or_else(|| {
+            ServerError::Internal("active OA org lease has no key hash".to_string())
+        })?;
+        let provisioner = self.oa_org.as_ref().ok_or_else(|| {
+            ServerError::Internal("OA org lease provider is unavailable".to_string())
+        })?;
+        let expected_limit_credits = pricing::usd_to_credits(lease.spending_limit_usd);
+        let receipt = provisioner
+            .get_key_usage(
+                &lease.client_request_id,
+                key_hash,
+                expected_limit_credits,
+                lease.expires_at,
+                lease
+                    .expires_at
+                    .saturating_add(OA_LEASE_EXPIRY_SAFETY_SECONDS),
+            )
+            .await?;
+        let OaOrgUsage::Finalized(receipt) = receipt else {
+            return Err(ServerError::LeasePending);
+        };
+        if receipt.closed_at < lease.issued_at {
+            return Err(ServerError::Internal(
+                "OA org usage receipt predates the issued lease".to_string(),
+            ));
+        }
+        let charge = receipt.usage_credits;
+        let usage_usd = pricing::credits_to_usd(charge);
         let payload = serde_json::json!({
             "type": "oa_org_ephemeral_lease_settlement",
             "issued_at": lease.issued_at,
             "expires_at": lease.expires_at,
-            "reserved_limit_usd": lease.spending_limit_usd,
+            "usage_credits": receipt.usage_credits,
+            "usage_usd": usage_usd,
+            "usage_receipt_expires_at": receipt.expires_at,
+            "usage_receipt_closed_at": receipt.closed_at,
+            "usage_finalized_at": receipt.finalized_at,
+            "station_id": receipt.station_id,
+            "station_signature": receipt.station_signature,
+            "org_signature": receipt.org_signature,
         })
         .to_string();
         let provider_response = ProviderResponse {
@@ -498,18 +531,15 @@ impl RequestProcessor {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
-                cost_usd: lease.spending_limit_usd,
-                cost_source: "oa_org_reserved_limit".to_string(),
+                cost_usd: usage_usd,
+                cost_source: "oa_org_signed_usage_receipt".to_string(),
             }),
             upstream_model: None,
             billing_label: "direct:oa-org-ephemeral".to_string(),
         };
         self.finalize_request(&lease.api_request, provider_response, 0, 0)?;
-        self.store.finalize_openrouter_lease(
-            &lease.client_request_id,
-            lease.spending_limit_usd,
-            charge,
-        )
+        self.store
+            .finalize_openrouter_lease(&lease.client_request_id, usage_usd, charge)
     }
 
     async fn settle_openrouter_lease(

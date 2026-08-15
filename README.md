@@ -83,8 +83,11 @@ the station ID, expiry, station signature, org signature, and verifier URL used
 by oa-chat. The local daemon submits that evidence to its independently
 configured `--oa-verifier-url` and refuses to send a prompt unless the verifier
 accepts the key. Because the station owns the OpenRouter management account,
-zkAPI cannot read actual child-key usage in this mode; each request-scoped lease
-settles at its proof-bound hard spending limit rather than aggregate usage.
+the station disables each request-scoped key when zkAPI retires it (or at its
+provider-enforced expiry), waits for usage to stabilize, and persists a signed
+aggregate-usage receipt before deleting the key. The org verifies and
+countersigns that receipt, and zkAPI charges the reported micro-dollar usage
+rather than the reserved hard limit.
 
 Clients that require this protection must set `--require-oa-org-key-source`
 (or `ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE=true`). This independent policy rejects a

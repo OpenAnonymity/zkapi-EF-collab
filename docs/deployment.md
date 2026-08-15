@@ -134,9 +134,12 @@ export ZKAPI_OA_ORG_SHARED_SECRET='...'
   --db-path /data/zkapi-server.db
 ```
 
-The OA org must expose `POST /api/zkapi/request_key`, set the same dedicated
-`ZKAPI_SHARED_SECRET`, configure `VERIFIER_URL`, and cap credit/duration at
-least as tightly as the zkAPI deployment. OA-org TTLs are whole minutes. The
+The OA org must expose `POST /api/zkapi/request_key` and
+`POST /api/zkapi/key_usage`, set the same dedicated `ZKAPI_SHARED_SECRET`,
+configure `VERIFIER_URL`, and cap credit/duration at least as tightly as the
+zkAPI deployment. The station must enforce provider expiry and retain signed
+final-usage receipts; zkAPI will keep a lease pending rather than charge its
+reserved cap when a receipt is unavailable. OA-org TTLs are whole minutes. The
 client trusts `https://verifier2.openanonymity.ai` by default; override
 `--oa-verifier-url` only when the independently audited verifier endpoint is
 different. The server reads the service credential only from

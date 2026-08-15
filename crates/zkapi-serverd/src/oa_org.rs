@@ -36,6 +36,23 @@ pub struct OaOrgCreatedKey {
     pub verification: OaKeyVerificationEvidence,
 }
 
+#[derive(Debug, Clone)]
+pub enum OaOrgUsage {
+    Pending,
+    Finalized(OaOrgFinalUsage),
+}
+
+#[derive(Debug, Clone)]
+pub struct OaOrgFinalUsage {
+    pub usage_credits: u128,
+    pub expires_at: u64,
+    pub closed_at: u64,
+    pub finalized_at: u64,
+    pub station_id: String,
+    pub station_signature: String,
+    pub org_signature: String,
+}
+
 pub struct OaOrgProvisioner {
     http: reqwest::Client,
     base_url: String,
@@ -56,6 +73,24 @@ struct OaOrgKeyResponse {
     org_signature: String,
     verifier_url: String,
     openrouter_api_base: String,
+}
+
+#[derive(Deserialize)]
+struct OaOrgUsageResponse {
+    source: String,
+    version: u64,
+    status: String,
+    client_request_id: String,
+    station_request_id: String,
+    key_hash: String,
+    usage_credits: Option<u128>,
+    credit_limit_credits: Option<u128>,
+    expires_at_unix: Option<u64>,
+    closed_at_unix: Option<u64>,
+    finalized_at_unix: Option<u64>,
+    station_id: Option<String>,
+    station_signature: Option<String>,
+    org_signature: Option<String>,
 }
 
 impl OaOrgProvisioner {
@@ -141,6 +176,49 @@ impl OaOrgProvisioner {
             },
         })
     }
+
+    pub async fn get_key_usage(
+        &self,
+        client_request_id: &str,
+        key_hash: &str,
+        expected_limit_credits: u128,
+        minimum_expires_at: u64,
+        maximum_expires_at: u64,
+    ) -> Result<OaOrgUsage, ServerError> {
+        let response = self
+            .http
+            .post(format!("{}/api/zkapi/key_usage", self.base_url))
+            .bearer_auth(&self.shared_secret)
+            .json(&json!({
+                "client_request_id": client_request_id,
+                "key_hash": key_hash,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                ServerError::Internal(format!("OA org usage request failed: {error}"))
+            })?;
+        let status = response.status();
+        let text = response.text().await.map_err(|error| {
+            ServerError::Internal(format!("OA org usage response failed: {error}"))
+        })?;
+        if !status.is_success() {
+            return Err(ServerError::Internal(format!(
+                "OA org usage request returned {status}"
+            )));
+        }
+        let response: OaOrgUsageResponse = serde_json::from_str(&text).map_err(|error| {
+            ServerError::Internal(format!("invalid OA org usage response: {error}"))
+        })?;
+        validate_usage_response(
+            response,
+            client_request_id,
+            key_hash,
+            expected_limit_credits,
+            minimum_expires_at,
+            maximum_expires_at,
+        )
+    }
 }
 
 fn validate_response(
@@ -176,6 +254,81 @@ fn validate_response(
         ));
     }
     Ok(())
+}
+
+fn validate_usage_response(
+    response: OaOrgUsageResponse,
+    client_request_id: &str,
+    key_hash: &str,
+    expected_limit_credits: u128,
+    minimum_expires_at: u64,
+    maximum_expires_at: u64,
+) -> Result<OaOrgUsage, ServerError> {
+    let common_matches = response.source == "oa_org"
+        && response.version == 1
+        && response.client_request_id == client_request_id
+        && response.key_hash == key_hash
+        && response.station_request_id.len() == 64
+        && response
+            .station_request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit());
+    if !common_matches {
+        return Err(ServerError::Internal(
+            "OA org returned mismatched usage evidence".to_string(),
+        ));
+    }
+    if response.status == "pending" {
+        return Ok(OaOrgUsage::Pending);
+    }
+    let (
+        Some(usage_credits),
+        Some(credit_limit_credits),
+        Some(expires_at),
+        Some(closed_at),
+        Some(finalized_at),
+        Some(station_id),
+        Some(station_signature),
+        Some(org_signature),
+    ) = (
+        response.usage_credits,
+        response.credit_limit_credits,
+        response.expires_at_unix,
+        response.closed_at_unix,
+        response.finalized_at_unix,
+        response.station_id,
+        response.station_signature,
+        response.org_signature,
+    )
+    else {
+        return Err(ServerError::Internal(
+            "OA org returned incomplete final usage evidence".to_string(),
+        ));
+    };
+    if response.status != "finalized"
+        || usage_credits > expected_limit_credits
+        || credit_limit_credits != expected_limit_credits
+        || expires_at < minimum_expires_at
+        || expires_at > maximum_expires_at
+        || closed_at > expires_at
+        || finalized_at < closed_at
+        || station_id.is_empty()
+        || !is_hex_signature(&station_signature)
+        || !is_hex_signature(&org_signature)
+    {
+        return Err(ServerError::Internal(
+            "OA org returned usage outside the issued lease bounds".to_string(),
+        ));
+    }
+    Ok(OaOrgUsage::Finalized(OaOrgFinalUsage {
+        usage_credits,
+        expires_at,
+        closed_at,
+        finalized_at,
+        station_id,
+        station_signature,
+        org_signature,
+    }))
 }
 
 fn is_hex_signature(value: &str) -> bool {
@@ -222,5 +375,35 @@ mod tests {
             OaOrgProvisioner::new("http://127.0.0.1:8005".to_string(), "secret".to_string())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn final_usage_must_match_the_exact_issued_lease() {
+        let response = OaOrgUsageResponse {
+            source: "oa_org".to_string(),
+            version: 1,
+            status: "finalized".to_string(),
+            client_request_id: "request-12345678".to_string(),
+            station_request_id: "ab".repeat(32),
+            key_hash: "provider-hash".to_string(),
+            usage_credits: Some(123),
+            credit_limit_credits: Some(10_000),
+            expires_at_unix: Some(1_000),
+            closed_at_unix: Some(900),
+            finalized_at_unix: Some(1_020),
+            station_id: Some("station".to_string()),
+            station_signature: Some("ab".repeat(64)),
+            org_signature: Some("cd".repeat(64)),
+        };
+        let usage = validate_usage_response(
+            response,
+            "request-12345678",
+            "provider-hash",
+            10_000,
+            970,
+            1_000,
+        )
+        .unwrap();
+        assert!(matches!(usage, OaOrgUsage::Finalized(_)));
     }
 }

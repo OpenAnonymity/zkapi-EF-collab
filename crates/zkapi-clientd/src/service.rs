@@ -49,6 +49,8 @@ use crate::indexer::IndexerClient;
 const DIRECT_REMOTE_MAX_ATTEMPTS: usize = 3;
 const DIRECT_REMOTE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const DIRECT_REMOTE_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const DIRECT_LEASE_RETIRE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const DIRECT_LEASE_RETIRE_MAX_WAIT: Duration = Duration::from_secs(45);
 const MAX_OA_LEASE_EXPIRY_SAFETY_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1408,32 +1410,45 @@ impl AuthService {
                 "pending proof does not match the rejected OpenRouter lease".to_string(),
             ));
         }
-        let response = self
-            .http
-            .post(format!(
-                "{}/v2/openrouter/leases/{client_request_id}",
-                self.config.protocol_server_url.trim_end_matches('/')
-            ))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| AuthError::Wallet(error.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| AuthError::Wallet(error.to_string()))?;
-        if !status.is_success() {
+        let deadline = Instant::now() + DIRECT_LEASE_RETIRE_MAX_WAIT;
+        let status = loop {
+            let response = self
+                .http
+                .post(format!(
+                    "{}/v2/openrouter/leases/{client_request_id}",
+                    self.config.protocol_server_url.trim_end_matches('/')
+                ))
+                .json(&request)
+                .send()
+                .await
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            let http_status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|error| AuthError::Wallet(error.to_string()))?;
+            if http_status.is_success() {
+                break serde_json::from_str::<OpenRouterLeaseStatusResponse>(&body)
+                    .map_err(|error| AuthError::Serialization(error.to_string()))?;
+            }
             if let Ok(error) = serde_json::from_str::<ErrorResponse>(&body) {
+                if error.retriable && Instant::now() + DIRECT_LEASE_RETIRE_POLL_INTERVAL < deadline
+                {
+                    tokio::time::sleep(DIRECT_LEASE_RETIRE_POLL_INTERVAL).await;
+                    continue;
+                }
+                if error.error_code == "lease_pending" {
+                    return Err(AuthError::LeasePending(format!(
+                        "lease {client_request_id} usage is not finalized yet"
+                    )));
+                }
                 return Err(AuthError::Wallet(format!(
                     "{}: {}",
                     error.error_code, error.error_message
                 )));
             }
-            return Err(AuthError::Wallet(format!("HTTP {status}: {body}")));
-        }
-        let status: OpenRouterLeaseStatusResponse = serde_json::from_str(&body)
-            .map_err(|error| AuthError::Serialization(error.to_string()))?;
+            return Err(AuthError::Wallet(format!("HTTP {http_status}: {body}")));
+        };
         if status.status != "finalized" {
             return Err(AuthError::LeasePending(format!(
                 "lease {} was not finalized during retirement",

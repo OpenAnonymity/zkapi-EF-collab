@@ -52,6 +52,8 @@ struct OaFlowState {
     verifier_rejections_remaining: Arc<Mutex<usize>>,
     verifier_attempts: Arc<Mutex<usize>>,
     inference_auth_failures_remaining: Arc<Mutex<usize>>,
+    leases: Arc<Mutex<HashMap<String, (String, u64)>>>,
+    usage_polls: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 async fn spawn(router: Router) -> String {
@@ -363,13 +365,21 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             return Err(StatusCode::BAD_REQUEST);
         }
         state.flow.events.lock().unwrap().push("issued".to_string());
-        state.flow.org_requests.lock().unwrap().push(body);
+        state.flow.org_requests.lock().unwrap().push(body.clone());
         let issuance = state.flow.org_requests.lock().unwrap().len();
         let expires_at = now_seconds() + 60;
+        let key_hash = format!("oa-runtime-hash-{issuance}");
+        state.flow.leases.lock().unwrap().insert(
+            key_hash.clone(),
+            (
+                body["client_request_id"].as_str().unwrap().to_string(),
+                expires_at,
+            ),
+        );
         Ok(Json(json!({
             "source": "oa_org",
             "key": format!("sk-or-v1-oa-test-{issuance}"),
-            "key_hash": format!("oa-runtime-hash-{issuance}"),
+            "key_hash": key_hash,
             "credit_limit": 0.001,
             "duration_minutes": 1,
             "expires_at": "future",
@@ -384,8 +394,69 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
         })))
     }
 
+    async fn key_usage(
+        State(state): State<OaOrgState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer oa-org-test-secret")
+        {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let key_hash = body["key_hash"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+        let (client_request_id, expires_at) = state
+            .flow
+            .leases
+            .lock()
+            .unwrap()
+            .get(key_hash)
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)?;
+        if body["client_request_id"] != client_request_id {
+            return Err(StatusCode::CONFLICT);
+        }
+        let poll = {
+            let mut polls = state.flow.usage_polls.lock().unwrap();
+            let poll = polls.entry(key_hash.to_string()).or_default();
+            *poll += 1;
+            *poll
+        };
+        if poll == 1 {
+            return Ok(Json(json!({
+                "source": "oa_org",
+                "version": 1,
+                "status": "pending",
+                "client_request_id": client_request_id,
+                "station_request_id": "ef".repeat(32),
+                "key_hash": key_hash,
+                "retry_after_seconds": 1,
+            })));
+        }
+        let closed_at = now_seconds().min(expires_at);
+        Ok(Json(json!({
+            "source": "oa_org",
+            "version": 1,
+            "status": "finalized",
+            "client_request_id": client_request_id,
+            "station_request_id": "ef".repeat(32),
+            "key_hash": key_hash,
+            "usage_credits": 7,
+            "credit_limit_credits": 1000,
+            "expires_at_unix": expires_at,
+            "closed_at_unix": closed_at,
+            "finalized_at_unix": closed_at,
+            "station_id": "station-test",
+            "station_signature": "ab".repeat(64),
+            "org_signature": "cd".repeat(64),
+        })))
+    }
+
     Router::new()
         .route("/api/zkapi/request_key", post(request_key))
+        .route("/api/zkapi/key_usage", post(key_usage))
         .with_state(OaOrgState {
             flow: state,
             verifier_url,
@@ -993,7 +1064,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
             .to_string();
         let retired = store.lookup_openrouter_lease(&first_lease_id).unwrap();
         assert_eq!(retired.status, "finalized");
-        assert_eq!(retired.charge_applied, Some(request_cap));
+        assert_eq!(retired.charge_applied, Some(7));
         assert_eq!(lease.status, "finalized");
 
         // A replacement daemon must start from the just-recovered wallet and
