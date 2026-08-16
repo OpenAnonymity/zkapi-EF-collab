@@ -31,10 +31,7 @@ mkdir -p "$wasm_output"
   --out-name zkapi_browser \
   --omit-default-module-path
 
-mkdir -p "$dist_root/funding/proofs"
-cp -R "$repo_root/funding-page/." "$dist_root/funding/"
-cp "$repo_root/protocol/setup/v2/request.pk" "$dist_root/funding/proofs/request.pk"
-cp "$repo_root/protocol/setup/v2/withdrawal.pk" "$dist_root/funding/proofs/withdrawal.pk"
+"$repo_root/scripts/package-browser-client.sh" "$dist_root"
 
 echo "Browser client built at $dist_root/funding/"
 echo "Serve $dist_root as an HTTPS origin and open /funding/."

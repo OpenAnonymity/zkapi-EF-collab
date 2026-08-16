@@ -11,3 +11,5 @@
 /demo/contracts/cache/
 /demo/contracts/out/
 /tmp
+.vercel
+.env*

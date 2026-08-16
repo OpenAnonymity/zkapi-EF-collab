@@ -63,6 +63,18 @@ The daemon remains supported. On a daemon-served OA Chat page it is selected
 automatically; `?zkapiMode=browser` forces the WebAssembly wallet and
 `?zkapiMode=daemon` disables browser fallback.
 
+The checked-in WASM bundle can also be packaged and deployed to Vercel without
+installing Rust in the remote builder:
+
+```bash
+./scripts/package-browser-client.sh
+vercel --prod --yes --local-config vercel.browser.json
+```
+
+The Vercel configuration sends `/` to `/funding/` and serves the same OA Chat
+client with the browser wallet selected automatically when no local daemon is
+available.
+
 The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,
 incompatible setup. For an intentionally fresh deployment:
