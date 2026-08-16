@@ -162,7 +162,8 @@ test('wallet transactions use a bounded buffer over the RPC gas estimate', async
     assert.match(staleRoot.message, /vault changed/i);
     const unknown = contractErrors.contractEstimateError({ message: 'execution reverted' });
     assert.equal(unknown.code, 'gas_estimation_failed');
-    assert.match(unknown.message, /Could not estimate a safe transaction gas limit/);
+    assert.match(unknown.message, /Transaction simulation failed: execution reverted/);
+    assert.doesNotMatch(unknown.message, /market|gas price/i);
     const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
     assert.match(client, /method: 'eth_estimateGas'/);
     assert.match(client, /transaction\.gas = bufferedGasLimit\(estimate\)/);

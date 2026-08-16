@@ -78,11 +78,10 @@ export function contractEstimateError(error) {
     const detail = selector ? CONTRACT_ERRORS[selector] : null;
     const providerMessage = error?.shortMessage || error?.message || String(error);
     const wrapped = new Error(detail?.message
-        || `Could not estimate a safe transaction gas limit: ${providerMessage}`);
+        || `Transaction simulation failed: ${providerMessage}`);
     wrapped.name = 'ZkapiContractError';
     wrapped.code = detail?.code || 'gas_estimation_failed';
     wrapped.selector = selector;
     wrapped.cause = error;
     return wrapped;
 }
-
