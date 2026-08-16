@@ -117,6 +117,26 @@ test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => 
     assert.match(backend, /delete session\.zkapiSettleBeforeAccess/);
 });
 
+test('New Chat settles its session lease before clearing the conversation', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const handlerStart = app.indexOf('async handleNewChatRequest(options = {})');
+    const helperStart = app.indexOf('async settleActiveLeaseBeforeNewChat()', handlerStart);
+    assert.ok(handlerStart >= 0 && helperStart > handlerStart, 'New Chat settlement helper is missing');
+
+    const handler = app.slice(handlerStart, helperStart);
+    assert.match(handler, /await this\.settleActiveLeaseBeforeNewChat\(\)/);
+    assert.ok(
+        handler.indexOf('settleActiveLeaseBeforeNewChat') < handler.indexOf('clearCurrentSession'),
+        'the active lease must settle before the current session is cleared'
+    );
+
+    const helper = app.slice(helperStart, app.indexOf('/**', helperStart));
+    assert.match(helper, /await this\.stopCurrentSessionStreamingAndWait/);
+    assert.match(helper, /await zkapiClient\.settleActiveLease\(\)/);
+    assert.match(helper, /error\?\.code !== 'lease_requests_in_flight'/);
+    assert.match(helper, /inferenceService\.clearAccessInfo\(previousSession\)/);
+});
+
 test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {
     const gas = await import(pathToFileURL(path.join(__dirname, 'services/zkapiGas.mjs')));
     assert.equal(gas.bufferedGasLimit('0x6d094d'), '0x839b46');

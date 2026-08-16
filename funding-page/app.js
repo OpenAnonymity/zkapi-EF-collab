@@ -149,6 +149,7 @@ class ChatApp {
             pendingModelName: null // Model selected before session is created (display name)
         };
         this.cachedModelDisplayMetadata = [];
+        this.newChatSettlementPending = false;
 
         this.elements = {
             newChatBtn: document.getElementById('new-chat-btn'),
@@ -3697,6 +3698,8 @@ class ChatApp {
      * Handles new chat request with validation (prevents empty duplicate sessions).
      */
     async handleNewChatRequest(options = {}) {
+        if (!(await this.settleActiveLeaseBeforeNewChat())) return;
+
         // Clear current session - no session is selected
         // The session will be created when the user sends their first message
         await this.clearCurrentSession(options);
@@ -3704,6 +3707,64 @@ class ChatApp {
         // Close sidebar on mobile after creating new chat
         if (this.isMobileView()) {
             this.hideSidebar();
+        }
+    }
+
+    /**
+     * Close the current chat's zkAPI lease before leaving it. A lease is bound
+     * to one chat, so keeping it alive would make the next chat fail with a
+     * session-conflict error until the five-minute provider expiry.
+     */
+    async settleActiveLeaseBeforeNewChat() {
+        if (!zkapiClient.activeLease) return true;
+        if (this.newChatSettlementPending) return false;
+
+        this.newChatSettlementPending = true;
+        const newChatButton = this.elements.newChatBtn;
+        const previousAriaLabel = newChatButton?.getAttribute('aria-label');
+        if (newChatButton) {
+            newChatButton.disabled = true;
+            newChatButton.setAttribute('aria-busy', 'true');
+            newChatButton.setAttribute('aria-label', 'Closing private key before new chat');
+        }
+        this.showToast('Closing the current private key before starting a new chat…', 'success', 60_000);
+
+        try {
+            const stopped = await this.stopCurrentSessionStreamingAndWait({ timeoutMs: 15_000 });
+            if (!stopped) return false;
+
+            const deadline = Date.now() + 15_000;
+            while (true) {
+                try {
+                    await zkapiClient.settleActiveLease();
+                    break;
+                } catch (error) {
+                    if (error?.code !== 'lease_requests_in_flight' || Date.now() >= deadline) {
+                        throw error;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+            }
+
+            const previousSession = this.getCurrentSession();
+            if (previousSession) {
+                inferenceService.clearAccessInfo(previousSession);
+                delete previousSession.zkapiSettleBeforeAccess;
+                await chatDB.saveSession(previousSession);
+            }
+            this.clearToast();
+            return true;
+        } catch (error) {
+            this.showToast(error?.message || 'Could not close the current private key.', 'error', 6000);
+            return false;
+        } finally {
+            this.newChatSettlementPending = false;
+            if (newChatButton) {
+                newChatButton.disabled = false;
+                newChatButton.removeAttribute('aria-busy');
+                if (previousAriaLabel == null) newChatButton.removeAttribute('aria-label');
+                else newChatButton.setAttribute('aria-label', previousAriaLabel);
+            }
         }
     }
 
