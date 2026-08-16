@@ -117,24 +117,36 @@ test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => 
     assert.match(backend, /delete session\.zkapiSettleBeforeAccess/);
 });
 
-test('New Chat settles its session lease before clearing the conversation', () => {
+test('New Chat opens immediately and settles its previous lease in the background', () => {
     const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
     const handlerStart = app.indexOf('async handleNewChatRequest(options = {})');
-    const helperStart = app.indexOf('async settleActiveLeaseBeforeNewChat()', handlerStart);
+    const helperStart = app.indexOf('\n    startPreviousChatLeaseSettlement(previousSession, previousLease) {', handlerStart);
     assert.ok(handlerStart >= 0 && helperStart > handlerStart, 'New Chat settlement helper is missing');
 
     const handler = app.slice(handlerStart, helperStart);
-    assert.match(handler, /await this\.settleActiveLeaseBeforeNewChat\(\)/);
+    assert.match(handler, /await this\.clearCurrentSession\(\{ \.\.\.options, immediate: true \}\)/);
+    assert.match(handler, /this\.startPreviousChatLeaseSettlement\(previousSession, previousLease\)/);
+    assert.doesNotMatch(handler, /await this\.startPreviousChatLeaseSettlement/);
     assert.ok(
-        handler.indexOf('settleActiveLeaseBeforeNewChat') < handler.indexOf('clearCurrentSession'),
-        'the active lease must settle before the current session is cleared'
+        handler.indexOf('clearCurrentSession') < handler.indexOf('startPreviousChatLeaseSettlement'),
+        'the new composer must open before background settlement starts'
     );
 
     const helper = app.slice(helperStart, app.indexOf('/**', helperStart));
-    assert.match(helper, /await this\.stopCurrentSessionStreamingAndWait/);
+    assert.match(helper, /this\.newChatSettlementPromise = settlement/);
+    assert.match(helper, /await this\.stopSessionStreamingAndWait/);
     assert.match(helper, /await zkapiClient\.settleActiveLease\(\)/);
     assert.match(helper, /error\?\.code !== 'lease_requests_in_flight'/);
-    assert.match(helper, /inferenceService\.clearAccessInfo\(previousSession\)/);
+    assert.match(helper, /inferenceService\.clearAccessInfo\(ownerSession\)/);
+    assert.doesNotMatch(helper, /newChatButton\.disabled/);
+
+    const sendStart = app.indexOf('async sendMessage()');
+    const send = app.slice(sendStart, app.indexOf('// Create session if none exists', sendStart));
+    assert.match(send, /await this\.waitForPreviousChatLeaseSettlement\(\)/);
+    assert.ok(
+        send.indexOf('waitForPreviousChatLeaseSettlement') < send.indexOf('const activeLease'),
+        'a fast send must await background settlement before checking lease ownership'
+    );
 });
 
 test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {

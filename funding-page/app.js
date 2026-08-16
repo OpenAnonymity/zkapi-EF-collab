@@ -149,7 +149,7 @@ class ChatApp {
             pendingModelName: null // Model selected before session is created (display name)
         };
         this.cachedModelDisplayMetadata = [];
-        this.newChatSettlementPending = false;
+        this.newChatSettlementPromise = null;
 
         this.elements = {
             newChatBtn: document.getElementById('new-chat-btn'),
@@ -3656,7 +3656,12 @@ class ChatApp {
         const session = this.getCurrentSession();
         if (!session) return;
 
-        const state = this.getSessionStreamingState(session.id);
+        this.stopSessionStreaming(session.id);
+    }
+
+    stopSessionStreaming(sessionId) {
+        if (!sessionId) return;
+        const state = this.getSessionStreamingState(sessionId);
         if (state.isStreaming && state.abortController) {
             state.abortController.abort();
             // The finally block in sendMessage will handle cleanup
@@ -3671,19 +3676,23 @@ class ChatApp {
      * @returns {Promise<boolean>} True if streaming is stopped or was already idle
      */
     async stopCurrentSessionStreamingAndWait(options = {}) {
-        const { timeoutMs = 10000 } = options;
         const session = this.getCurrentSession();
         if (!session) return true;
+        return this.stopSessionStreamingAndWait(session.id, options);
+    }
 
-        const state = this.getSessionStreamingState(session.id);
+    async stopSessionStreamingAndWait(sessionId, options = {}) {
+        const { timeoutMs = 10000 } = options;
+        if (!sessionId) return true;
+        const state = this.getSessionStreamingState(sessionId);
         if (!state.isStreaming) {
             return true;
         }
 
-        this.stopCurrentSessionStreaming();
+        this.stopSessionStreaming(sessionId);
 
         const startTime = Date.now();
-        while (this.getSessionStreamingState(session.id).isStreaming) {
+        while (this.getSessionStreamingState(sessionId).isStreaming) {
             if ((Date.now() - startTime) >= timeoutMs) {
                 this.showToast('Unable to stop the current response', 'error');
                 return false;
@@ -3698,40 +3707,42 @@ class ChatApp {
      * Handles new chat request with validation (prevents empty duplicate sessions).
      */
     async handleNewChatRequest(options = {}) {
-        if (!(await this.settleActiveLeaseBeforeNewChat())) return;
+        const previousSession = this.getCurrentSession();
+        const previousLease = zkapiClient.activeLease;
+        if (previousLease) {
+            this.stopSessionStreaming(previousLease.session_id || previousSession?.id);
+        }
 
         // Clear current session - no session is selected
         // The session will be created when the user sends their first message
-        await this.clearCurrentSession(options);
+        await this.clearCurrentSession({ ...options, immediate: true });
 
         // Close sidebar on mobile after creating new chat
         if (this.isMobileView()) {
             this.hideSidebar();
         }
+
+        // The new composer is already interactive. Retire the previous chat's
+        // key independently, and make a very fast send wait at the access
+        // boundary instead of making New Chat itself wait.
+        if (previousLease) {
+            this.startPreviousChatLeaseSettlement(previousSession, previousLease);
+        }
     }
 
     /**
-     * Close the current chat's zkAPI lease before leaving it. A lease is bound
-     * to one chat, so keeping it alive would make the next chat fail with a
-     * session-conflict error until the five-minute provider expiry.
+     * Close the previous chat's zkAPI lease without blocking the new composer.
+     * A send made before this finishes waits on newChatSettlementPromise.
      */
-    async settleActiveLeaseBeforeNewChat() {
-        if (!zkapiClient.activeLease) return true;
-        if (this.newChatSettlementPending) return false;
+    startPreviousChatLeaseSettlement(previousSession, previousLease) {
+        if (!previousLease) return null;
+        if (this.newChatSettlementPromise) return this.newChatSettlementPromise;
 
-        this.newChatSettlementPending = true;
-        const newChatButton = this.elements.newChatBtn;
-        const previousAriaLabel = newChatButton?.getAttribute('aria-label');
-        if (newChatButton) {
-            newChatButton.disabled = true;
-            newChatButton.setAttribute('aria-busy', 'true');
-            newChatButton.setAttribute('aria-label', 'Closing private key before new chat');
-        }
-        this.showToast('Closing the current private key before starting a new chat…', 'success', 60_000);
-
-        try {
-            const stopped = await this.stopCurrentSessionStreamingAndWait({ timeoutMs: 15_000 });
-            if (!stopped) return false;
+        const ownerSession = this.state.sessionsById.get(previousLease.session_id) || previousSession;
+        const ownerSessionId = previousLease.session_id || ownerSession?.id;
+        const settlement = (async () => {
+            const stopped = await this.stopSessionStreamingAndWait(ownerSessionId, { timeoutMs: 15_000 });
+            if (!stopped) throw new Error('The previous response is still stopping.');
 
             const deadline = Date.now() + 15_000;
             while (true) {
@@ -3746,25 +3757,43 @@ class ChatApp {
                 }
             }
 
-            const previousSession = this.getCurrentSession();
-            if (previousSession) {
-                inferenceService.clearAccessInfo(previousSession);
-                delete previousSession.zkapiSettleBeforeAccess;
-                await chatDB.saveSession(previousSession);
+            if (ownerSession) {
+                inferenceService.clearAccessInfo(ownerSession);
+                delete ownerSession.zkapiSettleBeforeAccess;
+                try {
+                    await chatDB.saveSession(ownerSession);
+                } catch (error) {
+                    console.warn('The previous private key settled, but its local session metadata was not saved:', error);
+                }
             }
+            return true;
+        })();
+
+        this.newChatSettlementPromise = settlement;
+        this.showToast('New chat ready. Closing the previous private key in the background…', 'success', 4000);
+        void settlement.then(() => {
+            if (this.newChatSettlementPromise === settlement) {
+                this.newChatSettlementPromise = null;
+            }
+        }, error => {
+            if (this.newChatSettlementPromise === settlement) {
+                this.newChatSettlementPromise = null;
+            }
+            this.showToast(error?.message || 'Could not close the previous private key.', 'error', 6000);
+        });
+        return settlement;
+    }
+
+    async waitForPreviousChatLeaseSettlement() {
+        const settlement = this.newChatSettlementPromise;
+        if (!settlement) return true;
+        this.showToast('Finishing the previous private key before sending…', 'success', 60_000);
+        try {
+            await settlement;
             this.clearToast();
             return true;
-        } catch (error) {
-            this.showToast(error?.message || 'Could not close the current private key.', 'error', 6000);
+        } catch {
             return false;
-        } finally {
-            this.newChatSettlementPending = false;
-            if (newChatButton) {
-                newChatButton.disabled = false;
-                newChatButton.removeAttribute('aria-busy');
-                if (previousAriaLabel == null) newChatButton.removeAttribute('aria-label');
-                else newChatButton.setAttribute('aria-label', previousAriaLabel);
-            }
         }
     }
 
@@ -5665,6 +5694,8 @@ class ChatApp {
             this.showToast('Fund your private balance with MetaMask before sending your first message.', 'error', 5000);
             return;
         }
+
+        if (!(await this.waitForPreviousChatLeaseSettlement())) return;
 
         const activeLease = zkapiClient.activeLease;
         const currentBeforeCreate = this.getCurrentSession();
