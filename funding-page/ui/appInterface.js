@@ -80,7 +80,6 @@ export function createComponentServicesInterface(options = {}) {
         inference: options.inferenceServiceImpl || globalThis.inferenceService || null,
         verifier: options.verifierServiceImpl || globalThis.stationVerifier || null,
         share: options.shareServiceImpl || globalThis.shareService || null,
-        account: options.accountServiceImpl || globalThis.accountService || null,
         sync: options.syncServiceImpl || globalThis.syncService || null
     };
 }

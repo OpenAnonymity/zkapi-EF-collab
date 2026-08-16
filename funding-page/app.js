@@ -27,7 +27,6 @@ import {
 import shareService from './services/shareService.js';
 import { getTicketCost, initModelTiers } from './services/modelTiers.js';
 import { initPinnedModels, onPinnedModelsUpdate, getDefaultModelConfig, getDisabledModels, getPinnedModels, getStandardizedModelDisplayName } from './services/modelConfig.js';
-import accountService from './services/accountService.js';
 import apiKeyStore from './services/apiKeyStore.js';
 import { generateUlid21 } from './services/ulid.js';
 import { chatDB } from './db.js';

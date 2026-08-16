@@ -19,7 +19,6 @@ import networkProxy from '../../services/networkProxy.js';
 import inferenceService from '../../services/inference/inferenceService.js';
 import stationVerifier from '../../services/verifier.js';
 import shareService from '../../services/shareService.js';
-import accountService from '../../services/accountService.js';
 import syncService from '../../services/syncService.js';
 
 export default class VanillaChatUi {
@@ -32,7 +31,6 @@ export default class VanillaChatUi {
             inferenceServiceImpl: inferenceService,
             verifierServiceImpl: stationVerifier,
             shareServiceImpl: shareService,
-            accountServiceImpl: accountService,
             syncServiceImpl: syncService,
             ...options
         });

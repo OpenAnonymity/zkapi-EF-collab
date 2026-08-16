@@ -77,6 +77,24 @@ test('browser direct requests use the same conservative implicit completion limi
     );
 });
 
+test('browser inference separates zkAPI key checkout from OA streaming transport', () => {
+    const runtime = fs.readFileSync(path.join(__dirname, 'services/browserWalletRuntime.js'), 'utf8');
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    const api = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
+
+    assert.match(runtime, /async acquireEphemeralKey\(sessionId\)/);
+    assert.match(runtime, /apiKey: lease\.api_key/);
+    assert.match(runtime, /lease\.inFlight \+= 1/);
+    assert.match(runtime, /lease\.inFlight = Math\.max\(0, lease\.inFlight - 1\)/);
+    assert.doesNotMatch(runtime, /async inferenceFetch\(/);
+    assert.match(client, /async acquireInferenceAccess\(sessionId\)/);
+    assert.doesNotMatch(client, /async inferenceFetch\(/);
+    assert.match(api, /await zkapiClient\.acquireInferenceAccess\(sessionId\)/);
+    assert.match(api, /stream: true/);
+    assert.match(api, /await consumeSseBody\(response\.body, processSseLine\)/);
+    assert.doesNotMatch(api, /\{ \.\.\.body, stream: false \}/);
+});
+
 test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {
     const gas = await import(pathToFileURL(path.join(__dirname, 'services/zkapiGas.mjs')));
     assert.equal(gas.bufferedGasLimit('0x6d094d'), '0x839b46');

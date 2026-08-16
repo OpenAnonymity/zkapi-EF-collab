@@ -220,21 +220,22 @@ class ZkapiClient extends EventTarget {
         return !!this.wallet?.has_note && !!this.wallet?.note;
     }
 
-    async inferenceFetch(path, body, sessionId, signal) {
+    async acquireInferenceAccess(sessionId) {
         if (!this.initialized) await this.init();
         if (this.browserMode) {
-            return browserWalletRuntime.inferenceFetch(path, body, sessionId, signal);
+            return browserWalletRuntime.acquireEphemeralKey(sessionId);
         }
-        return fetch(path, {
-            method: 'POST',
-            credentials: 'same-origin',
+
+        return {
+            mode: 'daemon',
+            apiKey: null,
+            baseUrl: `${window.location.origin}/v1`,
             headers: {
                 'content-type': 'application/json',
                 [SESSION_HEADER]: sessionId
             },
-            body: JSON.stringify(body),
-            signal
-        });
+            release() {}
+        };
     }
 
     get note() {

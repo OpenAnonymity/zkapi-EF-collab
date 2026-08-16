@@ -7,14 +7,19 @@ The daemon UI vendors the open-source [OA Chat](https://github.com/OpenAnonymity
 - Vendored source: the pinned upstream `chat/` tree, including its components,
   local chat database, fonts, Markdown/KaTeX/highlight assets, styles, and shell
 - zkAPI adapter surfaces:
-  - `services/zkapiClient.js` for daemon state and MetaMask note lifecycle
-  - `services/inference/backends/zkapiBackend.js` and `api.js` for session-bound inference
+  - `services/zkapiClient.js` for daemon state, MetaMask note lifecycle, and
+    session-bound ephemeral-key checkout
+  - `services/inference/backends/zkapiBackend.js` for zkAPI access binding;
+    `api.js` otherwise retains OA Chat's direct OpenRouter streaming transport
   - `components/AccountModal.js`, `components/WelcomePanel.js`, and
     `components/RightPanel.js` where OA ticket/account UI becomes private balance UI
   - `zkapi.css` for the small set of payment-only styles built from OA design tokens
   - `wallet.js` for audited contract calldata and receipt codecs
 
-The adapter replaces OA inference tickets and API-key acquisition with the local
-zkAPI daemon. MetaMask is used only for deposits and withdrawals; note secrets
-and chat history remain local. Optional OA services that require the separate
+The adapter replaces OA inference tickets and API-key acquisition with zkAPI's
+client runtime (browser WASM on the hosted build, or the local daemon). MetaMask
+is used only for deposits and withdrawals; note secrets and chat history remain
+local. Optional OA services that require the separate
 ticket system (memory and confidential scrubbing) stay disabled in this build.
+OA passkey accounts and account sync are not initialized or exposed; the only
+account-like surface is the replacement **Private balance** payment panel.

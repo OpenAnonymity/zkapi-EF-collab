@@ -1,5 +1,4 @@
 import networkProxy from './networkProxy.js';
-import { ensureDirectCompletionLimit } from './zkapiRequestCompat.mjs';
 import {
     archiveBrowserWallet,
     createWalletChannel,
@@ -807,7 +806,7 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async inferenceFetch(path, body, sessionId, signal) {
+    async acquireEphemeralKey(sessionId) {
         const lease = await this.ensureLease(sessionId);
         if (lease.requestsServed >= this.config.openrouter.requests_per_key) {
             throw new BrowserWalletHttpError(
@@ -816,34 +815,28 @@ class BrowserWalletRuntime extends EventTarget {
                 'lease_request_limit'
             );
         }
-        if (path !== '/v1/chat/completions') {
-            throw new BrowserWalletHttpError(
-                `The browser wallet does not allow the upstream path ${path}.`,
-                400,
-                'unsupported_upstream_path'
-            );
-        }
         lease.requestsServed += 1;
         lease.inFlight += 1;
-        // OA Chat uses the daemon-compatible /v1/chat/completions path, while
-        // the pinned OpenRouter base already ends in /api/v1.
-        const url = `${normalizeUrl(lease.openrouter_api_base)}/chat/completions`;
-        const upstreamBody = ensureDirectCompletionLimit(body);
-        try {
-            return await this.remoteFetch(url, {
-                method: 'POST',
-                headers: {
-                    authorization: `Bearer ${lease.api_key}`,
-                    'content-type': 'application/json',
-                    'http-referer': location.origin,
-                    'x-title': 'oa-chat'
-                },
-                body: JSON.stringify(upstreamBody),
-                signal
-            });
-        } finally {
-            lease.inFlight = Math.max(0, lease.inFlight - 1);
-        }
+        let released = false;
+        return {
+            mode: 'ephemeral-key',
+            apiKey: lease.api_key,
+            baseUrl: normalizeUrl(lease.openrouter_api_base),
+            headers: {
+                authorization: `Bearer ${lease.api_key}`,
+                'content-type': 'application/json',
+                'http-referer': location.origin,
+                'x-title': 'oa-chat'
+            },
+            release: () => {
+                if (released) return;
+                released = true;
+                // A fetch resolves when headers arrive, not when an SSE body is
+                // finished. Keep the lease checked out for the whole OA stream.
+                lease.inFlight = Math.max(0, lease.inFlight - 1);
+                this.dispatchEvent(new Event('change'));
+            }
+        };
     }
 
     async prepareWithdrawal(mode, destination) {
