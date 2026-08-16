@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
@@ -59,4 +60,58 @@ test('Vercel browser deployment proxies only the pinned Sepolia API origin', () 
         source: '/zkapi-deployment/:path*',
         destination: 'https://d33l4w2z2nh4cg.cloudfront.net/:path*'
     }]);
+});
+
+test('browser direct requests use the same conservative implicit completion limit as the CLI', async () => {
+    const compat = await import(pathToFileURL(path.join(__dirname, 'services/zkapiRequestCompat.mjs')));
+    assert.equal(compat.DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS, 256);
+    assert.deepEqual(
+        compat.ensureDirectCompletionLimit({ model: 'anthropic/claude-opus-5' }),
+        { model: 'anthropic/claude-opus-5', max_tokens: 256 }
+    );
+    assert.equal(compat.ensureDirectCompletionLimit({ max_tokens: 32 }).max_tokens, 32);
+    assert.equal(compat.ensureDirectCompletionLimit({ max_completion_tokens: 48 }).max_completion_tokens, 48);
+    assert.deepEqual(
+        compat.ensureDirectCompletionLimit({ max_output_tokens: 64 }),
+        { max_tokens: 64 }
+    );
+});
+
+test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {
+    const gas = await import(pathToFileURL(path.join(__dirname, 'services/zkapiGas.mjs')));
+    assert.equal(gas.bufferedGasLimit('0x6d094d'), '0x839b46');
+    assert.throws(() => gas.bufferedGasLimit('0x0'), /invalid gas estimate/);
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    assert.match(client, /method: 'eth_estimateGas'/);
+    assert.match(client, /transaction\.gas = bufferedGasLimit\(estimate\)/);
+});
+
+test('browser withdrawal settles an active key instead of waiting for expiry', () => {
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    const runtime = fs.readFileSync(path.join(__dirname, 'services/browserWalletRuntime.js'), 'utf8');
+    const modal = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
+    assert.match(client, /await this\.settleActiveLease\(onStatus\)/);
+    assert.match(runtime, /await this\.settleActiveLease\(\);\s*return withBrowserWalletLock/);
+    assert.match(modal, /Settle key now/);
+    assert.doesNotMatch(modal, /withdrawButton\.disabled = .*activeLease/);
+    assert.match(modal, /withdrawalAmount\.textContent = zkapiClient\.formatMoney/);
+    assert.match(modal, /data-active-lease-notice/);
+});
+
+test('deposit captures the edited amount before the busy-state render', () => {
+    const modal = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
+    const capture = modal.indexOf('const amount = depositInput?.value ?? this.depositAmount');
+    const run = modal.indexOf('return this.run(async () => {', capture);
+    assert.ok(capture >= 0, 'deposit amount capture is missing');
+    assert.ok(run > capture, 'deposit must capture the amount before run() re-renders the modal');
+    assert.match(modal.slice(run, run + 300), /zkapiClient\.deposit\(amount,/);
+    assert.match(modal, /if \(this\.isOpen && !this\.busy && zkapiClient\.note/);
+    assert.match(modal, /this\.depositAmount = depositInput\.value/);
+});
+
+test('an unsigned prepared deposit can be replaced after MetaMask cancellation', () => {
+    const runtime = fs.readFileSync(path.join(__dirname, 'services/browserWalletRuntime.js'), 'utf8');
+    assert.match(runtime, /if \(this\.runtime\.pendingDeposit\.transactionHash\)/);
+    assert.match(runtime, /await this\.commit\(\{ \.\.\.this\.runtime, pendingDeposit: null \}\)/);
+    assert.match(runtime, /A different deposit transaction is already pending in MetaMask/);
 });

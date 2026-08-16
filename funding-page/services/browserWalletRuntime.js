@@ -1,4 +1,5 @@
 import networkProxy from './networkProxy.js';
+import { ensureDirectCompletionLimit } from './zkapiRequestCompat.mjs';
 import {
     archiveBrowserWallet,
     createWalletChannel,
@@ -457,9 +458,17 @@ class BrowserWalletRuntime extends EventTarget {
             if (this.runtime.state) throw new Error('This browser already has an active private note.');
             if (this.runtime.pendingDeposit) {
                 if (Number(this.runtime.pendingDeposit.amount) !== Number(amount)) {
-                    throw new Error('A different deposit is already prepared in this browser. Finish it before changing the amount.');
+                    if (this.runtime.pendingDeposit.transactionHash) {
+                        throw new Error('A different deposit transaction is already pending in MetaMask. Finish it before changing the amount.');
+                    }
+                    // A plan without a transaction hash never reached the
+                    // chain. It is safe to discard after an approval or mint
+                    // cancellation and create a new note for the edited amount.
+                    await this.commit({ ...this.runtime, pendingDeposit: null });
+                    await this.reload();
+                } else {
+                    return this.runtime.pendingDeposit;
                 }
-                return this.runtime.pendingDeposit;
             }
             const params = await this.worker.call('generateDeposit');
             const snapshot = await this.remoteJson(`${this.config.funding.indexer_url}/v1/tree/snapshot`);
@@ -729,6 +738,34 @@ class BrowserWalletRuntime extends EventTarget {
         this.dispatchEvent(new Event('change'));
     }
 
+    async settleActiveLease() {
+        await this.init();
+        if (this.activeLease?.inFlight > 0) {
+            throw new BrowserWalletHttpError(
+                'Wait for the active model requests to finish before settling the private key.',
+                409,
+                'lease_requests_in_flight'
+            );
+        }
+        if (this.activeLease) {
+            await this.retireActiveLease();
+        } else {
+            await this.reload();
+            await this.recoverPending({ retireLostKey: true });
+        }
+        await this.reload();
+        if (this.runtime.journal) {
+            throw new BrowserWalletHttpError(
+                'The private key usage receipt is still being finalized. Try settling again shortly.',
+                409,
+                'lease_pending'
+            );
+        }
+        this.activeLease = null;
+        this.dispatchEvent(new Event('change'));
+        return this.walletStatus();
+    }
+
     async installRecoveredResponse(clientRequestId) {
         const recovery = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/requests/${encodeURIComponent(clientRequestId)}`);
         if (!recovery.request_response) return false;
@@ -791,6 +828,7 @@ class BrowserWalletRuntime extends EventTarget {
         // OA Chat uses the daemon-compatible /v1/chat/completions path, while
         // the pinned OpenRouter base already ends in /api/v1.
         const url = `${normalizeUrl(lease.openrouter_api_base)}/chat/completions`;
+        const upstreamBody = ensureDirectCompletionLimit(body);
         try {
             return await this.remoteFetch(url, {
                 method: 'POST',
@@ -800,7 +838,7 @@ class BrowserWalletRuntime extends EventTarget {
                     'http-referer': location.origin,
                     'x-title': 'oa-chat'
                 },
-                body: JSON.stringify(body),
+                body: JSON.stringify(upstreamBody),
                 signal
             });
         } finally {
@@ -810,10 +848,10 @@ class BrowserWalletRuntime extends EventTarget {
 
     async prepareWithdrawal(mode, destination) {
         await this.init();
+        await this.settleActiveLease();
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
             await this.reload();
             if (!this.runtime.state) throw new Error('There is no active private note to withdraw.');
-            if (this.activeLease) throw new Error('Wait for the active chat key to settle before withdrawing.');
             const existing = this.runtime.preparedWithdrawal;
             if (existing) {
                 const existingDestination = existing.destination?.toLowerCase();

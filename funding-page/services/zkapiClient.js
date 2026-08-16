@@ -1,4 +1,5 @@
 import browserWalletRuntime from './browserWalletRuntime.js';
+import { bufferedGasLimit } from './zkapiGas.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
 const SESSION_HEADER = 'x-zkapi-session-id';
@@ -391,9 +392,19 @@ class ZkapiClient extends EventTarget {
     }
 
     async sendContractTransaction(from, to, data, onSubmitted = null) {
+        const transaction = { from, to, data };
+        try {
+            const estimate = await globalThis.ethereum.request({
+                method: 'eth_estimateGas',
+                params: [transaction]
+            });
+            transaction.gas = bufferedGasLimit(estimate);
+        } catch (error) {
+            throw new Error(`Could not estimate a safe transaction gas limit: ${error.shortMessage || error.message || error}`);
+        }
         const hash = await globalThis.ethereum.request({
             method: 'eth_sendTransaction',
-            params: [{ from, to, data }]
+            params: [transaction]
         });
         if (onSubmitted) await onSubmitted(hash);
         return this.waitForReceipt(hash);
@@ -612,9 +623,8 @@ class ZkapiClient extends EventTarget {
         const note = this.note;
         if (!note) throw new Error('There is no active private note to withdraw.');
         if (!['mutual', 'escape'].includes(mode)) throw new Error('Choose a valid withdrawal mode.');
-        if (this.activeLease) {
-            throw new Error(`Wait for the active chat key to settle (${this.formatExpiry(this.activeLease.expires_at)} remaining).`);
-        }
+
+        await this.settleActiveLease(onStatus);
 
         onStatus('Connecting to MetaMask…');
         const destination = await this.connectWallet();
@@ -700,6 +710,22 @@ class ZkapiClient extends EventTarget {
         await this.refresh();
         onStatus('Escape started. Return after the safety window to finalize.');
         return { status: 'pending_withdrawal', deadline, event, receipt };
+    }
+
+    async settleActiveLease(onStatus = () => {}) {
+        const hasPendingRequest = Boolean(this.activeLease || this.wallet?.pending_request);
+        if (hasPendingRequest) {
+            onStatus('Settling the active private key and fetching its signed usage…');
+        }
+        const settled = this.browserMode
+            ? await browserWalletRuntime.settleActiveLease()
+            : await this.apiJson('/wallet/settle', { method: 'POST' });
+        await this.refresh({ quiet: true });
+        if (this.activeLease || this.wallet?.pending_request) {
+            throw new Error('The private key usage is still settling. Try again shortly.');
+        }
+        if (hasPendingRequest) onStatus('Private key settled. Balance updated.');
+        return settled;
     }
 
     async syncWithdrawal(onStatus = () => {}) {

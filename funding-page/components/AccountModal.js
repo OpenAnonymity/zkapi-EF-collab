@@ -12,11 +12,16 @@ export default class AccountModal {
         this.busy = false;
         this.status = '';
         this.statusError = false;
+        this.depositAmount = null;
         this.returnFocusEl = null;
         this.escapeHandler = null;
         this.unsubscribe = zkapiClient.subscribe(() => {
             this.updateTabIndicator();
-            if (this.isOpen && !this.busy) this.render();
+            // An unfunded modal contains an editable amount. Rebuilding it on
+            // background refreshes resets that value and steals input focus.
+            // Mutating actions render once from run() after they complete.
+            if (this.isOpen && !this.busy && zkapiClient.note
+                && !this.overlay?.contains(document.activeElement)) this.render();
         });
         this.attachTabListener();
         this.updateTabIndicator();
@@ -90,6 +95,13 @@ export default class AccountModal {
     setStatus(message, isError = false) {
         this.status = message;
         this.statusError = isError;
+        const withdrawalAmount = this.overlay?.querySelector('[data-withdraw-amount]');
+        if (withdrawalAmount && zkapiClient.note) {
+            withdrawalAmount.textContent = zkapiClient.formatMoney(zkapiClient.note.current_balance);
+        }
+        if (!zkapiClient.activeLease) {
+            this.overlay?.querySelector('[data-active-lease-notice]')?.remove();
+        }
         const element = this.overlay?.querySelector('[data-payment-status]');
         if (element) {
             element.textContent = message;
@@ -127,6 +139,8 @@ export default class AccountModal {
     renderBalance() {
         const note = zkapiClient.note;
         if (!note) {
+            const depositAmount = this.depositAmount
+                ?? zkapiClient.suggestedDeposit.toFixed(zkapiClient.suggestedDeposit < 0.01 ? 6 : 2);
             return `
                 <div class="p-5 space-y-4">
                     <div class="rounded-lg border border-border bg-muted/20 p-4">
@@ -137,7 +151,7 @@ export default class AccountModal {
                         <span class="text-xs font-medium text-foreground">Deposit amount</span>
                         <div class="mt-1.5 flex h-10 items-center rounded-lg border border-input bg-background px-3 input-focus-clean">
                             <span class="text-sm text-muted-foreground">$</span>
-                            <input id="zkapi-deposit-amount" class="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none" inputmode="decimal" value="${zkapiClient.suggestedDeposit.toFixed(zkapiClient.suggestedDeposit < 0.01 ? 6 : 2)}" />
+                            <input id="zkapi-deposit-amount" class="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none" inputmode="decimal" value="${this.escapeHtml(depositAmount)}" />
                         </div>
                     </label>
                     ${zkapiClient.config?.funding?.demo_mint_enabled ? '<p class="text-[11px] text-muted-foreground">Sepolia demo billing tokens are minted automatically if your wallet needs them. You only pay testnet gas.</p>' : ''}
@@ -164,6 +178,7 @@ export default class AccountModal {
                     <div class="mt-2 flex justify-between text-[11px] text-muted-foreground"><span>${zkapiClient.formatMoney(spent)} used</span><span>expires in ${zkapiClient.formatExpiry(note.expiry_ts)}</span></div>
                 </div>
                 ${zkapiClient.withdrawalBlocksChat ? '<div class="rounded-lg border border-amber-300/60 bg-amber-50/60 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">A withdrawal is prepared or pending. Finish it before sending another message.</div>' : ''}
+                ${zkapiClient.activeLease ? `<div class="rounded-lg border border-blue-300/60 bg-blue-50/60 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"><p>The current chat key can be settled now; there is no need to wait ${zkapiClient.formatExpiry(zkapiClient.activeLease.expires_at)} for expiry.</p><button id="zkapi-settle-key-btn" class="zkapi-secondary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>Settle key now</button></div>` : ''}
                 <div class="grid grid-cols-2 gap-2">
                     <button id="zkapi-refresh-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Refresh</button>
                     <button id="zkapi-withdraw-view-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Withdraw</button>
@@ -215,7 +230,7 @@ export default class AccountModal {
         return `
             <div class="p-5 space-y-4">
                 <div class="flex items-center justify-between rounded-lg border border-border bg-muted/20 px-4 py-3">
-                    <div><p class="text-xs text-muted-foreground">Amount returned</p><p class="mt-0.5 text-lg font-semibold text-foreground">${zkapiClient.formatMoney(note?.current_balance)}</p></div>
+                    <div><p class="text-xs text-muted-foreground">Amount returned</p><p data-withdraw-amount class="mt-0.5 text-lg font-semibold text-foreground">${zkapiClient.formatMoney(note?.current_balance)}</p></div>
                     <span class="text-xs text-muted-foreground">Note #${note?.note_id ?? '—'}</span>
                 </div>
                 <fieldset class="space-y-2" ${this.busy ? 'disabled' : ''}>
@@ -230,7 +245,7 @@ export default class AccountModal {
                     </label>
                 </fieldset>
                 <label class="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground"><input id="zkapi-withdraw-confirm" class="mt-0.5" type="checkbox" /> <span>I understand that withdrawing closes this private note and pauses chat until the flow is complete.</span></label>
-                ${activeLease ? `<p class="rounded-lg border border-amber-300/60 bg-amber-50/60 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">Wait for the active chat key to settle (${zkapiClient.formatExpiry(activeLease.expires_at)} remaining).</p>` : ''}
+                ${activeLease ? '<p data-active-lease-notice class="rounded-lg border border-blue-300/60 bg-blue-50/60 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">The active chat key will settle automatically before withdrawal.</p>' : ''}
                 <button id="zkapi-withdraw-btn" class="zkapi-primary-button w-full" type="button" disabled>${this.withdrawMode === 'mutual' ? 'Close note and withdraw' : `Start ${zkapiClient.escapePeriodLabel()} escape`}</button>
                 <button id="zkapi-back-balance-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>Back to balance</button>
             </div>`;
@@ -255,12 +270,22 @@ export default class AccountModal {
             </div>`;
 
         this.overlay.querySelector('#zkapi-payment-close')?.addEventListener('click', () => this.close());
-        this.overlay.querySelector('#zkapi-deposit-btn')?.addEventListener('click', () => this.run(async () => {
-            const amount = this.overlay.querySelector('#zkapi-deposit-amount')?.value;
-            await zkapiClient.deposit(amount, message => this.setStatus(message));
-            this.view = 'balance';
-            this.setStatus('Deposit confirmed. Your private balance is ready.');
-        }));
+        const depositInput = this.overlay.querySelector('#zkapi-deposit-amount');
+        depositInput?.addEventListener('input', () => {
+            this.depositAmount = depositInput.value;
+        });
+        this.overlay.querySelector('#zkapi-deposit-btn')?.addEventListener('click', () => {
+            // Capture the edited amount before run() marks the modal busy and
+            // re-renders it with the suggested default value.
+            const amount = depositInput?.value ?? this.depositAmount;
+            this.depositAmount = amount;
+            return this.run(async () => {
+                await zkapiClient.deposit(amount, message => this.setStatus(message));
+                this.depositAmount = null;
+                this.view = 'balance';
+                this.setStatus('Deposit confirmed. Your private balance is ready.');
+            });
+        });
         this.overlay.querySelector('#zkapi-watch-token-btn')?.addEventListener('click', () => this.run(async () => {
             await zkapiClient.addBillingTokenToWallet(message => this.setStatus(message));
         }));
@@ -270,6 +295,10 @@ export default class AccountModal {
         this.overlay.querySelector('#zkapi-refresh-btn')?.addEventListener('click', () => this.run(async () => {
             await zkapiClient.refresh();
             this.setStatus('Private balance refreshed.');
+        }));
+        this.overlay.querySelector('#zkapi-settle-key-btn')?.addEventListener('click', () => this.run(async () => {
+            await zkapiClient.settleActiveLease(message => this.setStatus(message));
+            this.setStatus('Private key settled. Balance updated.');
         }));
         this.overlay.querySelector('#zkapi-withdraw-view-btn')?.addEventListener('click', () => {
             this.view = 'withdraw';
@@ -288,7 +317,7 @@ export default class AccountModal {
         const confirm = this.overlay.querySelector('#zkapi-withdraw-confirm');
         const withdrawButton = this.overlay.querySelector('#zkapi-withdraw-btn');
         confirm?.addEventListener('change', () => {
-            withdrawButton.disabled = !confirm.checked || this.busy || !!zkapiClient.activeLease;
+            withdrawButton.disabled = !confirm.checked || this.busy;
         });
         withdrawButton?.addEventListener('click', () => this.run(async () => {
             const result = await zkapiClient.withdraw(this.withdrawMode, message => this.setStatus(message));
