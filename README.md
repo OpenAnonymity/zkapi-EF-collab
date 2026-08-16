@@ -71,7 +71,7 @@ installing Rust in the remote builder:
 vercel --prod --yes --local-config vercel.browser.json
 ```
 
-The Vercel configuration sends `/` to `/funding/` and serves the same OA Chat
+The Vercel configuration redirects `/` to `/funding/` and serves the same OA Chat
 client with the browser wallet selected automatically when no local daemon is
 available.
 

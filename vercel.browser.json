@@ -6,15 +6,14 @@
   "outputDirectory": "dist/browser",
   "redirects": [
     {
+      "source": "/",
+      "destination": "/funding/",
+      "permanent": false
+    },
+    {
       "source": "/funding",
       "destination": "/funding/",
       "permanent": false
-    }
-  ],
-  "rewrites": [
-    {
-      "source": "/",
-      "destination": "/funding/"
     }
   ],
   "headers": [
