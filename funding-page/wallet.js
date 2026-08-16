@@ -16,6 +16,7 @@
     finalizeEscapeWithdrawal: "ff8f5585",
     challengePeriod: "f3f480d9",
     legacyChallengePeriod: "c3a079ed",
+    currentRoot: "fdab463d",
     noteDeposited: "0x7c83dba8534bea9e30d6444f9ca6462dc906897f9938d220dbbe4358c1f7a063",
     mutualCloseEvent: "0x1f43fa4711ca18e1d26398f26bf598bd3a62992cdd0e84f055f2bb506e9d7031",
     escapeInitiatedEvent: "0xb0d1eb7131bcf3c6dd53517f6fa90bf7cc94178eb0eb5e0a1f204abe3b839cdf",

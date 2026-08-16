@@ -1,4 +1,5 @@
 import networkProxy from './networkProxy.js';
+import { sameFelt, waitForExpectedActiveRoot } from './zkapiWithdrawalRoot.mjs';
 import {
     archiveBrowserWallet,
     createWalletChannel,
@@ -445,9 +446,11 @@ class BrowserWalletRuntime extends EventTarget {
         return payload;
     }
 
-    async treePath(noteId, requireExisting = true) {
-        const snapshot = await this.remoteJson(`${this.config.funding.indexer_url}/v1/tree/snapshot`);
-        return this.worker.call('treePath', { snapshot, noteId, requireExisting });
+    async treePath(noteId, requireExisting = true, expectedActiveRoot = null) {
+        return waitForExpectedActiveRoot(async () => {
+            const snapshot = await this.remoteJson(`${this.config.funding.indexer_url}/v1/tree/snapshot`);
+            return this.worker.call('treePath', { snapshot, noteId, requireExisting });
+        }, expectedActiveRoot, { sleep: milliseconds => delay(milliseconds) });
     }
 
     async prepareDeposit(amount) {
@@ -829,7 +832,7 @@ class BrowserWalletRuntime extends EventTarget {
         };
     }
 
-    async prepareWithdrawal(mode, destination) {
+    async prepareWithdrawal(mode, destination, { expectedActiveRoot = null } = {}) {
         await this.init();
         await this.settleActiveLease();
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
@@ -838,13 +841,21 @@ class BrowserWalletRuntime extends EventTarget {
             const existing = this.runtime.preparedWithdrawal;
             if (existing) {
                 const existingDestination = existing.destination?.toLowerCase();
-                if (existing.mode === mode && existingDestination === destination.toLowerCase()) return existing;
                 if (!(existing.mode === 'mutual' && mode === 'escape' && existingDestination === destination.toLowerCase())) {
-                    throw new Error('A different withdrawal is already prepared in this browser.');
+                    if (existing.mode !== mode || existingDestination !== destination.toLowerCase()) {
+                        throw new Error('A different withdrawal is already prepared in this browser.');
+                    }
                 }
             }
             await this.recoverPending({ retireLostKey: true });
-            const path = await this.treePath(this.runtime.state.note_id, true);
+            const path = await this.treePath(this.runtime.state.note_id, true, expectedActiveRoot);
+            // Withdrawal proofs are bound to the global active root. Reuse a
+            // durable plan only while it still matches the canonical tree.
+            if (existing?.mode === mode
+                && existing.destination?.toLowerCase() === destination.toLowerCase()
+                && sameFelt(existing.public_inputs?.active_root, path.active_root)) {
+                return existing;
+            }
             let clearance = null;
             if (mode === 'mutual') {
                 const nullifier = await this.worker.call('withdrawalNullifier', { state: this.runtime.state });

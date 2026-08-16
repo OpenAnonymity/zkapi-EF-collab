@@ -11,6 +11,7 @@ test("credit amounts round-trip at six decimals", () => {
 });
 
 test("escape-period labels follow the deployed vault duration", () => {
+  assert.equal(wallet.ABI.currentRoot, "fdab463d");
   assert.equal(wallet.ABI.challengePeriod, "f3f480d9");
   assert.equal(wallet.ABI.legacyChallengePeriod, "c3a079ed");
   assert.equal(wallet.escapePeriodLabel(60), "1-minute");

@@ -139,11 +139,56 @@ test('New Chat settles its session lease before clearing the conversation', () =
 
 test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {
     const gas = await import(pathToFileURL(path.join(__dirname, 'services/zkapiGas.mjs')));
+    const contractErrors = await import(pathToFileURL(path.join(__dirname, 'services/zkapiContractError.mjs')));
     assert.equal(gas.bufferedGasLimit('0x6d094d'), '0x839b46');
     assert.throws(() => gas.bufferedGasLimit('0x0'), /invalid gas estimate/);
+    const staleRoot = contractErrors.contractEstimateError({
+        message: 'execution reverted',
+        data: { originalError: { data: '0x607447de' } }
+    });
+    assert.equal(staleRoot.code, 'stale_root');
+    assert.match(staleRoot.message, /vault changed/i);
+    const unknown = contractErrors.contractEstimateError({ message: 'execution reverted' });
+    assert.equal(unknown.code, 'gas_estimation_failed');
+    assert.match(unknown.message, /Could not estimate a safe transaction gas limit/);
     const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
     assert.match(client, /method: 'eth_estimateGas'/);
     assert.match(client, /transaction\.gas = bufferedGasLimit\(estimate\)/);
+    assert.match(client, /error\?\.code !== 'stale_root'/);
+});
+
+test('browser withdrawal refreshes stale Merkle roots before retrying', () => {
+    const runtime = fs.readFileSync(path.join(__dirname, 'services/browserWalletRuntime.js'), 'utf8');
+    const rootSync = fs.readFileSync(path.join(__dirname, 'services/zkapiWithdrawalRoot.mjs'), 'utf8');
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    assert.match(runtime, /expectedActiveRoot/);
+    assert.match(runtime, /waitForExpectedActiveRoot/);
+    assert.match(runtime, /sameFelt\(existing\.public_inputs\?\.active_root, path\.active_root\)/);
+    assert.match(rootSync, /indexer_root_lag/);
+    assert.match(client, /`0x\$\{ABI\.currentRoot\}`/);
+    assert.match(client, /const attempts = this\.browserMode \? 3 : 1/);
+    assert.match(client, /Refreshing the Merkle path and proof/);
+});
+
+test('withdrawal root synchronization waits for the indexer and fails closed', async () => {
+    const roots = await import(pathToFileURL(path.join(__dirname, 'services/zkapiWithdrawalRoot.mjs')));
+    let calls = 0;
+    const current = await roots.waitForExpectedActiveRoot(async () => {
+        calls += 1;
+        return { active_root: calls === 1 ? '0x10' : '0x11' };
+    }, 17n, { attempts: 3, delayMs: 0, sleep: async () => {} });
+    assert.equal(current.active_root, '0x11');
+    assert.equal(calls, 2);
+    assert.equal(roots.sameFelt('0x11', 17n), true);
+
+    await assert.rejects(
+        roots.waitForExpectedActiveRoot(
+            async () => ({ active_root: '0x12' }),
+            '0x13',
+            { attempts: 2, delayMs: 0, sleep: async () => {} }
+        ),
+        error => error.code === 'indexer_root_lag'
+    );
 });
 
 test('browser withdrawal settles an active key instead of waiting for expiry', () => {

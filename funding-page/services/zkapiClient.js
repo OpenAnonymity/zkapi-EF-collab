@@ -1,4 +1,5 @@
 import browserWalletRuntime from './browserWalletRuntime.js';
+import { contractEstimateError } from './zkapiContractError.mjs';
 import { bufferedGasLimit } from './zkapiGas.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
@@ -401,7 +402,7 @@ class ZkapiClient extends EventTarget {
             });
             transaction.gas = bufferedGasLimit(estimate);
         } catch (error) {
-            throw new Error(`Could not estimate a safe transaction gas limit: ${error.shortMessage || error.message || error}`);
+            throw contractEstimateError(error);
         }
         const hash = await globalThis.ethereum.request({
             method: 'eth_sendTransaction',
@@ -634,48 +635,65 @@ class ZkapiClient extends EventTarget {
             throw new Error(`Reconnect ${this.compact(prepared.destination, 9)}, the account bound to this prepared withdrawal.`);
         }
 
-        onStatus(mode === 'mutual'
-            ? 'Requesting server clearance and generating the withdrawal proof…'
-            : 'Generating a unilateral escape proof locally…');
-        const plan = this.browserMode
-            ? await browserWalletRuntime.prepareWithdrawal(mode, destination)
-            : await this.apiJson('/wallet/withdraw', {
-                method: 'POST',
-                body: JSON.stringify({ mode, destination })
-            });
-        if (Number(plan.public_inputs?.note_id) !== Number(note.note_id)) {
-            throw new Error('The private wallet returned a withdrawal for a different note.');
-        }
-
         const withdrawal = {
             phase: 'prepared',
             mode,
             noteId: Number(note.note_id),
             destination
         };
-        this.rememberWithdrawal(withdrawal);
-        if (this.config) {
-            this.config.prepared_withdrawal = {
-                mode,
-                note_id: withdrawal.noteId,
-                destination
-            };
-        }
 
-        const calldata = encodeWithdrawal(
-            plan,
-            mode,
-            destination,
-            this.config.funding.contract_address
-        );
-        onStatus(mode === 'mutual'
-            ? 'Confirm the mutual close in MetaMask…'
-            : 'Confirm the escape-hatch start in MetaMask…');
-        const receipt = await this.sendContractTransaction(
-            destination,
-            this.config.funding.contract_address,
-            calldata
-        );
+        let plan;
+        let receipt;
+        const attempts = this.browserMode ? 3 : 1;
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            onStatus(attempt === 0
+                ? (mode === 'mutual'
+                    ? 'Requesting server clearance and generating the withdrawal proof…'
+                    : 'Generating a unilateral escape proof locally…')
+                : 'The vault changed during preparation. Refreshing the Merkle path and proof…');
+            const expectedActiveRoot = this.browserMode
+                ? await this.readContractUint(
+                    this.config.funding.contract_address,
+                    `0x${ABI.currentRoot}`
+                )
+                : null;
+            plan = this.browserMode
+                ? await browserWalletRuntime.prepareWithdrawal(mode, destination, { expectedActiveRoot })
+                : await this.apiJson('/wallet/withdraw', {
+                    method: 'POST',
+                    body: JSON.stringify({ mode, destination })
+                });
+            if (Number(plan.public_inputs?.note_id) !== Number(note.note_id)) {
+                throw new Error('The private wallet returned a withdrawal for a different note.');
+            }
+            this.rememberWithdrawal(withdrawal);
+            if (this.config) {
+                this.config.prepared_withdrawal = {
+                    mode,
+                    note_id: withdrawal.noteId,
+                    destination
+                };
+            }
+            const calldata = encodeWithdrawal(
+                plan,
+                mode,
+                destination,
+                this.config.funding.contract_address
+            );
+            onStatus(mode === 'mutual'
+                ? 'Confirm the mutual close in MetaMask…'
+                : 'Confirm the escape-hatch start in MetaMask…');
+            try {
+                receipt = await this.sendContractTransaction(
+                    destination,
+                    this.config.funding.contract_address,
+                    calldata
+                );
+                break;
+            } catch (error) {
+                if (!this.browserMode || error?.code !== 'stale_root' || attempt + 1 >= attempts) throw error;
+            }
+        }
         const event = parseWithdrawalReceipt(receipt, this.config.funding.contract_address, mode);
         if (!event || event.noteId !== BigInt(note.note_id)
             || event.destination.toLowerCase() !== destination.toLowerCase()
