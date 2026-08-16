@@ -11,6 +11,7 @@ import {
 const DEFAULT_BROWSER_CONFIG_URL = new URL('../browser-config.json', import.meta.url).href;
 const LEASE_AUTHORIZATION = JSON.stringify({ mode: 'openrouter_ephemeral_lease', version: 1 });
 const MAX_RECOVERY_WAIT_MS = 45_000;
+const TAB_OWNER_STORAGE_KEY = 'zkapi-browser-tab-owner-v1';
 
 class BrowserWalletHttpError extends Error {
     constructor(message, status, code, data = null) {
@@ -85,6 +86,18 @@ function uuid() {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+function browserTabOwnerId() {
+    try {
+        const existing = sessionStorage.getItem(TAB_OWNER_STORAGE_KEY);
+        if (existing && /^[0-9a-f-]{36}$/i.test(existing)) return existing;
+        const created = uuid();
+        sessionStorage.setItem(TAB_OWNER_STORAGE_KEY, created);
+        return created;
+    } catch {
+        return uuid();
+    }
+}
+
 async function responsePayload(response) {
     const text = await response.text();
     try {
@@ -108,7 +121,10 @@ class BrowserWalletRuntime extends EventTarget {
         this.leasePromise = null;
         this.leasePromiseSession = null;
         this.channel = null;
-        this.ownerId = uuid();
+        // sessionStorage survives a reload in this tab but is isolated from an
+        // independently-opened OA Chat tab. That lets crash recovery retire a
+        // lost in-memory key without allowing another live tab to take it.
+        this.ownerId = browserTabOwnerId();
     }
 
     async init() {
@@ -721,9 +737,18 @@ class BrowserWalletRuntime extends EventTarget {
                 'lease_request_limit'
             );
         }
+        if (path !== '/v1/chat/completions') {
+            throw new BrowserWalletHttpError(
+                `The browser wallet does not allow the upstream path ${path}.`,
+                400,
+                'unsupported_upstream_path'
+            );
+        }
         lease.requestsServed += 1;
         lease.inFlight += 1;
-        const url = `${normalizeUrl(lease.openrouter_api_base)}${path}`;
+        // OA Chat uses the daemon-compatible /v1/chat/completions path, while
+        // the pinned OpenRouter base already ends in /api/v1.
+        const url = `${normalizeUrl(lease.openrouter_api_base)}/chat/completions`;
         try {
             return await this.remoteFetch(url, {
                 method: 'POST',

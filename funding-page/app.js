@@ -5632,7 +5632,9 @@ class ChatApp {
         // Block sending if station is banned (check both state and cached broadcast data)
         const verifier = inferenceService.getVerificationAdapter(session);
         const accessInfo = inferenceService.getAccessInfo(session);
-        const accessId = verifier?.getAccessId(accessInfo?.info);
+        const accessId = verifier?.supports
+            ? verifier.getAccessId?.(accessInfo?.info)
+            : null;
         if (verifier?.supports && accessId) {
             const stationState = verifier.getAccessState(accessId);
             // Also check cached broadcast data directly
@@ -6330,7 +6332,9 @@ class ChatApp {
 
         const verifier = inferenceService.getVerificationAdapter(session);
         const accessInfo = inferenceService.getAccessInfo(session);
-        const accessId = verifier?.getAccessId(accessInfo?.info);
+        const accessId = verifier?.supports
+            ? verifier.getAccessId?.(accessInfo?.info)
+            : null;
         if (verifier?.supports && accessId) {
             const stationState = verifier.getAccessState(accessId);
             const isBannedInCache = verifier.isAccessBanned(accessId);
