@@ -6,6 +6,7 @@
     "build": "next build",
     "dev": "next dev",
     "start": "next start",
+    "test": "node --test test/*.test.mjs",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
     "lint": "eslint"
@@ -18,7 +19,8 @@
     "next": "16.2.4",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "viem": "^2.55.16"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -26,10 +28,10 @@
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.3",
+    "eslint-config-next": "16.2.4",
     "postcss": "^8.5.10",
     "tailwindcss": "^4.2.2",
-    "typescript": "^6.0.3",
-    "eslint-config-next": "16.2.4",
-    "eslint": "^10.2.1"
+    "typescript": "^6.0.3"
   }
 }
