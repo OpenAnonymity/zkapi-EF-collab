@@ -1,165 +1,127 @@
+import OaRightPanelBase from './OaRightPanelBase.js';
 import zkapiClient from '../services/zkapiClient.js';
 
-const RIGHT_PANEL_WIDTH = 288;
-
-export default class RightPanel {
+/**
+ * OA's System Panel with its ticket purchase/redemption section replaced by
+ * zkAPI private-note billing. The ephemeral-key, proxy, and activity UI below
+ * that seam stays on the upstream OA implementation.
+ */
+export default class RightPanel extends OaRightPanelBase {
     constructor(app) {
-        this.app = app;
-        this.currentSession = app.getCurrentSession?.() || null;
-        this.isDesktop = window.innerWidth >= 1024;
-        const saved = localStorage.getItem('oa-right-panel-visible');
-        this.isVisible = saved === 'true' ? true : saved === 'false' ? false : this.isDesktop;
-        this.unsubscribe = zkapiClient.subscribe(() => this.render());
-        this.resizeHandler = () => {
-            this.isDesktop = window.innerWidth >= 1024;
-            this.updatePanelVisibility();
-        };
-        window.addEventListener('resize', this.resizeHandler);
+        super(app);
+        this.zkapiUnsubscribe = zkapiClient.subscribe(() => this.loadSessionData());
     }
 
-    mount() {
-        this.render();
-        this.updatePanelVisibility();
-        void zkapiClient.init().catch(() => this.render());
+    loadSessionData() {
+        const session = this.currentSession;
+        const lease = zkapiClient.activeLease;
+        const ownsLease = !!session && lease?.session_id === session.id;
+        const accessInfo = session
+            ? this.app.services.inference.getAccessInfo(session)
+            : null;
+
+        // OA persists its raw key on the chat. zkAPI deliberately persists
+        // only the chat binding and keeps the real child key in memory.
+        this.apiKey = ownsLease ? accessInfo?.token || session.id : null;
+        this.apiKeyInfo = ownsLease ? {
+            ...(accessInfo?.info || {}),
+            stationId: lease.station_id || accessInfo?.info?.stationId || null,
+            clientRequestId: lease.client_request_id
+        } : null;
+        this.expiresAt = ownsLease
+            ? new Date(Number(lease.expires_at) * 1000).toISOString()
+            : null;
+        this.networkLogs = this.app.services.networkLogger.getAllLogs();
+        this.previousLogCount = this.networkLogs.length;
+        this.startExpirationTimer();
+        this.renderTopSectionOnly();
+        this.updateStatusIndicator();
+
+        requestAnimationFrame(() => this.scrollToBottomInstant());
     }
 
     onSessionChange(session) {
         this.currentSession = session;
-        this.render();
+        this.loadSessionData();
     }
 
-    renderTopSectionOnly() {
-        this.render();
-    }
-
-    openFunding() {
-        this.app.accountModal?.open?.('fund');
-    }
-
-    applyInvitationCodeFromLink() {
-        this.openFunding();
-    }
-
-    escapeHtml(value) {
-        const div = document.createElement('div');
-        div.textContent = value == null ? '' : String(value);
-        return div.innerHTML;
-    }
-
-    sessionStatus() {
-        const lease = zkapiClient.activeLease;
-        if (!this.currentSession) return 'Start a chat to create a private session key.';
-        if (!lease) return 'The first request in this chat creates a bounded ephemeral key.';
-        if (lease.session_id === this.currentSession.id) {
-            return `This chat reuses one bounded key for its title, response, and follow-ups. ${zkapiClient.formatExpiry(lease.expires_at)} remaining.`;
-        }
-        return `Another chat owns the current key for ${zkapiClient.formatExpiry(lease.expires_at)}.`;
-    }
-
-    render() {
-        const panel = document.getElementById('right-panel-content');
-        if (!panel) return;
+    billingSectionHTML() {
         const note = zkapiClient.note;
-        const funding = zkapiClient.config?.funding || {};
-        const remaining = note ? zkapiClient.formatMoney(note.current_balance) : '$0.00';
+        const balance = note ? zkapiClient.formatMoney(note.current_balance) : '$0.00';
+        const used = note
+            ? zkapiClient.formatMoney(Math.max(0, Number(note.deposit_amount || 0) - Number(note.current_balance || 0)))
+            : '$0.00';
         const percent = note?.deposit_amount
             ? Math.max(0, Math.min(100, Number(note.current_balance) / Number(note.deposit_amount) * 100))
             : 0;
-        const modeTitle = zkapiClient.isDirectMode ? 'Prompt-private' : 'Server proxy';
-        const modeDetail = zkapiClient.isDirectMode
-            ? 'Prompts go from this machine to the provider with a bounded key.'
-            : 'The zkAPI server proxies request content in this mode.';
         const hasError = !!zkapiClient.lastError;
 
-        panel.innerHTML = `
-            <div style="min-height:calc(3rem + 1px)" class="px-3 bg-muted/10 flex items-center">
-                <div class="flex items-center justify-between w-full">
-                    <h2 class="text-sm font-semibold text-foreground">System Panel</h2>
-                    <button id="close-right-panel" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none" aria-label="Hide system panel">
-                        <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4V4Z" fill="currentColor" fill-opacity=".15" stroke="none"/><path d="M14 4v16"/></svg>
-                    </button>
-                </div>
-            </div>
-            <div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
-                <section class="border-b border-border p-3">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-1.5"><span class="zkapi-status-dot ${hasError ? 'error' : 'online'}"></span><span class="text-xs font-medium text-foreground">${hasError ? 'Payment unavailable' : modeTitle}</span></div>
-                        <span class="text-[10px] text-muted-foreground">local</span>
-                    </div>
-                    <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">${hasError ? this.escapeHtml(zkapiClient.lastError.message) : modeDetail}</p>
-                </section>
-                <section class="border-b border-border p-3">
-                    <div class="rounded-lg border border-border bg-muted/10 p-3">
-                        <div class="flex items-center justify-between"><span class="text-xs text-muted-foreground">Private balance</span><span class="${note ? 'badge-status-success' : 'bg-muted text-muted-foreground'} rounded-full px-2 py-0.5 text-[9px] font-medium">${note ? `note #${note.note_id}` : 'not funded'}</span></div>
-                        <p class="mt-1 text-xl font-semibold tracking-tight text-foreground">${remaining}</p>
-                        <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600" style="width:${percent}%"></div></div>
-                        <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
-                            <button id="zkapi-panel-fund" class="zkapi-primary-button" type="button">${note ? 'Details' : 'Fund with MetaMask'}</button>
-                            ${note ? '<button id="zkapi-panel-withdraw" class="zkapi-secondary-button" type="button">Withdraw</button>' : ''}
-                        </div>
-                    </div>
-                </section>
-                <section class="border-b border-border p-3">
+        return `
+            <div class="p-3">
+                <div class="flex items-center justify-between">
                     <div class="flex items-center gap-1.5">
-                        <svg class="h-3.5 w-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.25a7.5 7.5 0 0 1 15 0"/></svg>
-                        <h3 class="text-xs font-medium text-foreground">Private session</h3>
+                        <svg class="h-3.5 w-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m3-9.5C15 7.12 13.66 6 12 6S9 7.12 9 8.5 10.34 11 12 11s3 1.12 3 2.5S13.66 16 12 16s-3-1.12-3-2.5M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+                        <span class="text-xs font-medium">Private balance: <span class="font-semibold">${balance}</span></span>
                     </div>
-                    <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">${this.sessionStatus()}</p>
-                    ${this.currentSession ? `<p class="mt-2 break-all font-mono text-[9px] text-muted-foreground/70">${this.escapeHtml(this.currentSession.id)}</p>` : ''}
-                </section>
-                <section class="flex-1 p-3">
-                    <div class="flex items-center gap-1.5"><svg class="h-3.5 w-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg><h3 class="text-xs font-medium text-foreground">Payment state</h3></div>
-                    <dl class="zkapi-panel-details mt-3">
-                        <div><dt>Network</dt><dd>${zkapiClient.networkName()}</dd></div>
-                        <div><dt>Expires</dt><dd>${note ? zkapiClient.formatExpiry(note.expiry_ts) : '—'}</dd></div>
-                        <div><dt>Vault</dt><dd>${zkapiClient.compact(funding.contract_address, 6)}</dd></div>
-                        <div><dt>Indexer</dt><dd>${zkapiClient.config ? 'connected' : 'checking'}</dd></div>
-                        <div><dt>Withdrawal</dt><dd>${zkapiClient.withdrawal?.phase || 'ready'}</dd></div>
-                    </dl>
-                    <p class="mt-5 text-center text-[9px] text-muted-foreground/60">OA Chat · Private prepaid access · MIT</p>
-                </section>
-            </div>`;
-
-        panel.querySelector('#close-right-panel')?.addEventListener('click', () => this.hide());
-        panel.querySelector('#zkapi-panel-fund')?.addEventListener('click', () => this.app.accountModal?.open?.(note ? 'balance' : 'fund'));
-        panel.querySelector('#zkapi-panel-withdraw')?.addEventListener('click', () => this.app.accountModal?.open?.('withdraw'));
+                    <span class="rounded-full px-2 py-0.5 text-[9px] font-medium ${hasError ? 'bg-destructive/10 text-destructive' : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${hasError ? 'unavailable' : note ? `note #${note.note_id}` : 'not funded'}</span>
+                </div>
+                <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600 transition-all" style="width:${percent}%"></div></div>
+                <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : 'Fund with MetaMask to chat'}</span></div>
+                <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
+                    <button id="zkapi-panel-fund" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">${note ? 'Balance details' : 'Fund with MetaMask'}</button>
+                    ${note ? '<button id="zkapi-panel-withdraw" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">Withdraw</button>' : ''}
+                </div>
+                ${hasError ? `<p class="mt-2 text-[10px] leading-snug text-destructive">${this.escapeHtml(zkapiClient.lastError.message)}</p>` : ''}
+            </div>
+            <div class="mx-3 mb-3 rounded-lg border border-border bg-muted/5 p-2">
+                <div class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">?</span><span class="flex-1 text-xs font-semibold text-foreground">How zkAPI billing works</span></div>
+                <p class="mt-1 text-[10px] leading-snug text-muted-foreground">MetaMask funds a private prepaid note. zkAPI proves available balance without attaching your wallet identity to model requests, then obtains one short-lived OA ephemeral key for this chat. The key is reused for the title, response, and follow-ups until it expires or is settled.</p>
+            </div>
+        `;
     }
 
-    show() {
-        this.isVisible = true;
-        localStorage.setItem('oa-right-panel-visible', 'true');
-        this.updatePanelVisibility();
-        this.render();
+    generateTopSectionHTML() {
+        const oa = super.generateTopSectionHTML();
+        const marker = '<!-- API Key Panel -->';
+        const keyAndProxy = oa.slice(oa.indexOf(marker));
+        return `${this.billingSectionHTML()}${keyAndProxy}`;
     }
 
-    hide() {
-        this.isVisible = false;
-        localStorage.setItem('oa-right-panel-visible', 'false');
-        this.updatePanelVisibility();
+    attachTopSectionEventListeners() {
+        // Preserve OA's ephemeral-key, verifier, and network-proxy controls.
+        super.attachTopSectionEventListeners();
+        document.getElementById('zkapi-panel-fund')?.addEventListener('click', () => {
+            this.app.accountModal?.open?.(zkapiClient.note ? 'balance' : 'fund');
+        });
+        document.getElementById('zkapi-panel-withdraw')?.addEventListener('click', () => {
+            this.app.accountModal?.open?.('withdraw');
+        });
     }
 
-    toggle() {
-        if (this.isVisible) this.hide();
-        else this.show();
+    async handleRenewApiKey() {
+        if (this.isRenewingKey || !this.currentSession) return;
+        this.isRenewingKey = true;
+        this.renderTopSectionOnly();
+        try {
+            this.app.services.inference.clearAccessInfo(this.currentSession);
+            await this.app.data.saveSession(this.currentSession);
+            await this.app.acquireAndSetAccess(this.currentSession);
+            this.loadSessionData();
+        } catch (error) {
+            this.app.showToast?.(error.message || 'Could not refresh the private key.', 'error');
+        } finally {
+            this.isRenewingKey = false;
+            this.renderTopSectionOnly();
+        }
     }
 
-    closeRightPanel() {
-        this.hide();
+    applyInvitationCodeFromLink() {
+        this.app.accountModal?.open?.('fund');
     }
 
-    updatePanelVisibility() {
-        const panel = document.getElementById('right-panel');
-        const app = document.getElementById('app');
-        const showButton = document.getElementById('show-right-panel-btn');
-        if (!panel) return;
-
-        document.documentElement.toggleAttribute('data-right-panel-hidden', !this.isVisible);
-        panel.classList.toggle('right-panel-visible', this.isVisible);
-        panel.style.width = this.isVisible ? `${RIGHT_PANEL_WIDTH}px` : '0px';
-        panel.style.minWidth = this.isVisible ? `${RIGHT_PANEL_WIDTH}px` : '0px';
-        panel.style.borderLeftWidth = this.isVisible ? '1px' : '0px';
-        panel.setAttribute('aria-hidden', this.isVisible ? 'false' : 'true');
-        app?.classList.toggle('right-panel-open', this.isVisible && this.isDesktop);
-        showButton?.classList.toggle('system-panel-toggle-visible', !this.isVisible);
+    destroy() {
+        this.zkapiUnsubscribe?.();
+        this.zkapiUnsubscribe = null;
+        super.destroy();
     }
 }

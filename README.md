@@ -122,22 +122,19 @@ The first local LLM call creates one Groth16 authorization and receives a
 short-lived OpenRouter runtime key. The bundled UI assigns a stable local
 session ID to each conversation. Requests with that ID—including concurrent
 answer and title generation and later follow-ups—reuse that key and can run in
-parallel. By default the daemon sends at most five LLM requests through a key,
-then disables it, settles its aggregate usage, and obtains the next key for the
-session. A different conversation cannot silently inherit an active key. Set
-`--openrouter-requests-per-key 1` before the `client` subcommand for one key per
-request, or choose another positive limit to trade fewer proofs and settlement
-pauses for greater cross-request linkability. OpenRouter still sees the LLM
-traffic; the zkAPI server does not. Runtime keys are held only in local process
-memory and are never stored by the server.
+parallel for the lifetime of that chat's lease. A different conversation cannot
+silently inherit an active key. The key is replaced only on expiry, explicit
+settlement, provider rejection, or credit exhaustion. OpenRouter still sees the
+LLM traffic; the zkAPI server does not. Runtime keys are held only in local
+process memory and are never stored by the server.
 
 When the server is configured with `--oa-org-url`, the response also contains
 the station ID, expiry, station signature, org signature, and verifier URL used
 by oa-chat. The local daemon submits that evidence to its independently
 configured `--oa-verifier-url` and refuses to send a prompt unless the verifier
 accepts the key. Because the station owns the OpenRouter management account,
-the station disables each key when zkAPI retires it after the configured
-request count (or at its provider-enforced expiry), waits for usage to
+the station disables each key when zkAPI explicitly retires it (or at its
+provider-enforced expiry), waits for usage to
 stabilize, and persists a signed aggregate-usage receipt before deleting the
 key. The org verifies and
 countersigns that receipt, and zkAPI charges the reported micro-dollar usage

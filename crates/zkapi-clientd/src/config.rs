@@ -15,8 +15,6 @@ pub enum RequestMode {
     DirectOpenrouter,
 }
 
-pub const DEFAULT_OPENROUTER_REQUESTS_PER_KEY: u32 = 5;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelDescriptor {
     pub id: String,
@@ -78,10 +76,6 @@ pub struct AuthConfig {
     /// Reject direct/legacy OpenRouter leases and require verifier-backed OA
     /// org evidence. This is an independent anti-downgrade policy.
     pub require_oa_org_key_source: bool,
-    /// Maximum local LLM requests sent with one ephemeral key. A lower value
-    /// reduces cross-request linkability at the cost of more lease proofs and
-    /// settlement pauses.
-    pub openrouter_requests_per_key: u32,
 }
 
 impl AuthConfig {
@@ -127,7 +121,6 @@ impl Default for AuthConfig {
             oa_verifier_url: "https://verifier2.openanonymity.ai".to_string(),
             openrouter_inference_base: "https://openrouter.ai/api/v1".to_string(),
             require_oa_org_key_source: false,
-            openrouter_requests_per_key: DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
         }
     }
 }

@@ -28,6 +28,5 @@
   "proving_keys_base_url": "./proofs/",
   "credits_per_usd": 1000000,
   "suggested_deposit_amount": 5000000,
-  "openrouter_requests_per_key": 5,
   "require_oa_key_source": true
 }

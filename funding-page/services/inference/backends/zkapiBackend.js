@@ -1,4 +1,5 @@
 import zkapiAPI from '../../../api.js';
+import zkapiClient from '../../zkapiClient.js';
 
 const zkapiBackend = {
     id: 'zkapi',
@@ -7,7 +8,10 @@ const zkapiBackend = {
     accessShortLabel: 'session',
     accessType: 'zkapi-session',
     requiresTickets: false,
-    refreshOnCreditExhaustion: false,
+    // Reuse OA's proven exhausted-key recovery path. Clearing access marks the
+    // current session lease for immediate settlement; requestAccess performs
+    // that settlement before OA retries with a freshly issued child key.
+    refreshOnCreditExhaustion: true,
     baseUrl: window.location.origin,
     defaultModelId: 'openai/gpt-4o-mini',
     defaultModelName: 'OpenAI: gpt-4o-mini',
@@ -49,14 +53,14 @@ const zkapiBackend = {
     getAccessInfo(session) {
         if (!session) return null;
         return {
-            token: session.zkapiSessionId || session.apiKey || null,
+            token: session.apiKey || null,
             info: session.apiKeyInfo || null,
             expiresAt: null
         };
     },
 
     getAccessToken(session) {
-        return session?.zkapiSessionId || session?.apiKey || null;
+        return session?.apiKey || null;
     },
 
     setAccessInfo(session, accessInfo) {
@@ -76,6 +80,9 @@ const zkapiBackend = {
 
     clearAccessInfo(session) {
         if (!session) return;
+        if (zkapiClient.activeLease?.session_id === session.id) {
+            session.zkapiSettleBeforeAccess = true;
+        }
         session.apiKey = null;
         session.apiKeyInfo = null;
         session.expiresAt = null;
@@ -94,6 +101,10 @@ const zkapiBackend = {
             throw error;
         }
         if (!session?.id) throw new Error('No active chat is available.');
+        if (session.zkapiSettleBeforeAccess) {
+            await zkapiClient.settleActiveLease();
+            delete session.zkapiSettleBeforeAccess;
+        }
         const token = session.zkapiSessionId || session.apiKey || session.id;
         return {
             key: token,

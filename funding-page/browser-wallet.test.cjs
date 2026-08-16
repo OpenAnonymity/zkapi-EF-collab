@@ -51,7 +51,7 @@ test('browser config defaults to the public Sepolia deployment', () => {
     assert.equal(config.proving_keys_base_url, './proofs/');
     assert.equal(config.deployment_api_proxy_path, '/zkapi-deployment/');
     assert.equal(config.require_oa_key_source, true);
-    assert.ok(config.openrouter_requests_per_key > 1);
+    assert.equal(config.openrouter_requests_per_key, undefined);
 });
 
 test('Vercel browser deployment proxies only the pinned Sepolia API origin', () => {
@@ -86,6 +86,7 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     assert.match(runtime, /apiKey: lease\.api_key/);
     assert.match(runtime, /lease\.inFlight \+= 1/);
     assert.match(runtime, /lease\.inFlight = Math\.max\(0, lease\.inFlight - 1\)/);
+    assert.doesNotMatch(runtime, /requestsServed|requests_per_key|lease_request_limit/);
     assert.doesNotMatch(runtime, /async inferenceFetch\(/);
     assert.match(client, /async acquireInferenceAccess\(sessionId\)/);
     assert.doesNotMatch(client, /async inferenceFetch\(/);
@@ -93,6 +94,27 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     assert.match(api, /stream: true/);
     assert.match(api, /await consumeSseBody\(response\.body, processSseLine\)/);
     assert.doesNotMatch(api, /\{ \.\.\.body, stream: false \}/);
+});
+
+test('OA System Panel is preserved with only ticket billing replaced', () => {
+    const panel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
+    const upstreamPanel = fs.readFileSync(path.join(__dirname, 'components/OaRightPanelBase.js'), 'utf8');
+    assert.match(panel, /extends OaRightPanelBase/);
+    assert.match(panel, /super\.generateTopSectionHTML\(\)/);
+    assert.match(panel, /<!-- API Key Panel -->/);
+    assert.match(panel, /super\.attachTopSectionEventListeners\(\)/);
+    assert.match(panel, /Private balance/);
+    assert.match(upstreamPanel, /Ephemeral Access Key/);
+    assert.match(upstreamPanel, /Network Proxy/);
+    assert.match(upstreamPanel, /Activity Timeline/);
+});
+
+test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => {
+    const backend = fs.readFileSync(path.join(__dirname, 'services/inference/backends/zkapiBackend.js'), 'utf8');
+    assert.match(backend, /refreshOnCreditExhaustion: true/);
+    assert.match(backend, /session\.zkapiSettleBeforeAccess = true/);
+    assert.match(backend, /await zkapiClient\.settleActiveLease\(\)/);
+    assert.match(backend, /delete session\.zkapiSettleBeforeAccess/);
 });
 
 test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {

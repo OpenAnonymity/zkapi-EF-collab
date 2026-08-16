@@ -42,16 +42,15 @@ complete mint, approve, deposit, chat, and mutual-withdrawal test at typical
 testnet gas prices.
 
 The larger Sepolia test-token deposit reserves enough for about 100
-maximum-cost lease windows at the demo's $0.05 cap. By default a child key
-serves at most five requests for one chat session; those requests may run in
-parallel. Before serving request six, the client disables that key, settles its
-measured aggregate usage, and opens the next lease. Requests sharing a key are
-linkable to OpenRouter. To use one key per request, put
-`--openrouter-requests-per-key 1` before `client`:
+maximum-cost lease windows at the demo's $0.05 cap. A child key belongs to one
+chat session. Its answer, title generation, and follow-up requests reuse that
+key and may run in parallel. The client replaces it only on expiry, explicit
+settlement, provider rejection, or credit exhaustion. Requests sharing a key
+are linkable to OpenRouter. Start prompt-private mode with:
 
 ```bash
 ./target/release/zkapi --require-oa-org-key-source \
-  --openrouter-requests-per-key 1 client --mode direct-openrouter
+  client --mode direct-openrouter
 ```
 
 Add the same `--deployment ...` argument shown above after `client` when using

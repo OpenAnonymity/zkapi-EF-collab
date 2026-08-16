@@ -479,11 +479,6 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new(config: AuthConfig) -> Result<Arc<Self>, AuthError> {
-        if config.openrouter_requests_per_key == 0 {
-            return Err(AuthError::InvalidInput(
-                "openrouter requests per key must be greater than zero".to_string(),
-            ));
-        }
         std::fs::create_dir_all(&config.state_dir)
             .map_err(|err| AuthError::Wallet(err.to_string()))?;
         let prepared_withdrawal = load_prepared_withdrawal(&config.state_dir)?;
@@ -1080,10 +1075,10 @@ impl AuthService {
         lease_slot: &mut Option<ActiveOpenRouterLease>,
         session_id: &str,
     ) -> Result<(), AuthError> {
-        if lease_slot.as_ref().is_some_and(|lease| {
-            now_seconds().saturating_add(1) < lease.expires_at
-                && lease.requests_served < self.config.openrouter_requests_per_key
-        }) {
+        if lease_slot
+            .as_ref()
+            .is_some_and(|lease| now_seconds().saturating_add(1) < lease.expires_at)
+        {
             let lease = lease_slot.as_ref().expect("checked above");
             if lease.session_id != session_id {
                 return Err(AuthError::LeaseSessionConflict {
@@ -1099,8 +1094,7 @@ impl AuthService {
                 client_request_id = %finished.client_request_id,
                 expires_at = finished.expires_at,
                 requests_served = finished.requests_served,
-                request_limit = self.config.openrouter_requests_per_key,
-                "retiring finished OpenRouter lease before opening its replacement"
+                "retiring expired OpenRouter lease before opening its replacement"
             );
             self.retire_direct_openrouter_lease(&finished.client_request_id)
                 .await?;
@@ -1108,8 +1102,8 @@ impl AuthService {
 
         // Recover any state finalized since daemon startup before proving the
         // next lease request. The resulting child key stays in memory and is
-        // reused until the configured request count, its provider-enforced
-        // expiration, or a key rejection.
+        // reused for this OA chat until its provider-enforced expiration, an
+        // explicit settlement, credit exhaustion, or a key rejection.
         let _ = self.recover().await?;
         *lease_slot = Some(
             self.issue_direct_openrouter_lease(session_id.to_string())
@@ -1209,11 +1203,7 @@ impl AuthService {
             let client_request_id = lease.client_request_id.clone();
             let mut reserved_lease = lease.clone();
             lease.requests_served = lease.requests_served.saturating_add(1);
-            let retire_after_response =
-                lease.requests_served >= self.config.openrouter_requests_per_key;
-            if retire_after_response {
-                *lease_slot = None;
-            }
+            let retire_after_response = false;
             drop(lease_slot);
             match self
                 .send_verified_openrouter_request(
@@ -1842,8 +1832,7 @@ impl AuthService {
     async fn finish_direct_openrouter_lease(&self, client_request_id: String) {
         tracing::info!(
             %client_request_id,
-            request_limit = self.config.openrouter_requests_per_key,
-            "retiring OpenRouter lease after its configured request limit"
+            "retiring OpenRouter lease"
         );
         if let Err(error) = self
             .retire_direct_openrouter_lease(&client_request_id)

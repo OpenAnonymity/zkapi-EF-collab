@@ -479,7 +479,7 @@ fn setup_directory() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bounded_lease_rotates_after_the_configured_request_count() {
+async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
     let directory = test_directory();
     let wallet_directory = directory.join("wallet");
     let contract = Felt252::from_u64(0xdeadbeef);
@@ -555,7 +555,9 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
                             .unwrap_or_else(|| "management-test-key".to_string()),
                         api_base: format!("{openrouter_url}/api"),
                     },
-                    ttl_seconds: if live_openrouter { 30 } else { 3 },
+                    // Keep the mock lease alive long enough to prove that all
+                    // chat, title/response, SSE, and Ollama calls reuse it.
+                    ttl_seconds: if live_openrouter { 30 } else { 120 },
                     settlement_grace_seconds: if live_openrouter { 20 } else { 0 },
                     settlement_poll_seconds: 1,
                 }),
@@ -585,7 +587,6 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         clearance_signing_key: clearance_key.clone(),
         request_mode: RequestMode::DirectOpenrouter,
         openrouter_inference_base: format!("{openrouter_url}/api/v1"),
-        openrouter_requests_per_key: 2,
         ..Default::default()
     })
     .unwrap();
@@ -676,6 +677,7 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         let local_client_url = spawn(zkapi_clientd::build_router(service.clone())).await;
         let response = reqwest::Client::new()
             .post(format!("{local_client_url}/v1/chat/completions"))
+            .header("x-zkapi-session-id", "chat-one")
             .json(&json!({
                 "model": "openai/gpt-4o-mini",
                 "stream": true,
@@ -710,12 +712,14 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&second_chunk).contains("stream prompt"));
+        drop(chunks);
 
         // OpenWebUI often connects to port 11434 as an Ollama backend rather
         // than as an OpenAI-compatible backend. Ollama streaming is NDJSON,
         // not SSE, and must also reach the caller one chunk at a time.
         let response = reqwest::Client::new()
             .post(format!("{local_client_url}/api/chat"))
+            .header("x-zkapi-session-id", "chat-one")
             .json(&json!({
                 "model": "openai/gpt-4o-mini",
                 "stream": true,
@@ -765,6 +769,18 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         drop(chunks);
     }
 
+    let active = service.zkapi_config().await.active_lease.unwrap();
+    assert_eq!(active.client_request_id, first.client_request_id);
+    assert_eq!(
+        active.session_id,
+        if live_openrouter {
+            "default"
+        } else {
+            "chat-one"
+        }
+    );
+    service.settle_for_withdrawal().await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let wallet_settled = !service.status().await.unwrap().pending_request;
@@ -772,8 +788,8 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
                 .lookup_openrouter_lease(&first.client_request_id)
                 .is_some_and(|lease| lease.status == "finalized");
             let mock_keys_settled = live_openrouter
-                || (*openrouter_state.deletes.lock().unwrap() == 2
-                    && openrouter_state.create_bodies.lock().unwrap().len() == 2);
+                || (*openrouter_state.deletes.lock().unwrap() == 1
+                    && openrouter_state.create_bodies.lock().unwrap().len() == 1);
             if wallet_settled && first_settled && mock_keys_settled {
                 break;
             }
@@ -781,7 +797,7 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         }
     })
     .await
-    .expect("request-count key rotation should settle without waiting for key expiry");
+    .expect("explicit settlement should finish without waiting for key expiry");
 
     assert_eq!(first.client_request_id, second.client_request_id);
     if live_openrouter {
@@ -813,7 +829,7 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         );
         assert_eq!(&prompts[2..], ["stream prompt", "ollama stream prompt"]);
         assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
-        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 2);
+        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {
             assert_eq!(create_body["limit"], 0.001);
             assert_eq!(create_body["include_byok_in_limit"], true);
@@ -843,7 +859,6 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .status,
         zkapi_types::NullifierStatus::Finalized
     );
-    let expected_lease_charge = zkapi_serverd::pricing::usd_to_credits(2.0 * 0.000006);
     let expected_total_charge = zkapi_serverd::pricing::usd_to_credits(4.0 * 0.000006);
     let recovered_balance = service
         .status()
@@ -856,13 +871,13 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         assert!(recovered_balance < deposit);
     } else {
         assert_eq!(recovered_balance, deposit - expected_total_charge);
-        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 2);
+        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
     }
     let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
     if live_openrouter {
         assert!(transcript.charge_applied.is_some_and(|charge| charge > 0));
     } else {
-        assert_eq!(transcript.charge_applied, Some(expected_lease_charge));
+        assert_eq!(transcript.charge_applied, Some(expected_total_charge));
     }
     assert!(!transcript
         .response_payload

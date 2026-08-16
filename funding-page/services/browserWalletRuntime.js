@@ -346,8 +346,7 @@ class BrowserWalletRuntime extends EventTarget {
             openrouter: {
                 inference_base: normalizeUrl(manifest.privacy_mode.openrouter_inference_base),
                 verifier_url: normalizeUrl(manifest.privacy_mode.verifier_url),
-                require_oa_key_source: browserConfig.require_oa_key_source !== false,
-                requests_per_key: Number(browserConfig.openrouter_requests_per_key || 5)
+                require_oa_key_source: browserConfig.require_oa_key_source !== false
             },
             funding: {
                 contract_address: manifest.contract_address,
@@ -370,7 +369,8 @@ class BrowserWalletRuntime extends EventTarget {
                 session_id: this.activeLease.sessionId,
                 client_request_id: this.activeLease.client_request_id,
                 expires_at: this.activeLease.expires_at,
-                settle_after: this.activeLease.settle_after
+                settle_after: this.activeLease.settle_after,
+                station_id: this.activeLease.verification?.station_id || null
             }
             : null;
         const prepared = this.runtime?.preparedWithdrawal;
@@ -626,7 +626,6 @@ class BrowserWalletRuntime extends EventTarget {
             this.activeLease = {
                 ...lease,
                 sessionId,
-                requestsServed: 0,
                 inFlight: 0
             };
             await this.commit({
@@ -649,8 +648,7 @@ class BrowserWalletRuntime extends EventTarget {
         await this.init();
         const normalized = String(sessionId || 'default').slice(0, 160);
         const now = Math.floor(Date.now() / 1000);
-        if (this.activeLease && this.activeLease.expires_at > now
-            && this.activeLease.requestsServed < this.config.openrouter.requests_per_key) {
+        if (this.activeLease && this.activeLease.expires_at > now) {
             if (this.activeLease.sessionId !== normalized) {
                 throw new BrowserWalletHttpError(
                     `Chat ${this.activeLease.sessionId} owns the current private key until it settles.`,
@@ -662,7 +660,7 @@ class BrowserWalletRuntime extends EventTarget {
         }
         if (this.activeLease?.inFlight > 0) {
             throw new BrowserWalletHttpError(
-                'The current private key reached its request limit; retry after its active requests finish.',
+                'The current private key expired while requests were still active. Retry after they finish.',
                 409,
                 'lease_requests_in_flight'
             );
@@ -808,14 +806,6 @@ class BrowserWalletRuntime extends EventTarget {
 
     async acquireEphemeralKey(sessionId) {
         const lease = await this.ensureLease(sessionId);
-        if (lease.requestsServed >= this.config.openrouter.requests_per_key) {
-            throw new BrowserWalletHttpError(
-                'The private key request limit was reached concurrently; retry this request.',
-                409,
-                'lease_request_limit'
-            );
-        }
-        lease.requestsServed += 1;
         lease.inFlight += 1;
         let released = false;
         return {
