@@ -4,6 +4,12 @@
   "installCommand": "true",
   "buildCommand": "./scripts/package-browser-client.sh",
   "outputDirectory": "dist/browser",
+  "rewrites": [
+    {
+      "source": "/zkapi-deployment/:path*",
+      "destination": "https://d33l4w2z2nh4cg.cloudfront.net/:path*"
+    }
+  ],
   "redirects": [
     {
       "source": "/",

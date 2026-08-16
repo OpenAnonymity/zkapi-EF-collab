@@ -191,8 +191,36 @@ class BrowserWalletRuntime extends EventTarget {
         return response.json();
     }
 
+    deploymentProxyUrl(url) {
+        const proxyPath = this.browserConfig?.deployment_api_proxy_path;
+        if (!proxyPath) return null;
+        const proxyBase = new URL(proxyPath, location.origin);
+        if (proxyBase.origin !== location.origin || !proxyBase.pathname.endsWith('/')) {
+            throw new Error('browser-config.json contains an invalid deployment API proxy path.');
+        }
+        const target = new URL(url, location.href);
+        const trusted = this.browserConfig?.trusted_deployment;
+        const trustedOrigins = new Set([
+            trusted?.protocol_server_url,
+            trusted?.indexer_url,
+            this.browserConfig?.deployment_manifest_url,
+            ...(this.browserConfig?.allowed_deployment_manifest_urls || [])
+        ].filter(Boolean).map(value => new URL(value, location.href).origin));
+        if (!trustedOrigins.has(target.origin)) return null;
+        return new URL(`${target.pathname.replace(/^\/+/, '')}${target.search}`, proxyBase).href;
+    }
+
     async directJson(url) {
-        const response = await fetch(url, { cache: 'no-store' });
+        const proxyUrl = this.deploymentProxyUrl(url);
+        let response = proxyUrl
+            ? await fetch(proxyUrl, { cache: 'no-store', credentials: 'same-origin' })
+            : null;
+        // Local static development servers do not necessarily provide the
+        // production rewrite. Fall back to the deployment URL only for that
+        // unambiguous case; Vercel serves the trusted target at the proxy URL.
+        if (!response || response.status === 404) {
+            response = await fetch(url, { cache: 'no-store' });
+        }
         if (!response.ok) throw new Error(`Unable to load ${url} (${response.status}).`);
         return response.json();
     }
@@ -385,6 +413,20 @@ class BrowserWalletRuntime extends EventTarget {
     }
 
     async remoteFetch(url, init = {}) {
+        const proxyUrl = this.deploymentProxyUrl(url);
+        if (proxyUrl) {
+            try {
+                const response = await fetch(proxyUrl, {
+                    ...init,
+                    credentials: 'same-origin'
+                });
+                if (response.status !== 404) return response;
+            } catch {
+                // A local static development server may not implement the
+                // production rewrite. Keep the existing privacy-proxy/direct
+                // fallback available there.
+            }
+        }
         return networkProxy.fetch(url, init, { preferProxy: true });
     }
 

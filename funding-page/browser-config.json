@@ -3,6 +3,7 @@
   "allowed_deployment_manifest_urls": [
     "https://d33l4w2z2nh4cg.cloudfront.net/config.json"
   ],
+  "deployment_api_proxy_path": "/zkapi-deployment/",
   "trusted_deployment": {
     "deployment_id": "zkapi-ef-sepolia-groth16-v2-20260811",
     "chain_id": 11155111,

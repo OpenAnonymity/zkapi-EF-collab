@@ -48,6 +48,15 @@ test('browser config defaults to the public Sepolia deployment', () => {
     assert.equal(config.trusted_deployment.request_proving_key_sha256, sha256(path.join(root, 'protocol/setup/v2/request.pk')));
     assert.equal(config.trusted_deployment.withdrawal_proving_key_sha256, sha256(path.join(root, 'protocol/setup/v2/withdrawal.pk')));
     assert.equal(config.proving_keys_base_url, './proofs/');
+    assert.equal(config.deployment_api_proxy_path, '/zkapi-deployment/');
     assert.equal(config.require_oa_key_source, true);
     assert.ok(config.openrouter_requests_per_key > 1);
+});
+
+test('Vercel browser deployment proxies only the pinned Sepolia API origin', () => {
+    const vercel = JSON.parse(fs.readFileSync(path.join(root, 'vercel.browser.json'), 'utf8'));
+    assert.deepEqual(vercel.rewrites, [{
+        source: '/zkapi-deployment/:path*',
+        destination: 'https://d33l4w2z2nh4cg.cloudfront.net/:path*'
+    }]);
 });
