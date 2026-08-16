@@ -1,16 +1,16 @@
 {
-  "deployment_manifest_url": "https://d33l4w2z2nh4cg.cloudfront.net/config.json",
+  "deployment_manifest_url": "https://d27v1dvkaxfc09.cloudfront.net/config.json",
   "allowed_deployment_manifest_urls": [
-    "https://d33l4w2z2nh4cg.cloudfront.net/config.json"
+    "https://d27v1dvkaxfc09.cloudfront.net/config.json"
   ],
   "deployment_api_proxy_path": "/zkapi-deployment/",
   "trusted_deployment": {
-    "deployment_id": "zkapi-ef-sepolia-groth16-v2-20260811",
-    "chain_id": 11155111,
-    "contract_address": "0x590Df9aBBfB21074016dAA486c771AE0aF729ee2",
-    "billing_token_address": "0x7773548bCb3Af5c4Ed1FCDBFE763855338C6822f",
-    "protocol_server_url": "https://d33l4w2z2nh4cg.cloudfront.net",
-    "indexer_url": "https://d33l4w2z2nh4cg.cloudfront.net",
+    "deployment_id": "zkapi-ef-mainnet-groth16-v2-20260812",
+    "chain_id": 1,
+    "contract_address": "0xef88012d1A7F9d44e5f5afB8bC5e611Dc3283709",
+    "billing_token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "protocol_server_url": "https://d27v1dvkaxfc09.cloudfront.net",
+    "indexer_url": "https://d27v1dvkaxfc09.cloudfront.net",
     "request_charge_cap": 50000,
     "state_signing_key": {
       "x": "0x68b03dd2caf06ee9496c41808866d50eebc6499dc6de33cc043a657bf852751",
@@ -27,8 +27,8 @@
   },
   "proving_keys_base_url": "./proofs/",
   "credits_per_usd": 1000000,
-  "suggested_deposit_amount": 5000000,
-  "billing_token_symbol": "ZKAPI",
+  "suggested_deposit_amount": 2000000,
+  "billing_token_symbol": "USDC",
   "billing_token_decimals": 6,
   "require_oa_key_source": true
 }

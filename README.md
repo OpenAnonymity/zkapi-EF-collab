@@ -75,6 +75,19 @@ The Vercel configuration redirects `/` to `/funding/` and serves the same OA Cha
 client with the browser wallet selected automatically when no local daemon is
 available.
 
+A separate Ethereum Mainnet build is pinned to the existing zkAPI mainnet
+deployment and Circle's Ethereum USDC contract. It disables the test-token
+faucet, defaults to a 2 USDC deposit, labels the billing token as USDC, and
+shows a real-funds warning before funding:
+
+```bash
+./scripts/package-browser-client-mainnet.sh
+vercel --prod --yes --local-config vercel.mainnet.json
+```
+
+The mainnet vault and proving system are experimental and unaudited. Deposits
+use real USDC and all wallet transactions use real ETH for gas.
+
 The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,
 incompatible setup. For an intentionally fresh deployment:

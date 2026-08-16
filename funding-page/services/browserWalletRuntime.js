@@ -358,6 +358,8 @@ class BrowserWalletRuntime extends EventTarget {
                 suggested_deposit_amount: Number(browserConfig.suggested_deposit_amount || requestCap * 100),
                 demo_rpc_url: manifest.rpc_url || null,
                 demo_billing_token_address: manifest.billing_token_address || null,
+                billing_token_symbol: String(browserConfig.billing_token_symbol || 'TOKEN'),
+                billing_token_decimals: Number(browserConfig.billing_token_decimals || 6),
                 demo_mint_enabled: Boolean(manifest.demo_mint_enabled),
                 demo_note_ttl_seconds: Number(manifest.note_ttl_seconds || 0) || null
             }

@@ -105,6 +105,9 @@ export default class WelcomePanel {
     renderWelcome() {
         const suggested = zkapiClient.suggestedDeposit;
         const daemonError = zkapiClient.lastError?.message;
+        const mainnetWarning = zkapiClient.isMainnetFunding
+            ? '<div class="mt-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Only use funds you can afford to lose.</div>'
+            : '';
         return `
             <div role="dialog" aria-modal="true" aria-labelledby="welcome-title" class="${MODAL_CLASSES}" style="width:464px;max-width:94vw;padding:28px">
                 <div class="text-center">
@@ -125,6 +128,7 @@ export default class WelcomePanel {
                         <input id="welcome-deposit-amount" class="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none" inputmode="decimal" value="${suggested.toFixed(suggested < 0.01 ? 6 : 2)}" />
                     </div>
                 </label>
+                ${mainnetWarning}
                 ${zkapiClient.config?.funding?.demo_mint_enabled ? '<p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">On Sepolia, demo billing tokens are minted automatically if needed. MetaMask only needs test ETH for gas.</p>' : ''}
                 ${daemonError ? `<p class="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">Payment service: ${this.escapeHtml(daemonError)}</p>` : ''}
                 ${this.error ? `<p class="mt-3 text-xs text-destructive">${this.escapeHtml(this.error)}</p>` : ''}

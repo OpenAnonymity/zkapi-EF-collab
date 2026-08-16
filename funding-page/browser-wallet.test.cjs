@@ -50,8 +50,28 @@ test('browser config defaults to the public Sepolia deployment', () => {
     assert.equal(config.trusted_deployment.withdrawal_proving_key_sha256, sha256(path.join(root, 'protocol/setup/v2/withdrawal.pk')));
     assert.equal(config.proving_keys_base_url, './proofs/');
     assert.equal(config.deployment_api_proxy_path, '/zkapi-deployment/');
+    assert.equal(config.billing_token_symbol, 'ZKAPI');
+    assert.equal(config.billing_token_decimals, 6);
     assert.equal(config.require_oa_key_source, true);
     assert.equal(config.openrouter_requests_per_key, undefined);
+});
+
+test('mainnet browser config pins real Ethereum USDC and the deployed zkAPI server', () => {
+    const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'browser-config.mainnet.json'), 'utf8'));
+    assert.equal(config.deployment_manifest_url, 'https://d27v1dvkaxfc09.cloudfront.net/config.json');
+    assert.deepEqual(config.allowed_deployment_manifest_urls, [config.deployment_manifest_url]);
+    assert.equal(config.trusted_deployment.deployment_id, 'zkapi-ef-mainnet-groth16-v2-20260812');
+    assert.equal(config.trusted_deployment.chain_id, 1);
+    assert.equal(config.trusted_deployment.contract_address.toLowerCase(), '0xef88012d1a7f9d44e5f5afb8bc5e611dc3283709');
+    assert.equal(config.trusted_deployment.billing_token_address.toLowerCase(), '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    assert.equal(config.trusted_deployment.protocol_server_url, 'https://d27v1dvkaxfc09.cloudfront.net');
+    assert.equal(config.trusted_deployment.indexer_url, 'https://d27v1dvkaxfc09.cloudfront.net');
+    assert.equal(config.trusted_deployment.request_proving_key_sha256, sha256(path.join(root, 'protocol/setup/v2/request.pk')));
+    assert.equal(config.trusted_deployment.withdrawal_proving_key_sha256, sha256(path.join(root, 'protocol/setup/v2/withdrawal.pk')));
+    assert.equal(config.suggested_deposit_amount, 2_000_000);
+    assert.equal(config.billing_token_symbol, 'USDC');
+    assert.equal(config.billing_token_decimals, 6);
+    assert.equal(config.require_oa_key_source, true);
 });
 
 test('Vercel browser deployment proxies only the pinned Sepolia API origin', () => {
@@ -60,6 +80,37 @@ test('Vercel browser deployment proxies only the pinned Sepolia API origin', () 
         source: '/zkapi-deployment/:path*',
         destination: 'https://d33l4w2z2nh4cg.cloudfront.net/:path*'
     }]);
+});
+
+test('separate Vercel mainnet build packages the pinned config and proxies only the mainnet server', () => {
+    const vercel = JSON.parse(fs.readFileSync(path.join(root, 'vercel.mainnet.json'), 'utf8'));
+    assert.equal(vercel.buildCommand, './scripts/package-browser-client-mainnet.sh');
+    assert.equal(vercel.outputDirectory, 'dist/browser-mainnet');
+    assert.deepEqual(vercel.rewrites, [{
+        source: '/zkapi-deployment/:path*',
+        destination: 'https://d27v1dvkaxfc09.cloudfront.net/:path*'
+    }]);
+    const packager = fs.readFileSync(path.join(root, 'scripts/package-browser-client-mainnet.sh'), 'utf8');
+    assert.match(packager, /browser-config\.mainnet\.json/);
+    assert.match(packager, /funding\/browser-config\.json/);
+});
+
+test('mainnet funding UX labels USDC and warns before using real funds', () => {
+    const runtime = fs.readFileSync(path.join(__dirname, 'services/browserWalletRuntime.js'), 'utf8');
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    const account = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
+    const welcome = fs.readFileSync(path.join(__dirname, 'components/WelcomePanel.js'), 'utf8');
+    const rootSync = fs.readFileSync(path.join(__dirname, 'services/zkapiWithdrawalRoot.mjs'), 'utf8');
+    assert.match(runtime, /billing_token_symbol/);
+    assert.match(runtime, /billing_token_decimals/);
+    assert.match(client, /symbol: this\.billingTokenSymbol/);
+    assert.match(client, /this\.networkName\(\)/);
+    assert.match(account, /Add \$\{tokenSymbol\} to MetaMask/);
+    assert.match(account, /Ethereum Mainnet:/);
+    assert.match(account, /real USDC/);
+    assert.match(welcome, /Ethereum Mainnet:/);
+    assert.match(welcome, /real ETH for gas/);
+    assert.doesNotMatch(rootSync, /Sepolia vault root/);
 });
 
 test('browser direct requests use the same conservative implicit completion limit as the CLI', async () => {

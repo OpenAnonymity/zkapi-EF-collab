@@ -138,6 +138,10 @@ export default class AccountModal {
 
     renderBalance() {
         const note = zkapiClient.note;
+        const tokenSymbol = this.escapeHtml(zkapiClient.billingTokenSymbol);
+        const mainnetWarning = zkapiClient.isMainnetFunding
+            ? '<div class="rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Only use funds you can afford to lose.</div>'
+            : '';
         if (!note) {
             const depositAmount = this.depositAmount
                 ?? zkapiClient.suggestedDeposit.toFixed(zkapiClient.suggestedDeposit < 0.01 ? 6 : 2);
@@ -154,11 +158,12 @@ export default class AccountModal {
                             <input id="zkapi-deposit-amount" class="min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none" inputmode="decimal" value="${this.escapeHtml(depositAmount)}" />
                         </div>
                     </label>
+                    ${mainnetWarning}
                     ${zkapiClient.config?.funding?.demo_mint_enabled ? '<p class="text-[11px] text-muted-foreground">Sepolia demo billing tokens are minted automatically if your wallet needs them. You only pay testnet gas.</p>' : ''}
                     <button id="zkapi-deposit-btn" class="zkapi-primary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>
                         ${this.busy ? 'Waiting for MetaMask…' : 'Continue with MetaMask'}
                     </button>
-                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>Add ZKAPI to MetaMask</button>
+                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>Add ${tokenSymbol} to MetaMask</button>
                 </div>`;
         }
 
@@ -184,7 +189,7 @@ export default class AccountModal {
                     <button id="zkapi-withdraw-view-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Withdraw</button>
                 </div>
                 <div class="grid ${zkapiClient.config?.funding?.demo_mint_enabled ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
-                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Add ZKAPI to MetaMask</button>
+                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Add ${tokenSymbol} to MetaMask</button>
                     ${zkapiClient.config?.funding?.demo_mint_enabled ? `<button id="zkapi-mint-token-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Get 10 test ZKAPI</button>` : ''}
                 </div>
                 <dl class="zkapi-details">

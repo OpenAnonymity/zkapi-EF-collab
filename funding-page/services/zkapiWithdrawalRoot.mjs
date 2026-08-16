@@ -17,8 +17,7 @@ export async function waitForExpectedActiveRoot(loadPath, expectedActiveRoot, {
         if (expectedActiveRoot == null || sameFelt(path.active_root, expectedActiveRoot)) return path;
         if (attempt + 1 < limit) await sleep(delayMs);
     }
-    const error = new Error('The zkAPI indexer is still catching up with the latest Sepolia vault root. Try again in a few seconds.');
+    const error = new Error('The zkAPI indexer is still catching up with the latest vault root. Try again in a few seconds.');
     error.code = 'indexer_root_lag';
     throw error;
 }
-

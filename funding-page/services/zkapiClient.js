@@ -255,6 +255,14 @@ class ZkapiClient extends EventTarget {
         return Number(this.config?.funding?.suggested_deposit_amount || 2_000_000) / this.creditsPerUsd;
     }
 
+    get billingTokenSymbol() {
+        return this.config?.funding?.billing_token_symbol || 'billing token';
+    }
+
+    get isMainnetFunding() {
+        return Number(this.config?.funding?.chain_id) === 1;
+    }
+
     get activeLease() {
         const lease = this.config?.active_lease;
         return lease && Number(lease.expires_at) * 1000 > Date.now() ? lease : null;
@@ -439,7 +447,8 @@ class ZkapiClient extends EventTarget {
     }
 
     async addBillingTokenToWallet(onStatus = () => {}) {
-        const tokenAddress = this.config?.funding?.demo_billing_token_address;
+        const funding = this.config?.funding;
+        const tokenAddress = funding?.demo_billing_token_address;
         if (!tokenAddress) throw new Error('This deployment does not advertise a billing token.');
         onStatus('Connecting to MetaMask…');
         await this.connectWallet();
@@ -450,13 +459,13 @@ class ZkapiClient extends EventTarget {
                 type: 'ERC20',
                 options: {
                     address: tokenAddress,
-                    symbol: 'ZKAPI',
-                    decimals: 6
+                    symbol: this.billingTokenSymbol,
+                    decimals: Number(funding.billing_token_decimals || 6)
                 }
             }
         });
-        if (!added) throw new Error('MetaMask did not add the ZKAPI token.');
-        onStatus('ZKAPI is now visible in MetaMask on Sepolia.');
+        if (!added) throw new Error(`MetaMask did not add ${this.billingTokenSymbol}.`);
+        onStatus(`${this.billingTokenSymbol} is now visible in MetaMask on ${this.networkName()}.`);
         return true;
     }
 
@@ -512,7 +521,7 @@ class ZkapiClient extends EventTarget {
             if (Number(pendingDeposit.amount) !== Number(amount)) {
                 throw new Error('A different deposit transaction is already pending in MetaMask. Finish it before changing the amount.');
             }
-            onStatus('Recovering the pending deposit from Sepolia…');
+            onStatus(`Recovering the pending deposit from ${this.networkName()}…`);
             try {
                 const receipt = await this.waitForReceipt(pendingDeposit.transactionHash);
                 return this.confirmBrowserDepositReceipt(
@@ -542,7 +551,7 @@ class ZkapiClient extends EventTarget {
 
         if (tokenBalance < amount) {
             if (!funding.demo_mint_enabled) {
-                throw new Error(`Your wallet has ${formatTokenAmount(tokenBalance)} billing tokens; this deposit needs ${formatTokenAmount(amount)}.`);
+                throw new Error(`Your wallet has ${formatTokenAmount(tokenBalance)} ${this.billingTokenSymbol}; this deposit needs ${formatTokenAmount(amount)} ${this.billingTokenSymbol}.`);
             }
             onStatus('Minting free test billing tokens… confirm in MetaMask.');
             await this.sendContractTransaction(
@@ -580,7 +589,7 @@ class ZkapiClient extends EventTarget {
                     callData(ABI.approve, [addressWord(vaultAddress), abiWord(0n)])
                 );
             }
-            onStatus('Approving the billing token… confirm in MetaMask.');
+            onStatus(`Approving ${this.billingTokenSymbol}… confirm in MetaMask.`);
             await this.sendContractTransaction(
                 address,
                 tokenAddress,
