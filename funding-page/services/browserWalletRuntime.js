@@ -1,5 +1,6 @@
 import networkProxy from './networkProxy.js';
 import { sameFelt, waitForExpectedActiveRoot } from './zkapiWithdrawalRoot.mjs';
+import { selectLeaseSpendingLimitCredits } from './zkapiRequestCompat.mjs';
 import {
     archiveBrowserWallet,
     createWalletChannel,
@@ -373,6 +374,7 @@ class BrowserWalletRuntime extends EventTarget {
                 client_request_id: this.activeLease.client_request_id,
                 expires_at: this.activeLease.expires_at,
                 settle_after: this.activeLease.settle_after,
+                spending_limit_usd: Number(this.activeLease.spending_limit_usd),
                 station_id: this.activeLease.verification?.station_id || null
             }
             : null;
@@ -559,8 +561,19 @@ class BrowserWalletRuntime extends EventTarget {
         if (this.runtime.preparedWithdrawal) throw new Error('Finish the prepared withdrawal before sending another message.');
         const path = await this.treePath(this.runtime.state.note_id, true);
         const now = Date.now();
+        const spendingLimitCredits = selectLeaseSpendingLimitCredits(
+            this.runtime.state.current_balance,
+            this.config.request_charge_cap,
+            this.config.credits_per_usd
+        );
         const prepared = await this.worker.call('prepareRequest', {
-            config: this.config.wallet_core,
+            config: {
+                ...this.config.wallet_core,
+                request_charge_cap: spendingLimitCredits,
+                policy_charge_cap: this.config.policy_enabled
+                    ? spendingLimitCredits
+                    : this.config.wallet_core.policy_charge_cap
+            },
             state: this.runtime.state,
             args: {
                 payload: LEASE_AUTHORIZATION,
@@ -576,9 +589,16 @@ class BrowserWalletRuntime extends EventTarget {
         return prepared.request;
     }
 
-    async verifyLease(lease) {
+    async verifyLease(lease, expectedLimitCredits) {
         if (!lease.api_key || Number(lease.expires_at) <= Math.floor(Date.now() / 1000)) {
             throw new Error('The zkAPI server returned an unusable OpenRouter lease.');
+        }
+        const returnedLimitCredits = Math.round(
+            Number(lease.spending_limit_usd) * this.config.credits_per_usd
+        );
+        if (!Number.isSafeInteger(returnedLimitCredits)
+            || returnedLimitCredits !== Number(expectedLimitCredits)) {
+            throw new Error('The zkAPI server returned a child key with the wrong spending cap.');
         }
         exactTrustedUrl(lease.openrouter_api_base, this.config.openrouter.inference_base, 'OpenRouter inference origin');
         if (this.config.openrouter.require_oa_key_source && lease.key_source !== 'oa_org') {
@@ -627,7 +647,7 @@ class BrowserWalletRuntime extends EventTarget {
                 }
                 throw error;
             }
-            await this.verifyLease(lease);
+            await this.verifyLease(lease, request.public_inputs.solvency_bound);
             this.activeLease = {
                 ...lease,
                 sessionId,
@@ -640,7 +660,8 @@ class BrowserWalletRuntime extends EventTarget {
                     sessionId,
                     client_request_id: lease.client_request_id,
                     expires_at: Number(lease.expires_at),
-                    settle_after: Number(lease.settle_after)
+                    settle_after: Number(lease.settle_after),
+                    spending_limit_usd: Number(lease.spending_limit_usd)
                 }
             });
             this.scheduleSettlement();
@@ -817,6 +838,7 @@ class BrowserWalletRuntime extends EventTarget {
             mode: 'ephemeral-key',
             apiKey: lease.api_key,
             baseUrl: normalizeUrl(lease.openrouter_api_base),
+            spendingLimitUsd: Number(lease.spending_limit_usd),
             headers: {
                 authorization: `Bearer ${lease.api_key}`,
                 'content-type': 'application/json',

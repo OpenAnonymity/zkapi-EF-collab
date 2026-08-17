@@ -114,12 +114,32 @@ test('mainnet funding UX labels USDC and warns before using real funds', () => {
     assert.doesNotMatch(rootSync, /Sepolia vault root/);
 });
 
-test('browser direct requests allow useful long-form answers without exceeding expensive-model lease headroom', async () => {
+test('browser direct requests use a proof-backed dollar budget instead of a small token quota', async () => {
     const compat = await import(pathToFileURL(path.join(__dirname, 'services/zkapiRequestCompat.mjs')));
-    assert.equal(compat.DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS, 1024);
+    assert.equal(compat.selectLeaseSpendingLimitCredits(2_000_000, 50_000), 2_000_000);
+    assert.equal(compat.selectLeaseSpendingLimitCredits(1_999_999, 50_000), 1_500_000);
+    assert.equal(compat.selectLeaseSpendingLimitCredits(900_000, 50_000), 500_000);
+    assert.equal(compat.selectLeaseSpendingLimitCredits(10_000_000, 50_000), 5_000_000);
     assert.deepEqual(
-        compat.ensureDirectCompletionLimit({ model: 'anthropic/claude-opus-5' }),
-        { model: 'anthropic/claude-opus-5', max_tokens: 1024 }
+        compat.ensureDirectCompletionLimit(
+            { model: 'anthropic/claude-opus-5' },
+            {
+                spendingLimitUsd: 2,
+                model: {
+                    pricing: { completion: '0.000025' },
+                    top_provider: { max_completion_tokens: 128_000 }
+                }
+            }
+        ),
+        { model: 'anthropic/claude-opus-5', max_tokens: 36_000 }
+    );
+    assert.deepEqual(
+        compat.ensureDirectCompletionLimit({ model: 'openai/gpt-5.6-sol' }, { spendingLimitUsd: 5 }),
+        { model: 'openai/gpt-5.6-sol', max_tokens: 90_000 }
+    );
+    assert.deepEqual(
+        compat.ensureDirectCompletionLimit({ model: 'daemon/model' }),
+        { model: 'daemon/model' }
     );
     assert.equal(compat.ensureDirectCompletionLimit({ max_tokens: 32 }).max_tokens, 32);
     assert.equal(compat.ensureDirectCompletionLimit({ max_completion_tokens: 48 }).max_completion_tokens, 48);
@@ -136,6 +156,10 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
 
     assert.match(runtime, /async acquireEphemeralKey\(sessionId\)/);
     assert.match(runtime, /apiKey: lease\.api_key/);
+    assert.match(runtime, /spendingLimitUsd: Number\(lease\.spending_limit_usd\)/);
+    assert.match(runtime, /selectLeaseSpendingLimitCredits/);
+    assert.match(runtime, /request_charge_cap: spendingLimitCredits/);
+    assert.match(runtime, /request\.public_inputs\.solvency_bound/);
     assert.match(runtime, /lease\.inFlight \+= 1/);
     assert.match(runtime, /lease\.inFlight = Math\.max\(0, lease\.inFlight - 1\)/);
     assert.doesNotMatch(runtime, /requestsServed|requests_per_key|lease_request_limit/);
@@ -164,6 +188,7 @@ test('onboarding has a static readable card surface and length-limited answers e
 
 test('OA System Panel is preserved with only ticket billing replaced', () => {
     const panel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
+    const modelPicker = fs.readFileSync(path.join(__dirname, 'components/ModelPicker.js'), 'utf8');
     const upstreamPanel = fs.readFileSync(path.join(__dirname, 'components/OaRightPanelBase.js'), 'utf8');
     assert.match(panel, /extends OaRightPanelBase/);
     assert.match(panel, /super\.generateTopSectionHTML\(\)/);
@@ -173,6 +198,9 @@ test('OA System Panel is preserved with only ticket billing replaced', () => {
     assert.match(upstreamPanel, /Ephemeral Access Key/);
     assert.match(upstreamPanel, /Network Proxy/);
     assert.match(upstreamPanel, /Activity Timeline/);
+    assert.match(modelPicker, /selectLeaseSpendingLimitCredits/);
+    assert.match(modelPicker, /Cumulative dollar spending cap for this chat/);
+    assert.doesNotMatch(modelPicker, /Maximum private-balance charge per request/);
 });
 
 test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => {

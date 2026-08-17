@@ -271,7 +271,10 @@ impl RequestProcessor {
             }
         }
         let requested_expires_at = current_timestamp().saturating_add(lease_config.ttl_seconds);
-        let spending_limit_usd = pricing::credits_to_usd(self.config.request_charge_cap);
+        // The proof may expose a coarse solvency tier above the deployment's
+        // minimum request cap. Use that exact bound as the child key's
+        // cumulative USD budget for this chat.
+        let spending_limit_usd = pricing::credits_to_usd(request.public_inputs.solvency_bound);
         if !spending_limit_usd.is_finite() || spending_limit_usd <= 0.0 {
             return Err(ServerError::InvalidRequest(
                 "lease spending limit must be positive".to_string(),
@@ -570,7 +573,8 @@ impl RequestProcessor {
         })?;
         let usage = provisioner.get_key_usage(key_hash).await?;
         let raw_charge = pricing::usd_to_credits(usage.usage_usd);
-        let charge = raw_charge.min(self.config.request_charge_cap);
+        let lease_charge_cap = pricing::usd_to_credits(lease.spending_limit_usd);
+        let charge = raw_charge.min(lease_charge_cap);
         if charge != raw_charge {
             tracing::warn!(
                 client_request_id = %lease.client_request_id,
@@ -729,9 +733,18 @@ impl RequestProcessor {
     ) -> Result<RequestResponseV2, ServerError> {
         let public = &request.public_inputs;
         let state_key = self.state_signing_key();
+        let reservation_kind = self
+            .store
+            .lookup_by_nullifier(&public.request_nullifier)
+            .ok_or_else(|| {
+                ServerError::Internal("request nullifier is no longer reserved".to_string())
+            })?
+            .reservation_kind;
         let policy_charged =
             self.config.policy_enabled && provider_response.policy_reason_code.is_some();
-        let charge_cap = if policy_charged {
+        let charge_cap = if reservation_kind == ReservationKind::OpenRouterLease.as_str() {
+            public.solvency_bound
+        } else if policy_charged {
             self.config.policy_charge_cap
         } else {
             self.config.request_charge_cap
@@ -770,14 +783,6 @@ impl RequestProcessor {
         let proof_bytes = base64::engine::general_purpose::STANDARD
             .decode(&request.proof.proof)
             .map_err(|error| ServerError::InvalidProof(error.to_string()))?;
-        let reservation_kind = self
-            .store
-            .lookup_by_nullifier(&public.request_nullifier)
-            .ok_or_else(|| {
-                ServerError::Internal("request nullifier is no longer reserved".to_string())
-            })?
-            .reservation_kind;
-
         let transcript = TranscriptRecord {
             nullifier: public.request_nullifier,
             status: NullifierStatus::Finalized,

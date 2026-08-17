@@ -26,7 +26,8 @@ export default class RightPanel extends OaRightPanelBase {
         this.apiKeyInfo = ownsLease ? {
             ...(accessInfo?.info || {}),
             stationId: lease.station_id || accessInfo?.info?.stationId || null,
-            clientRequestId: lease.client_request_id
+            clientRequestId: lease.client_request_id,
+            spendingLimitUsd: lease.spending_limit_usd
         } : null;
         this.expiresAt = ownsLease
             ? new Date(Number(lease.expires_at) * 1000).toISOString()
@@ -55,6 +56,7 @@ export default class RightPanel extends OaRightPanelBase {
             ? Math.max(0, Math.min(100, Number(note.current_balance) / Number(note.deposit_amount) * 100))
             : 0;
         const hasError = !!zkapiClient.lastError;
+        const chatBudget = zkapiClient.activeLease?.spending_limit_usd;
         const transition = this.app.newChatSettlementState;
         const transitionBadge = transition?.phase === 'error'
             ? 'attention'
@@ -84,6 +86,7 @@ export default class RightPanel extends OaRightPanelBase {
                 </div>
                 <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600 transition-all" style="width:${percent}%"></div></div>
                 <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : 'Fund with MetaMask to chat'}</span></div>
+                ${chatBudget ? `<div class="mt-2 rounded-md bg-muted/50 px-2 py-1.5 text-[10px] text-muted-foreground"><span class="font-medium text-foreground">This chat:</span> up to ${this.escapeHtml(new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(Number(chatBudget)))} total model spend across responses and follow-ups</div>` : ''}
                 ${transitionNotice}
                 <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
                     <button id="zkapi-panel-fund" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">${note ? 'Balance details' : 'Fund with MetaMask'}</button>
@@ -93,7 +96,7 @@ export default class RightPanel extends OaRightPanelBase {
             </div>
             <div class="mx-3 mb-3 rounded-lg border border-border bg-muted/5 p-2">
                 <div class="flex items-center gap-2"><span class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">?</span><span class="flex-1 text-xs font-semibold text-foreground">How zkAPI billing works</span></div>
-                <p class="mt-1 text-[10px] leading-snug text-muted-foreground">MetaMask funds a private prepaid note. zkAPI proves available balance without attaching your wallet identity to model requests, then obtains one short-lived OA ephemeral key for this chat. The key is reused for the title, response, and follow-ups until it expires or is settled.</p>
+                <p class="mt-1 text-[10px] leading-snug text-muted-foreground">MetaMask funds a private prepaid note. zkAPI proves a coarse available-balance tier without attaching your wallet identity to model requests, then obtains one short-lived OA ephemeral key with a dollar spending cap—not a small token quota. The key and cap are shared by the title, response, and follow-ups until it expires or is settled.</p>
             </div>
         `;
     }

@@ -51,6 +51,10 @@ function sanitizeModel(model) {
         normalized.pricing = model.pricing;
     }
 
+    if (isObject(model.top_provider)) {
+        normalized.top_provider = model.top_provider;
+    }
+
     return normalized;
 }
 
@@ -132,4 +136,3 @@ export function saveModelCatalog(backendId, models) {
     writeCache(cache);
     return true;
 }
-

@@ -356,7 +356,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
         {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        if body["credit_limit"] != 0.001 || body["duration_minutes"] != 1 {
+        if body["credit_limit"] != 0.005 || body["duration_minutes"] != 1 {
             return Err(StatusCode::BAD_REQUEST);
         }
         state.flow.events.lock().unwrap().push("issued".to_string());
@@ -375,7 +375,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             "source": "oa_org",
             "key": format!("sk-or-v1-oa-test-{issuance}"),
             "key_hash": key_hash,
-            "credit_limit": 0.001,
+            "credit_limit": 0.005,
             "duration_minutes": 1,
             "expires_at": "future",
             "expires_at_unix": expires_at,
@@ -439,7 +439,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             "station_request_id": "ef".repeat(32),
             "key_hash": key_hash,
             "usage_credits": 7,
-            "credit_limit_credits": 1000,
+            "credit_limit_credits": 5000,
             "expires_at_unix": expires_at,
             "closed_at_unix": closed_at,
             "finalized_at_unix": closed_at,
@@ -485,6 +485,7 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
     let contract = Felt252::from_u64(0xdeadbeef);
     let deposit = 10_000u128;
     let request_cap = 1_000u128;
+    let lease_cap = 5_000u128;
     let expiry = 4_000_000_000u64;
     let setup_directory = setup_directory();
 
@@ -498,8 +499,8 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         server_url: "http://127.0.0.1:1".to_string(),
         state_dir: wallet_directory.to_string_lossy().to_string(),
@@ -575,8 +576,8 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         protocol_server_url: protocol_server_url.clone(),
         indexer_url,
@@ -831,7 +832,7 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
         assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
         assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {
-            assert_eq!(create_body["limit"], 0.001);
+            assert_eq!(create_body["limit"], 0.005);
             assert_eq!(create_body["include_byok_in_limit"], true);
             assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
         }
@@ -930,6 +931,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
     let contract = Felt252::from_u64(0x0a0a);
     let deposit = 10_000u128;
     let request_cap = 1_000u128;
+    let lease_cap = 5_000u128;
     let setup_directory = setup_directory();
     let expiry = 4_000_000_000u64;
 
@@ -943,8 +945,8 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         server_url: "http://127.0.0.1:1".to_string(),
         state_dir: wallet_directory.to_string_lossy().to_string(),
@@ -1042,8 +1044,8 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         protocol_server_url: protocol_server_url.clone(),
         indexer_url: indexer_url.clone(),

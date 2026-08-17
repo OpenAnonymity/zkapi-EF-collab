@@ -11,6 +11,7 @@ import { getProviderIcon } from '../services/providerIcons.js';
 import { resolveProvider, resolveProviderFromModelReference } from '../services/providerRegistry.js';
 import { getDefaultModelConfig, onPinnedModelsUpdate } from '../services/modelConfig.js';
 import zkapiClient from '../services/zkapiClient.js';
+import { selectLeaseSpendingLimitCredits } from '../services/zkapiRequestCompat.mjs';
 
 export default class ModelPicker {
     /**
@@ -347,9 +348,20 @@ export default class ModelPicker {
         const iconData = getProviderIcon(model.provider, 'w-3.5 h-3.5');
         const bgClass = iconData.hasIcon ? 'bg-white' : 'bg-muted';
 
-        const requestCap = zkapiClient.config?.request_charge_cap;
-        const requestCapLabel = requestCap
-            ? `≤ ${zkapiClient.formatMoney(requestCap)}`
+        const minimumCap = Number(zkapiClient.config?.request_charge_cap || 0);
+        const activeCapUsd = Number(zkapiClient.activeLease?.spending_limit_usd || 0);
+        const projectedCap = zkapiClient.note && minimumCap
+            ? selectLeaseSpendingLimitCredits(
+                zkapiClient.note.current_balance,
+                minimumCap,
+                zkapiClient.creditsPerUsd
+            )
+            : minimumCap;
+        const chatCap = activeCapUsd
+            ? Math.round(activeCapUsd * zkapiClient.creditsPerUsd)
+            : projectedCap;
+        const requestCapLabel = chatCap
+            ? `≤ ${zkapiClient.formatMoney(chatCap)}`
             : 'metered';
 
         // Checkmark slot - always reserve space for consistent alignment
@@ -358,7 +370,7 @@ export default class ModelPicker {
             : '<span class="w-4 h-4 flex-shrink-0"></span>';
 
         const paymentBadge = `
-            <span class="text-xs px-2 py-1 rounded bg-muted text-muted-foreground font-medium flex-shrink-0 min-w-[34px] inline-flex items-center justify-center" title="Maximum private-balance charge per request">
+            <span class="text-xs px-2 py-1 rounded bg-muted text-muted-foreground font-medium flex-shrink-0 min-w-[34px] inline-flex items-center justify-center" title="Cumulative dollar spending cap for this chat">
                 <span>${requestCapLabel}</span>
             </span>
         `;

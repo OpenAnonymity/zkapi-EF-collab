@@ -177,7 +177,8 @@ class OpenRouterAPI {
                 categoryPriority: categoryPriority,
                 provider: providerName,
                 context_length: model.context_length,
-                pricing: model.pricing
+                pricing: model.pricing,
+                top_provider: model.top_provider
             };
         }).filter(Boolean);
 
@@ -192,6 +193,11 @@ class OpenRouterAPI {
             const priceB = b.pricing?.prompt || 0;
             return priceA - priceB;
         });
+    }
+
+    getModelBudgetMetadata(modelId) {
+        const baseId = String(modelId || '').split(':')[0];
+        return this.getCachedModels().find(model => model.id === baseId) || null;
     }
 
     isReasoningDetailImage(detail) {
@@ -287,12 +293,15 @@ class OpenRouterAPI {
             : messages;
 
         const body = ensureDirectCompletionLimit({
-            model: modelId,
-            messages: messagesWithSystem.map(msg => ({
-                role: msg.role,
-                content: msg.content
-            }))
-        });
+                model: modelId,
+                messages: messagesWithSystem.map(msg => ({
+                    role: msg.role,
+                    content: msg.content
+                }))
+            }, {
+                spendingLimitUsd: access.spendingLimitUsd,
+                model: this.getModelBudgetMetadata(modelId)
+            });
 
         try {
             // POST is idempotent for same input - safe to retry
@@ -1004,7 +1013,10 @@ class OpenRouterAPI {
                 requestBody.reasoning = reasoningPayload;
             }
 
-            const boundedRequestBody = ensureDirectCompletionLimit(requestBody);
+            const boundedRequestBody = ensureDirectCompletionLimit(requestBody, {
+                spendingLimitUsd: access.spendingLimitUsd,
+                model: this.getModelBudgetMetadata(effectiveModelId)
+            });
 
             const fetchOptions = {
                 method: 'POST',
