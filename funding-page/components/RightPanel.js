@@ -55,6 +55,23 @@ export default class RightPanel extends OaRightPanelBase {
             ? Math.max(0, Math.min(100, Number(note.current_balance) / Number(note.deposit_amount) * 100))
             : 0;
         const hasError = !!zkapiClient.lastError;
+        const transition = this.app.newChatSettlementState;
+        const transitionBadge = transition?.phase === 'error'
+            ? 'attention'
+            : transition?.phase === 'ready'
+                ? 'key closed'
+                : transition
+                    ? 'settling key'
+                    : null;
+        const transitionNotice = transition ? `
+            <div class="mt-3 flex items-start gap-2 rounded-lg border ${transition.phase === 'error'
+                ? 'border-destructive/30 bg-destructive/5 text-destructive'
+                : transition.phase === 'ready'
+                    ? 'border-green-300/60 bg-green-50/60 text-green-800 dark:border-green-500/30 dark:bg-green-500/10 dark:text-green-200'
+                    : 'border-amber-300/60 bg-amber-50/60 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100'} p-2 text-[10px] leading-snug">
+                <span class="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full ${transition.phase === 'error' ? 'bg-destructive' : transition.phase === 'ready' ? 'bg-status-success' : 'bg-amber-500 animate-pulse'}"></span>
+                <span>${this.escapeHtml(transition.message)}</span>
+            </div>` : '';
 
         return `
             <div class="p-3">
@@ -63,10 +80,11 @@ export default class RightPanel extends OaRightPanelBase {
                         <svg class="h-3.5 w-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m3-9.5C15 7.12 13.66 6 12 6S9 7.12 9 8.5 10.34 11 12 11s3 1.12 3 2.5S13.66 16 12 16s-3-1.12-3-2.5M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
                         <span class="text-xs font-medium">Private balance: <span class="font-semibold">${balance}</span></span>
                     </div>
-                    <span class="rounded-full px-2 py-0.5 text-[9px] font-medium ${hasError ? 'bg-destructive/10 text-destructive' : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${hasError ? 'unavailable' : note ? `note #${note.note_id}` : 'not funded'}</span>
+                    <span class="rounded-full px-2 py-0.5 text-[9px] font-medium ${hasError || transition?.phase === 'error' ? 'bg-destructive/10 text-destructive' : transition ? (transition.phase === 'ready' ? 'badge-status-success' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200') : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${hasError ? 'unavailable' : transitionBadge || (note ? `note #${note.note_id}` : 'not funded')}</span>
                 </div>
                 <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600 transition-all" style="width:${percent}%"></div></div>
                 <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : 'Fund with MetaMask to chat'}</span></div>
+                ${transitionNotice}
                 <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
                     <button id="zkapi-panel-fund" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">${note ? 'Balance details' : 'Fund with MetaMask'}</button>
                     ${note ? '<button id="zkapi-panel-withdraw" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">Withdraw</button>' : ''}
@@ -85,6 +103,32 @@ export default class RightPanel extends OaRightPanelBase {
         const marker = '<!-- API Key Panel -->';
         const keyAndProxy = oa.slice(oa.indexOf(marker));
         return `${this.billingSectionHTML()}${keyAndProxy}`;
+    }
+
+    getMissingApiKeyStatus() {
+        const transition = this.app.newChatSettlementState;
+        if (transition?.phase === 'settling' || transition?.phase === 'waiting') {
+            return {
+                label: 'Closing previous chat key',
+                badge: 'Settling',
+                badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200'
+            };
+        }
+        if (transition?.phase === 'ready') {
+            return {
+                label: 'Previous key closed · fresh key requested on send',
+                badge: 'Ready',
+                badgeClass: 'badge-status-success'
+            };
+        }
+        if (transition?.phase === 'error') {
+            return {
+                label: 'Previous key could not be closed',
+                badge: 'Action needed',
+                badgeClass: 'bg-destructive/10 text-destructive'
+            };
+        }
+        return super.getMissingApiKeyStatus();
     }
 
     attachTopSectionEventListeners() {

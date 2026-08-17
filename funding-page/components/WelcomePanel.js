@@ -106,7 +106,7 @@ export default class WelcomePanel {
         const suggested = zkapiClient.suggestedDeposit;
         const daemonError = zkapiClient.lastError?.message;
         const mainnetWarning = zkapiClient.isMainnetFunding
-            ? '<div class="mt-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Only use funds you can afford to lose.</div>'
+            ? '<div class="mt-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Private Merkle-tree updates are unusually gas-heavy on L1; zkAPI does not set the gas limit or fee rate, so review MetaMask’s maximum before confirming. Only use funds you can afford to lose.</div>'
             : '';
         return `
             <div role="dialog" aria-modal="true" aria-labelledby="welcome-title" class="${MODAL_CLASSES}" style="width:464px;max-width:94vw;padding:28px">

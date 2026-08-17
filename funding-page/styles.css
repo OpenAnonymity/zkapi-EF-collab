@@ -5189,6 +5189,39 @@ html {
 }
 
 /* Welcome landing (kept in static CSS to avoid runtime <style> injection jank) */
+.welcome-modal-enter {
+    animation: welcomeModalIn 0.2s ease-out;
+}
+
+@keyframes welcomeModalIn {
+    from {
+        opacity: 0;
+        transform: scale(0.97) translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+/*
+ * This surface is shared by OA's invite flow and zkAPI onboarding. Keep the
+ * card background in static CSS so it exists before either component opens.
+ * Without it, the light-theme text can render directly on the dark overlay.
+ */
+.welcome-modal-glass {
+    color: hsl(var(--color-foreground));
+    background: hsl(var(--color-card) / 0.96);
+    backdrop-filter: blur(20px) saturate(1.2);
+    -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+
+#welcome-panel {
+    background: rgba(0, 0, 0, 0.35) !important;
+    backdrop-filter: blur(4px) !important;
+    -webkit-backdrop-filter: blur(4px) !important;
+}
+
 .welcome-modal-scaled {
     --welcome-modal-scale: 1;
     width: 29rem !important;

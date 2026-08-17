@@ -1,8 +1,8 @@
-// Keep browser-direct requests aligned with crates/zkapi-clientd/src/compat.rs.
-// Without an explicit ceiling OpenRouter can reserve a model's full maximum
-// output against the small proof-bound child-key limit and reject an otherwise
-// affordable request before it runs.
-export const DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS = 256;
+// Keep a bounded output so OpenRouter never reserves a model's full context
+// against the proof-bound child key. 1,024 tokens fits the $0.05 lease even for
+// the deployment's most expensive current models, while avoiding the silent
+// mid-sentence cutoffs caused by the old 256-token ceiling.
+export const DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS = 1024;
 
 export function ensureDirectCompletionLimit(body) {
     const normalized = { ...(body || {}) };

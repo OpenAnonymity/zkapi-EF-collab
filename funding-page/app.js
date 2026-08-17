@@ -150,6 +150,8 @@ class ChatApp {
         };
         this.cachedModelDisplayMetadata = [];
         this.newChatSettlementPromise = null;
+        this.newChatSettlementState = null;
+        this.pendingSettlementSend = false;
 
         this.elements = {
             newChatBtn: document.getElementById('new-chat-btn'),
@@ -164,6 +166,7 @@ class ChatApp {
             messagesContainer: document.getElementById('messages-container'),
             messageInput: document.getElementById('message-input'),
             inputCard: document.getElementById('input-card'),
+            zkapiComposerStatus: document.getElementById('zkapi-composer-status'),
             scrubberPreviewDiff: document.getElementById('scrubber-preview-diff'),
             sendBtn: document.getElementById('send-btn'),
             modelPickerBtn: document.getElementById('model-picker-btn'),
@@ -3740,6 +3743,21 @@ class ChatApp {
 
         const ownerSession = this.state.sessionsById.get(previousLease.session_id) || previousSession;
         const ownerSessionId = previousLease.session_id || ownerSession?.id;
+        this.setNewChatSettlementState({
+            phase: 'settling',
+            sessionId: ownerSessionId,
+            title: ownerSession?.title || 'Previous chat',
+            message: 'Closing the previous chat key in the background. The new chat is ready for typing.'
+        });
+        this.services.networkLogger.logRequest({
+            type: 'local',
+            method: 'LOCAL',
+            status: 'pending',
+            action: 'zkapi-lease-settlement-start',
+            sessionId: ownerSessionId,
+            message: 'Closing the previous chat key in the background.',
+            response: { message: 'The new composer stays available while the old key is settled.' }
+        });
         const settlement = (async () => {
             const stopped = await this.stopSessionStreamingAndWait(ownerSessionId, { timeoutMs: 15_000 });
             if (!stopped) throw new Error('The previous response is still stopping.');
@@ -3766,11 +3784,24 @@ class ChatApp {
                     console.warn('The previous private key settled, but its local session metadata was not saved:', error);
                 }
             }
+            this.setNewChatSettlementState({
+                phase: 'ready',
+                sessionId: ownerSessionId,
+                title: ownerSession?.title || 'Previous chat',
+                message: 'Previous chat key closed. A fresh key will be requested when you send.'
+            });
+            this.services.networkLogger.logRequest({
+                type: 'local',
+                method: 'LOCAL',
+                status: 200,
+                action: 'zkapi-lease-settlement-complete',
+                sessionId: ownerSessionId,
+                message: 'Previous chat key settled; the new chat can request a fresh key.'
+            });
             return true;
         })();
 
         this.newChatSettlementPromise = settlement;
-        this.showToast('New chat ready. Closing the previous private key in the background…', 'success', 4000);
         void settlement.then(() => {
             if (this.newChatSettlementPromise === settlement) {
                 this.newChatSettlementPromise = null;
@@ -3779,21 +3810,79 @@ class ChatApp {
             if (this.newChatSettlementPromise === settlement) {
                 this.newChatSettlementPromise = null;
             }
+            this.setNewChatSettlementState({
+                phase: 'error',
+                sessionId: ownerSessionId,
+                title: ownerSession?.title || 'Previous chat',
+                message: error?.message || 'The previous chat key could not be closed.'
+            });
+            this.services.networkLogger.logRequest({
+                type: 'local',
+                method: 'LOCAL',
+                status: 0,
+                action: 'zkapi-lease-settlement-failed',
+                sessionId: ownerSessionId,
+                message: 'Previous chat key settlement failed.',
+                error: error?.message || 'Unknown settlement error'
+            });
             this.showToast(error?.message || 'Could not close the previous private key.', 'error', 6000);
         });
         return settlement;
     }
 
+    setNewChatSettlementState(state) {
+        this.newChatSettlementState = state ? { ...state, updatedAt: Date.now() } : null;
+        this.renderSessions();
+        this.updateLeaseComposerStatus();
+        this.rightPanel?.loadSessionData?.();
+    }
+
+    updateLeaseComposerStatus() {
+        const element = this.elements.zkapiComposerStatus;
+        if (!element) return;
+        const state = this.newChatSettlementState;
+        const label = element.querySelector('[data-zkapi-composer-label]');
+        const dot = element.querySelector('[data-zkapi-composer-dot]');
+        if (!state) {
+            element.classList.add('hidden');
+            element.classList.remove('flex');
+            if (label) label.textContent = '';
+            return;
+        }
+        const messages = {
+            settling: 'Closing the previous chat key in the background — you can keep typing.',
+            waiting: 'Your message is queued until the previous chat key closes.',
+            ready: 'Previous chat key closed — a fresh key will be requested on send.',
+            error: `Could not close the previous chat key: ${state.message}`
+        };
+        if (label) label.textContent = messages[state.phase] || state.message || '';
+        element.classList.remove('hidden');
+        element.classList.add('flex');
+        element.classList.toggle('text-destructive', state.phase === 'error');
+        dot?.classList.toggle('bg-amber-500', ['settling', 'waiting'].includes(state.phase));
+        dot?.classList.toggle('animate-pulse', ['settling', 'waiting'].includes(state.phase));
+        dot?.classList.toggle('bg-status-success', state.phase === 'ready');
+        dot?.classList.toggle('bg-destructive', state.phase === 'error');
+        this.updateInputState();
+    }
+
     async waitForPreviousChatLeaseSettlement() {
         const settlement = this.newChatSettlementPromise;
         if (!settlement) return true;
-        this.showToast('Finishing the previous private key before sending…', 'success', 60_000);
+        this.pendingSettlementSend = true;
+        this.setNewChatSettlementState({
+            ...(this.newChatSettlementState || {}),
+            phase: 'waiting',
+            message: 'Your message is queued until the previous chat key closes.'
+        });
         try {
             await settlement;
-            this.clearToast();
             return true;
         } catch {
             return false;
+        } finally {
+            this.pendingSettlementSend = false;
+            this.updateInputState();
         }
     }
 
@@ -5221,6 +5310,25 @@ class ChatApp {
         };
     }
 
+    async continueLimitedResponse(messageId) {
+        const session = this.getCurrentSession();
+        if (!session || this.isCurrentSessionStreaming()) return;
+        if (this.elements.messageInput.value.trim() || this.uploadedFiles.length > 0) {
+            this.showToast('Send or clear the current draft before continuing the response.', 'error', 4000);
+            this.elements.messageInput.focus();
+            return;
+        }
+        const messages = await chatDB.getSessionMessages(session.id);
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage?.id !== messageId || lastMessage.role !== 'assistant' || lastMessage.finishReason !== 'length') {
+            this.showToast('Only the latest response can be continued.', 'error', 4000);
+            return;
+        }
+        this.elements.messageInput.value = 'Continue exactly where you left off without repeating the previous text.';
+        this.elements.messageInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await this.sendMessage();
+    }
+
     /**
      * Regenerates the last assistant response without creating a new user message.
      * Used when the regenerate button is clicked on an assistant message.
@@ -5546,6 +5654,7 @@ class ChatApp {
                     inferenceService.getDisplayName(streamReportedModel, modelNameToUse, session)
                 ) || modelNameToUse;
                 streamingMessage.model = resolvedFinalModelName;
+                streamingMessage.finishReason = tokenData.finishReason || null;
                 streamingMessage.streamingTokens = null;
                 streamingMessage.streamingReasoning = false;
                 streamingMessage.streamingPending = false;
@@ -5701,9 +5810,12 @@ class ChatApp {
         const currentBeforeCreate = this.getCurrentSession();
         if (activeLease && activeLease.session_id !== currentBeforeCreate?.id) {
             const owningSession = this.state.sessionsById.get(activeLease.session_id);
-            if (owningSession) await this.switchSession(owningSession.id);
-            this.showToast(`Continue the active chat until its private key expires in ${zkapiClient.formatExpiry(activeLease.expires_at)}.`, 'error', 6000);
-            return;
+            // A previous background attempt may have hit a transient server or
+            // in-flight-request error. Keep this draft in the new composer,
+            // retry settlement, and visibly queue the send instead of throwing
+            // the user back into the old chat.
+            this.startPreviousChatLeaseSettlement(owningSession, activeLease);
+            if (!(await this.waitForPreviousChatLeaseSettlement())) return;
         }
 
         // Create session if none exists (first message creates the session)
@@ -6138,6 +6250,7 @@ class ChatApp {
                     inferenceService.getDisplayName(streamReportedModel, modelNameToUse, session)
                 ) || modelNameToUse;
                 streamingMessage.model = resolvedFinalModelName;
+                streamingMessage.finishReason = tokenData.finishReason || null;
                 streamingMessage.streamingTokens = null; // Clear streaming tokens after completion
                 streamingMessage.streamingReasoning = false; // Clear streaming reasoning flag
                 streamingMessage.citations = tokenData.citations || null;
@@ -8698,7 +8811,7 @@ class ChatApp {
     updateInputState() {
         const hasContent = this.elements.messageInput.value.trim() || this.uploadedFiles.length > 0;
         const isStreaming = this.isCurrentSessionStreaming();
-        const shouldBeDisabled = !isStreaming && !hasContent;
+        const shouldBeDisabled = this.pendingSettlementSend || (!isStreaming && !hasContent);
 
         // Don't disable input during streaming - allow typing
         this.elements.messageInput.disabled = false;
@@ -8708,7 +8821,13 @@ class ChatApp {
         this.elements.sendBtn.classList.toggle('opacity-100', !shouldBeDisabled);
 
         // Update button icon based on streaming state
-        if (isStreaming) {
+        if (this.pendingSettlementSend) {
+            this.elements.sendBtn.innerHTML = `
+                <span class="h-3.5 w-3.5 rounded-full border-2 border-primary-foreground/40 border-t-primary-foreground animate-spin"></span>
+            `;
+            this.elements.sendBtn.classList.add('bg-primary', 'text-primary-foreground');
+            this.elements.sendBtn.classList.remove('bg-destructive', 'hover:bg-destructive/90', 'text-destructive-foreground');
+        } else if (isStreaming) {
             // Change to stop icon (simple square)
             this.elements.sendBtn.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3">
@@ -9148,7 +9267,13 @@ Your API key has been cleared. A new key from a different station will be obtain
             this.accessAcquisitionInFlight.set(key, entry);
         }
 
-        return this.waitForAccessAcquisition(entry, options);
+        const access = await this.waitForAccessAcquisition(entry, options);
+        // Successful access proves there is no longer an old lease blocking
+        // this chat, so any completed or stale transition banner can clear.
+        if (this.newChatSettlementState && !this.newChatSettlementPromise) {
+            this.setNewChatSettlementState(null);
+        }
+        return access;
     }
 
     /**

@@ -144,6 +144,22 @@ export default class Sidebar {
 
         // Build indicator icons
         let indicatorHtml = '';
+        const leaseTransition = this.app.newChatSettlementState;
+        if (leaseTransition?.sessionId === session.id) {
+            if (leaseTransition.phase === 'settling' || leaseTransition.phase === 'waiting') {
+                indicatorHtml += `<span class="ml-1 flex-shrink-0 text-amber-600 dark:text-amber-300" title="Closing this chat's private key in the background" aria-label="Closing private key">
+                    <span class="block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"></span>
+                </span>`;
+            } else if (leaseTransition.phase === 'ready') {
+                indicatorHtml += `<span class="ml-1 flex-shrink-0 text-status-success" title="Private key settled" aria-label="Private key settled">
+                    <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+                </span>`;
+            } else if (leaseTransition.phase === 'error') {
+                indicatorHtml += `<span class="ml-1 flex-shrink-0 text-destructive" title="Private key settlement needs attention" aria-label="Private key settlement failed">
+                    <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.948 3.374H4.645c-1.73 0-2.813-1.874-1.948-3.374L10.052 3.38c.866-1.5 3.03-1.5 3.896 0l7.355 12.746ZM12 15.75h.008v.008H12v-.008Z" /></svg>
+                </span>`;
+            }
+        }
         if (isShared) {
             // Arrow up from box (opposite of import's arrow down to box)
             indicatorHtml += `<span class="text-primary flex-shrink-0 ml-1" title="Shared">

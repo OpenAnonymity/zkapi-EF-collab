@@ -512,6 +512,7 @@ class OpenRouterAPI {
         let modelUsed = effectiveModelId;
         let accumulatedContent = '';
         let accumulatedReasoning = '';
+        let completionFinishReason = null;
         let hasReceivedFirstToken = false;
         let citations = []; // Track citations for web search results
         const annotationsMap = new Map(); // Track annotations with deduplication by URL
@@ -888,6 +889,9 @@ class OpenRouterAPI {
 
                 // Check for finish reason
                 const finishReason = parsed.choices?.[0]?.finish_reason;
+                if (finishReason) {
+                    completionFinishReason = finishReason;
+                }
                 if (finishReason && finishReason !== 'stop') {
                     console.warn('Stream finished with reason:', finishReason);
                 }
@@ -948,6 +952,7 @@ class OpenRouterAPI {
                 promptTokens,
                 completionTokens,
                 model: modelUsed,
+                finishReason: completionFinishReason,
                 reasoning: accumulatedReasoning || null,
                 citations: citations.length > 0 ? citations : null
             };

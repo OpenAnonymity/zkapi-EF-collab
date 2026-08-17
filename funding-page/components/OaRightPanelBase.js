@@ -1646,6 +1646,14 @@ class RightPanel {
         return this.app.state.sessions.filter(s => this.app.services.inference.getAccessInfo(s)?.token === this.apiKey).length;
     }
 
+    getMissingApiKeyStatus() {
+        return {
+            label: 'Requested on message send',
+            badge: 'Pending',
+            badgeClass: 'bg-muted/30 text-muted-foreground'
+        };
+    }
+
     /**
      * Generates HTML for the top section (tickets and API key) only.
      */
@@ -1664,6 +1672,7 @@ class RightPanel {
         const splitShareUrl = this.getTicketCodeShareUrl(this.splitResult?.code);
         const splitShareUrlEscaped = splitShareUrl ? this.escapeHtml(splitShareUrl) : '';
         const splitShareUrlAttribute = splitShareUrl ? this.escapeHtmlAttribute(splitShareUrl) : '';
+        const missingApiKeyStatus = this.getMissingApiKeyStatus();
 
         return `
                 <!-- Invitation Code Section -->
@@ -2042,8 +2051,8 @@ class RightPanel {
                             >?</button>
                         </div>
                         <div class="flex items-center justify-between text-[10px] bg-muted/10 p-2 rounded-md border border-dashed border-border text-muted-foreground">
-                            <span class="flex-1 min-w-0">Requested on message send</span>
-                            <span class="font-medium px-1 py-0.5 rounded-full text-[10px] flex-shrink-0 bg-muted/30 text-muted-foreground">Pending</span>
+                            <span class="flex-1 min-w-0">${this.escapeHtml(missingApiKeyStatus.label)}</span>
+                            <span class="font-medium px-1 py-0.5 rounded-full text-[10px] flex-shrink-0 ${missingApiKeyStatus.badgeClass}">${this.escapeHtml(missingApiKeyStatus.badge)}</span>
                         </div>
                     </div>
                     <div class="space-y-2 mb-3">

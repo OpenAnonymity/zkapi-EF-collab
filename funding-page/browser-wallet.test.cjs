@@ -108,17 +108,18 @@ test('mainnet funding UX labels USDC and warns before using real funds', () => {
     assert.match(account, /Add \$\{tokenSymbol\} to MetaMask/);
     assert.match(account, /Ethereum Mainnet:/);
     assert.match(account, /real USDC/);
+    assert.match(account, /does not set the gas limit or fee rate/);
     assert.match(welcome, /Ethereum Mainnet:/);
     assert.match(welcome, /real ETH for gas/);
     assert.doesNotMatch(rootSync, /Sepolia vault root/);
 });
 
-test('browser direct requests use the same conservative implicit completion limit as the CLI', async () => {
+test('browser direct requests allow useful long-form answers without exceeding expensive-model lease headroom', async () => {
     const compat = await import(pathToFileURL(path.join(__dirname, 'services/zkapiRequestCompat.mjs')));
-    assert.equal(compat.DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS, 256);
+    assert.equal(compat.DIRECT_OPENROUTER_DEFAULT_MAX_TOKENS, 1024);
     assert.deepEqual(
         compat.ensureDirectCompletionLimit({ model: 'anthropic/claude-opus-5' }),
-        { model: 'anthropic/claude-opus-5', max_tokens: 256 }
+        { model: 'anthropic/claude-opus-5', max_tokens: 1024 }
     );
     assert.equal(compat.ensureDirectCompletionLimit({ max_tokens: 32 }).max_tokens, 32);
     assert.equal(compat.ensureDirectCompletionLimit({ max_completion_tokens: 48 }).max_completion_tokens, 48);
@@ -144,7 +145,21 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     assert.match(api, /await zkapiClient\.acquireInferenceAccess\(sessionId\)/);
     assert.match(api, /stream: true/);
     assert.match(api, /await consumeSseBody\(response\.body, processSseLine\)/);
+    assert.match(api, /finishReason: completionFinishReason/);
     assert.doesNotMatch(api, /\{ \.\.\.body, stream: false \}/);
+});
+
+test('onboarding has a static readable card surface and length-limited answers expose Continue', () => {
+    const css = fs.readFileSync(path.join(__dirname, 'styles.css'), 'utf8');
+    const templates = fs.readFileSync(path.join(__dirname, 'components/MessageTemplates.js'), 'utf8');
+    const chatArea = fs.readFileSync(path.join(__dirname, 'components/ChatArea.js'), 'utf8');
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    assert.match(css, /\.welcome-modal-glass\s*\{[\s\S]*background: hsl\(var\(--color-card\) \/ 0\.96\)/);
+    assert.match(css, /#welcome-panel\s*\{[\s\S]*rgba\(0, 0, 0, 0\.35\)/);
+    assert.match(templates, /message\.finishReason === 'length'/);
+    assert.match(templates, /continue-message-btn/);
+    assert.match(chatArea, /continueLimitedResponse/);
+    assert.match(app, /Continue exactly where you left off/);
 });
 
 test('OA System Panel is preserved with only ticket billing replaced', () => {
@@ -189,22 +204,26 @@ test('New Chat opens immediately and settles its previous lease in the backgroun
     assert.match(helper, /await zkapiClient\.settleActiveLease\(\)/);
     assert.match(helper, /error\?\.code !== 'lease_requests_in_flight'/);
     assert.match(helper, /inferenceService\.clearAccessInfo\(ownerSession\)/);
+    assert.match(helper, /phase: 'settling'/);
+    assert.match(helper, /phase: 'ready'/);
+    assert.match(helper, /zkapi-lease-settlement-start/);
+    assert.match(helper, /zkapi-lease-settlement-complete/);
     assert.doesNotMatch(helper, /newChatButton\.disabled/);
 
     const sendStart = app.indexOf('async sendMessage()');
     const send = app.slice(sendStart, app.indexOf('// Create session if none exists', sendStart));
     assert.match(send, /await this\.waitForPreviousChatLeaseSettlement\(\)/);
+    assert.match(send, /retry settlement, and visibly queue the send/);
+    assert.match(send, /this\.startPreviousChatLeaseSettlement\(owningSession, activeLease\)/);
+    assert.doesNotMatch(send, /Continue the active chat until its private key expires/);
     assert.ok(
         send.indexOf('waitForPreviousChatLeaseSettlement') < send.indexOf('const activeLease'),
         'a fast send must await background settlement before checking lease ownership'
     );
 });
 
-test('wallet transactions use a bounded buffer over the RPC gas estimate', async () => {
-    const gas = await import(pathToFileURL(path.join(__dirname, 'services/zkapiGas.mjs')));
+test('wallet transactions leave gas estimation and EIP-1559 fee selection to MetaMask', async () => {
     const contractErrors = await import(pathToFileURL(path.join(__dirname, 'services/zkapiContractError.mjs')));
-    assert.equal(gas.bufferedGasLimit('0x6d094d'), '0x839b46');
-    assert.throws(() => gas.bufferedGasLimit('0x0'), /invalid gas estimate/);
     const staleRoot = contractErrors.contractEstimateError({
         message: 'execution reverted',
         data: { originalError: { data: '0x607447de' } }
@@ -216,9 +235,28 @@ test('wallet transactions use a bounded buffer over the RPC gas estimate', async
     assert.match(unknown.message, /Transaction simulation failed: execution reverted/);
     assert.doesNotMatch(unknown.message, /market|gas price/i);
     const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
-    assert.match(client, /method: 'eth_estimateGas'/);
-    assert.match(client, /transaction\.gas = bufferedGasLimit\(estimate\)/);
+    assert.doesNotMatch(client, /method: 'eth_estimateGas'/);
+    assert.doesNotMatch(client, /transaction\.(?:gas|gasPrice|maxFeePerGas|maxPriorityFeePerGas)\s*=/);
+    assert.match(client, /method: 'eth_sendTransaction'/);
+    assert.match(client, /contractRevertSelector\(error\)/);
     assert.match(client, /error\?\.code !== 'stale_root'/);
+});
+
+test('lease settlement state is visible in every relevant OA chat surface', () => {
+    const index = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const sidebar = fs.readFileSync(path.join(__dirname, 'components/Sidebar.js'), 'utf8');
+    const panel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
+    const upstreamPanel = fs.readFileSync(path.join(__dirname, 'components/OaRightPanelBase.js'), 'utf8');
+    const logRenderer = fs.readFileSync(path.join(__dirname, 'services/networkLogRenderer.js'), 'utf8');
+    assert.match(index, /id="zkapi-composer-status"/);
+    assert.match(app, /pendingSettlementSend/);
+    assert.match(app, /Your message is queued until the previous chat key closes/);
+    assert.match(sidebar, /Closing private key/);
+    assert.match(panel, /settling key/);
+    assert.match(panel, /Closing previous chat key/);
+    assert.match(upstreamPanel, /getMissingApiKeyStatus/);
+    assert.match(logRenderer, /Previous chat key settled/);
 });
 
 test('browser withdrawal refreshes stale Merkle roots before retrying', () => {

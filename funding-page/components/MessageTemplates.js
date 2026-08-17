@@ -1593,6 +1593,20 @@ function buildAssistantMessage(message, helpers, providerName, modelName, option
             </svg>
         </button>
     ` : '';
+    const outputLimitAction = message.finishReason === 'length' ? `
+        <span class="response-limit-notice inline-flex items-center gap-1.5 rounded-md border border-amber-300/70 bg-amber-50/70 px-2 py-1 text-[10px] text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
+            Output limit reached
+        </span>
+        <button
+            class="message-action-btn continue-message-btn inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-background px-2 text-[10px] font-medium text-foreground transition-colors hover:bg-muted/80"
+            data-message-id="${message.id}"
+            data-tooltip="Continue this response">
+            Continue
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-3.5 w-3.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6" />
+            </svg>
+        </button>
+    ` : '';
     const shouldShowMemoryStatusSpacer = hideAssistantActionsDuringReasoning && !isMemoryStatusMessage;
     const assistantActionsRow = (shouldShowMemoryStatusSpacer || isMemoryStatusMessage) ? (
         isMemoryStatusMessage
@@ -1628,6 +1642,7 @@ function buildAssistantMessage(message, helpers, providerName, modelName, option
                     </svg>
                 </button>
                 ${scrubberToggleButton}
+                ${outputLimitAction}
                 ${noResponseNotice}
             </div>
             ${citationsToggle}

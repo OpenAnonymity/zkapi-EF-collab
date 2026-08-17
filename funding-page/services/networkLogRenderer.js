@@ -102,6 +102,12 @@ export function getActivityDescription(log, detailed = false) {
                 return 'Edited prompt and regenerated response';
             } else if (action === 'session-fork') {
                 return 'Forked chat to new session';
+            } else if (action === 'zkapi-lease-settlement-start') {
+                return 'Closing previous chat key in background';
+            } else if (action === 'zkapi-lease-settlement-complete') {
+                return 'Previous chat key settled';
+            } else if (action === 'zkapi-lease-settlement-failed') {
+                return 'Previous chat key settlement failed';
             }
             return message || 'Local operation completed';
         } else {
@@ -132,6 +138,12 @@ export function getActivityDescription(log, detailed = false) {
                 const messageCount = response?.messagesCopied || 0;
                 const hasSharedKey = response?.sharedApiKey;
                 return `Created a new conversation branch with ${messageCount} message${messageCount !== 1 ? 's' : ''} from the original session${hasSharedKey ? ', reusing the same ephemeral access key' : ''}.`;
+            } else if (action === 'zkapi-lease-settlement-start') {
+                return 'The previous chat stopped using its ephemeral key. Settlement is running in the background while the new composer remains available.';
+            } else if (action === 'zkapi-lease-settlement-complete') {
+                return 'The previous ephemeral key was closed and its measured usage was applied to the private balance. The next message can request a fresh key.';
+            } else if (action === 'zkapi-lease-settlement-failed') {
+                return message || 'The previous ephemeral key could not be settled. Review the error before sending from the new chat.';
             }
             return message || 'Local cryptographic operation completed successfully.';
         }
@@ -416,7 +428,9 @@ export function getActivityIcon(log) {
 
     // Handle local events
     if (type === 'local') {
-        if (action === 'ticket-select') {
+        if (action?.startsWith('zkapi-lease-settlement')) {
+            return `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 1 1-4.878 2.341L3.75 14.714V18h3.286l1.5-1.5h2.25v-2.25l2.623-2.623a3 3 0 0 1 2.341-6.377Z" /></svg>`;
+        } else if (action === 'ticket-select') {
             // Checkmark/select icon for ticket selection
             return `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path>

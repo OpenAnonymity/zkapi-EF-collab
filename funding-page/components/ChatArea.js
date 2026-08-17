@@ -167,6 +167,12 @@ export default class ChatArea {
                 return;
             }
 
+            const continueBtn = e.target.closest('.continue-message-btn');
+            if (continueBtn) {
+                await this.app.continueLimitedResponse?.(continueBtn.dataset.messageId);
+                return;
+            }
+
             const memoryApprovalBtn = e.target.closest('.memory-approval-btn');
             if (memoryApprovalBtn) {
                 if (this.app.memoryFeatureEnabled === false) {

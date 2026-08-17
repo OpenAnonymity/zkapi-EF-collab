@@ -1,6 +1,5 @@
 import browserWalletRuntime from './browserWalletRuntime.js';
-import { contractEstimateError } from './zkapiContractError.mjs';
-import { bufferedGasLimit } from './zkapiGas.mjs';
+import { contractEstimateError, contractRevertSelector } from './zkapiContractError.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
 const SESSION_HEADER = 'x-zkapi-session-id';
@@ -404,20 +403,20 @@ class ZkapiClient extends EventTarget {
     async sendContractTransaction(from, to, data, onSubmitted = null) {
         const transaction = { from, to, data };
         try {
-            const estimate = await globalThis.ethereum.request({
-                method: 'eth_estimateGas',
+            // Do not set `gas`, `gasPrice`, or EIP-1559 fee fields. MetaMask
+            // simulates the exact transaction and lets the user choose its fee
+            // policy. A client-side buffer previously inflated the displayed
+            // maximum cost for zkAPI's gas-heavy Poseidon Merkle updates.
+            const hash = await globalThis.ethereum.request({
+                method: 'eth_sendTransaction',
                 params: [transaction]
             });
-            transaction.gas = bufferedGasLimit(estimate);
+            if (onSubmitted) await onSubmitted(hash);
+            return this.waitForReceipt(hash);
         } catch (error) {
+            if (error?.code === 4001 || !contractRevertSelector(error)) throw error;
             throw contractEstimateError(error);
         }
-        const hash = await globalThis.ethereum.request({
-            method: 'eth_sendTransaction',
-            params: [transaction]
-        });
-        if (onSubmitted) await onSubmitted(hash);
-        return this.waitForReceipt(hash);
     }
 
     async confirmBrowserDepositReceipt(plan, receipt, vaultAddress, onStatus) {

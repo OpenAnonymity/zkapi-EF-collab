@@ -140,7 +140,7 @@ export default class AccountModal {
         const note = zkapiClient.note;
         const tokenSymbol = this.escapeHtml(zkapiClient.billingTokenSymbol);
         const mainnetWarning = zkapiClient.isMainnetFunding
-            ? '<div class="rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Only use funds you can afford to lose.</div>'
+            ? '<div class="rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Private Merkle-tree updates are unusually gas-heavy on L1; zkAPI does not set the gas limit or fee rate, so review MetaMask’s maximum before confirming. Only use funds you can afford to lose.</div>'
             : '';
         if (!note) {
             const depositAmount = this.depositAmount
