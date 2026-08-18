@@ -63,6 +63,8 @@ class ZkapiClient extends EventTarget {
         this.refreshTimer = null;
         this.clockTimer = null;
         this.browserMode = false;
+        this.activities = [];
+        this.activitySequence = 0;
     }
 
     async init() {
@@ -126,8 +128,73 @@ class ZkapiClient extends EventTarget {
             challengePeriodSeconds: this.challengePeriodSeconds,
             loading: this.loading,
             lastError: this.lastError,
-            initialized: this.initialized
+            initialized: this.initialized,
+            activities: this.activities.map(activity => ({ ...activity }))
         };
+    }
+
+    beginActivity(kind, details = {}) {
+        const now = Date.now();
+        const activity = {
+            id: `zkapi-${now}-${++this.activitySequence}`,
+            kind,
+            phase: details.phase || 'starting',
+            title: details.title || null,
+            message: details.message || null,
+            status: 'running',
+            blocksSend: Boolean(details.blocksSend),
+            sessionId: details.sessionId || null,
+            startedAt: now,
+            updatedAt: now,
+            finishedAt: null,
+            error: null
+        };
+        this.activities.push(activity);
+        if (this.activities.length > 16) this.activities.splice(0, this.activities.length - 16);
+        this.emitChange('activity-start');
+        return activity.id;
+    }
+
+    updateActivity(id, changes = {}) {
+        const activity = this.activities.find(entry => entry.id === id);
+        if (!activity) return null;
+        Object.assign(activity, changes, { updatedAt: Date.now() });
+        this.emitChange('activity-update');
+        return { ...activity };
+    }
+
+    completeActivity(id, changes = {}) {
+        return this.updateActivity(id, {
+            ...changes,
+            status: 'success',
+            phase: changes.phase || 'complete',
+            finishedAt: Date.now(),
+            blocksSend: false,
+            error: null
+        });
+    }
+
+    failActivity(id, error, changes = {}) {
+        const message = error?.shortMessage || error?.message || String(error || 'Unknown error');
+        return this.updateActivity(id, {
+            ...changes,
+            status: 'error',
+            phase: 'error',
+            finishedAt: Date.now(),
+            blocksSend: Boolean(changes.blocksSend),
+            error: message
+        });
+    }
+
+    cancelActivity(id, message = 'Canceled. No changes were made.') {
+        return this.updateActivity(id, {
+            status: 'canceled',
+            phase: 'canceled',
+            message,
+            finishedAt: Date.now(),
+            blocksSend: false,
+            error: null
+        });
     }
 
     subscribe(listener) {
@@ -223,7 +290,27 @@ class ZkapiClient extends EventTarget {
     async acquireInferenceAccess(sessionId) {
         if (!this.initialized) await this.init();
         if (this.browserMode) {
-            return browserWalletRuntime.acquireEphemeralKey(sessionId);
+            const activityId = this.beginActivity('access', {
+                phase: 'checking',
+                title: 'Starting private chat',
+                message: 'Checking your private balance…',
+                sessionId,
+                blocksSend: true
+            });
+            try {
+                const access = await browserWalletRuntime.acquireEphemeralKey(
+                    sessionId,
+                    (phase, message) => this.updateActivity(activityId, { phase, message })
+                );
+                this.completeActivity(activityId, {
+                    phase: 'ready',
+                    message: 'Private chat ready.'
+                });
+                return access;
+            } catch (error) {
+                this.failActivity(activityId, error, { blocksSend: true });
+                throw error;
+            }
         }
 
         return {
@@ -741,18 +828,37 @@ class ZkapiClient extends EventTarget {
 
     async settleActiveLease(onStatus = () => {}) {
         const hasPendingRequest = Boolean(this.activeLease || this.wallet?.pending_request);
+        const activityId = hasPendingRequest ? this.beginActivity('settlement', {
+            phase: 'settling',
+            title: 'Finishing previous chat',
+            message: 'Closing its temporary key…',
+            sessionId: this.activeLease?.session_id || null,
+            blocksSend: true
+        }) : null;
+        const report = (phase, message) => {
+            if (activityId) this.updateActivity(activityId, { phase, message });
+            onStatus(message);
+        };
         if (hasPendingRequest) {
-            onStatus('Settling the active private key and fetching its signed usage…');
+            report('settling', 'Finishing the active chat and confirming its usage…');
         }
-        const settled = this.browserMode
-            ? await browserWalletRuntime.settleActiveLease()
-            : await this.apiJson('/wallet/settle', { method: 'POST' });
-        await this.refresh({ quiet: true });
-        if (this.activeLease || this.wallet?.pending_request) {
-            throw new Error('The private key usage is still settling. Try again shortly.');
+        try {
+            const settled = this.browserMode
+                ? await browserWalletRuntime.settleActiveLease((phase, message) => report(phase, message))
+                : await this.apiJson('/wallet/settle', { method: 'POST' });
+            await this.refresh({ quiet: true });
+            if (this.activeLease || this.wallet?.pending_request) {
+                throw new Error('The private key usage is still settling. Try again shortly.');
+            }
+            if (hasPendingRequest) {
+                report('complete', 'Previous chat finished. Balance updated.');
+                this.completeActivity(activityId, { message: 'Previous chat finished. Balance updated.' });
+            }
+            return settled;
+        } catch (error) {
+            if (activityId) this.failActivity(activityId, error, { blocksSend: true });
+            throw error;
         }
-        if (hasPendingRequest) onStatus('Private key settled. Balance updated.');
-        return settled;
     }
 
     async syncWithdrawal(onStatus = () => {}) {

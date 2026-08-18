@@ -75,6 +75,7 @@ import {
     persistVerifierSubmitKeyProof as persistVerifierSubmitKeyProofValue
 } from './application/accessController.js';
 import VanillaChatUi from './ui/vanilla/VanillaChatUi.js';
+import { renderZkapiComposerStatus } from './components/ZkapiStateExperience.js';
 
 const SESSION_PAGE_SIZE = 80;
 const SESSION_SEARCH_LIMIT = 300;
@@ -264,6 +265,9 @@ class ChatApp {
         this.pendingTicketCode = null;
         this.hasInitialLinkContext = this.detectInitialLinkContext();
         this.splitCodeWarningOverlay = null;
+        this.zkapiUiUnsubscribe = zkapiClient.subscribe(() => {
+            this.updateLeaseComposerStatus();
+        });
 
         // Link preview state
         this.linkPreviewCard = document.getElementById('link-preview-card');
@@ -3840,29 +3844,7 @@ class ChatApp {
     updateLeaseComposerStatus() {
         const element = this.elements.zkapiComposerStatus;
         if (!element) return;
-        const state = this.newChatSettlementState;
-        const label = element.querySelector('[data-zkapi-composer-label]');
-        const dot = element.querySelector('[data-zkapi-composer-dot]');
-        if (!state) {
-            element.classList.add('hidden');
-            element.classList.remove('flex');
-            if (label) label.textContent = '';
-            return;
-        }
-        const messages = {
-            settling: 'Closing the previous chat key in the background — you can keep typing.',
-            waiting: 'Your message is queued until the previous chat key closes.',
-            ready: 'Previous chat key closed — a fresh key will be requested on send.',
-            error: `Could not close the previous chat key: ${state.message}`
-        };
-        if (label) label.textContent = messages[state.phase] || state.message || '';
-        element.classList.remove('hidden');
-        element.classList.add('flex');
-        element.classList.toggle('text-destructive', state.phase === 'error');
-        dot?.classList.toggle('bg-amber-500', ['settling', 'waiting'].includes(state.phase));
-        dot?.classList.toggle('animate-pulse', ['settling', 'waiting'].includes(state.phase));
-        dot?.classList.toggle('bg-status-success', state.phase === 'ready');
-        dot?.classList.toggle('bg-destructive', state.phase === 'error');
+        renderZkapiComposerStatus(element, this);
         this.updateInputState();
     }
 

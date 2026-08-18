@@ -1,4 +1,5 @@
 import zkapiClient from '../services/zkapiClient.js';
+import { updateZkapiBalanceControl } from './ZkapiStateExperience.js';
 
 const MODAL_CLASSES = 'w-full max-w-md rounded-xl border border-border bg-background shadow-2xl mx-4 flex flex-col overflow-hidden';
 
@@ -27,7 +28,9 @@ export default class AccountModal {
         this.updateTabIndicator();
         void zkapiClient.init().catch(() => this.updateTabIndicator());
 
-        window.addEventListener('zkapi-payment-required', () => this.open('fund'));
+        window.addEventListener('zkapi-payment-required', (event) => {
+            this.open(event.detail?.view || 'fund');
+        });
     }
 
     attachTabListener() {
@@ -38,15 +41,7 @@ export default class AccountModal {
     updateTabIndicator() {
         const tabBtn = document.getElementById('account-tab-btn');
         if (!tabBtn) return;
-        const note = zkapiClient.note;
-        tabBtn.dataset.status = note ? 'logged-in' : 'none';
-        tabBtn.title = note
-            ? `Private balance: ${zkapiClient.formatMoney(note.current_balance)}`
-            : 'Fund a private balance with MetaMask';
-        const label = tabBtn.querySelector('[data-private-balance-label]');
-        if (label) label.textContent = note
-            ? zkapiClient.formatMoney(note.current_balance)
-            : 'Private balance';
+        updateZkapiBalanceControl(tabBtn, this.app);
     }
 
     open(view = 'balance') {
@@ -111,18 +106,38 @@ export default class AccountModal {
         }
     }
 
-    async run(action) {
+    async run(action, activityDetails = null) {
         if (this.busy) return;
         this.busy = true;
         this.render();
+        const activityId = activityDetails
+            ? zkapiClient.beginActivity(activityDetails.kind, {
+                ...activityDetails,
+                message: activityDetails.message || 'Starting…'
+            })
+            : null;
+        const report = (message, phase = null) => {
+            this.setStatus(message);
+            if (activityId) zkapiClient.updateActivity(activityId, {
+                message,
+                ...(phase ? { phase } : {})
+            });
+        };
         try {
-            await action();
+            await action(report);
+            if (activityId) zkapiClient.completeActivity(activityId, {
+                message: this.status || 'Complete.'
+            });
             this.app.showToast?.(this.status || 'Private balance updated.', 'success', 5000);
         } catch (error) {
             const rejected = error?.code === 4001;
             this.setStatus(rejected
                 ? 'MetaMask canceled the transaction. No funds moved; you can safely try again.'
                 : error.shortMessage || error.message || String(error), !rejected);
+            if (activityId) {
+                if (rejected) zkapiClient.cancelActivity(activityId, this.status);
+                else zkapiClient.failActivity(activityId, error);
+            }
             this.app.showToast?.(this.status, 'error', 6000);
         } finally {
             this.busy = false;
@@ -284,23 +299,24 @@ export default class AccountModal {
             // re-renders it with the suggested default value.
             const amount = depositInput?.value ?? this.depositAmount;
             this.depositAmount = amount;
-            return this.run(async () => {
-                await zkapiClient.deposit(amount, message => this.setStatus(message));
+            return this.run(async (report) => {
+                await zkapiClient.deposit(amount, report);
                 this.depositAmount = null;
                 this.view = 'balance';
                 this.setStatus('Deposit confirmed. Your private balance is ready.');
-            });
+            }, { kind: 'deposit', title: 'Adding funds', phase: 'wallet', message: 'Connecting to MetaMask…', blocksSend: true });
         });
-        this.overlay.querySelector('#zkapi-watch-token-btn')?.addEventListener('click', () => this.run(async () => {
-            await zkapiClient.addBillingTokenToWallet(message => this.setStatus(message));
-        }));
-        this.overlay.querySelector('#zkapi-mint-token-btn')?.addEventListener('click', () => this.run(async () => {
-            await zkapiClient.mintDemoTokens('10', message => this.setStatus(message));
-        }));
-        this.overlay.querySelector('#zkapi-refresh-btn')?.addEventListener('click', () => this.run(async () => {
+        this.overlay.querySelector('#zkapi-watch-token-btn')?.addEventListener('click', () => this.run(async (report) => {
+            await zkapiClient.addBillingTokenToWallet(report);
+        }, { kind: 'token', title: 'Adding token to MetaMask', phase: 'wallet' }));
+        this.overlay.querySelector('#zkapi-mint-token-btn')?.addEventListener('click', () => this.run(async (report) => {
+            await zkapiClient.mintDemoTokens('10', report);
+        }, { kind: 'token', title: 'Getting test ZKAPI', phase: 'wallet' }));
+        this.overlay.querySelector('#zkapi-refresh-btn')?.addEventListener('click', () => this.run(async (report) => {
+            report('Reading the latest private balance…', 'syncing');
             await zkapiClient.refresh();
             this.setStatus('Private balance refreshed.');
-        }));
+        }, { kind: 'refresh', title: 'Refreshing balance', phase: 'syncing' }));
         this.overlay.querySelector('#zkapi-settle-key-btn')?.addEventListener('click', () => this.run(async () => {
             await zkapiClient.settleActiveLease(message => this.setStatus(message));
             this.setStatus('Private key settled. Balance updated.');
@@ -324,19 +340,24 @@ export default class AccountModal {
         confirm?.addEventListener('change', () => {
             withdrawButton.disabled = !confirm.checked || this.busy;
         });
-        withdrawButton?.addEventListener('click', () => this.run(async () => {
-            const result = await zkapiClient.withdraw(this.withdrawMode, message => this.setStatus(message));
+        withdrawButton?.addEventListener('click', () => this.run(async (report) => {
+            const result = await zkapiClient.withdraw(this.withdrawMode, report);
             this.setStatus(result.status === 'closed'
                 ? `${zkapiClient.formatMoney(result.event.finalBalance)} returned to MetaMask.`
                 : `Escape started. Finalize after ${new Date(result.deadline * 1000).toLocaleString()}.`);
+        }, {
+            kind: this.withdrawMode === 'escape' ? 'escape' : 'withdraw',
+            title: this.withdrawMode === 'escape' ? 'Starting account recovery' : 'Returning your balance',
+            phase: 'settling',
+            blocksSend: true
         }));
-        this.overlay.querySelector('#zkapi-sync-withdrawal-btn')?.addEventListener('click', () => this.run(async () => {
-            await zkapiClient.syncWithdrawal(message => this.setStatus(message));
-        }));
-        this.overlay.querySelector('#zkapi-finalize-btn')?.addEventListener('click', () => this.run(async () => {
-            const result = await zkapiClient.finalizeEscape(message => this.setStatus(message));
+        this.overlay.querySelector('#zkapi-sync-withdrawal-btn')?.addEventListener('click', () => this.run(async (report) => {
+            await zkapiClient.syncWithdrawal(report);
+        }, { kind: 'withdraw-sync', title: 'Checking withdrawal', phase: 'syncing', blocksSend: true }));
+        this.overlay.querySelector('#zkapi-finalize-btn')?.addEventListener('click', () => this.run(async (report) => {
+            const result = await zkapiClient.finalizeEscape(report);
             this.view = 'balance';
             this.setStatus(`${zkapiClient.formatMoney(result.event.finalBalance)} returned to MetaMask.`);
-        }));
+        }, { kind: 'escape-finalize', title: 'Finishing account recovery', phase: 'wallet', blocksSend: true }));
     }
 }

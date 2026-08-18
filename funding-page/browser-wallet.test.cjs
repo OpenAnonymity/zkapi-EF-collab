@@ -154,7 +154,7 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
     const api = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
 
-    assert.match(runtime, /async acquireEphemeralKey\(sessionId\)/);
+    assert.match(runtime, /async acquireEphemeralKey\(sessionId, onProgress = \(\) => \{\}\)/);
     assert.match(runtime, /apiKey: lease\.api_key/);
     assert.match(runtime, /spendingLimitUsd: Number\(lease\.spending_limit_usd\)/);
     assert.match(runtime, /selectLeaseSpendingLimitCredits/);
@@ -275,14 +275,19 @@ test('lease settlement state is visible in every relevant OA chat surface', () =
     const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
     const sidebar = fs.readFileSync(path.join(__dirname, 'components/Sidebar.js'), 'utf8');
     const panel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
+    const experience = fs.readFileSync(path.join(__dirname, 'components/ZkapiStateExperience.js'), 'utf8');
+    const uxState = fs.readFileSync(path.join(__dirname, 'services/zkapiUxState.mjs'), 'utf8');
     const upstreamPanel = fs.readFileSync(path.join(__dirname, 'components/OaRightPanelBase.js'), 'utf8');
     const logRenderer = fs.readFileSync(path.join(__dirname, 'services/networkLogRenderer.js'), 'utf8');
     assert.match(index, /id="zkapi-composer-status"/);
     assert.match(app, /pendingSettlementSend/);
     assert.match(app, /Your message is queued until the previous chat key closes/);
     assert.match(sidebar, /Closing private key/);
-    assert.match(panel, /settling key/);
+    assert.match(panel, /renderZkapiPanelExperience/);
     assert.match(panel, /Closing previous chat key/);
+    assert.match(experience, /renderZkapiComposerStatus/);
+    assert.match(uxState, /Finishing previous chat/);
+    assert.match(uxState, /Message queued/);
     assert.match(upstreamPanel, /getMissingApiKeyStatus/);
     assert.match(logRenderer, /Previous chat key settled/);
 });
@@ -336,7 +341,7 @@ test('browser withdrawal settles an active key instead of waiting for expiry', (
 test('deposit captures the edited amount before the busy-state render', () => {
     const modal = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
     const capture = modal.indexOf('const amount = depositInput?.value ?? this.depositAmount');
-    const run = modal.indexOf('return this.run(async () => {', capture);
+    const run = modal.indexOf('return this.run(async (report) => {', capture);
     assert.ok(capture >= 0, 'deposit amount capture is missing');
     assert.ok(run > capture, 'deposit must capture the amount before run() re-renders the modal');
     assert.match(modal.slice(run, run + 300), /zkapiClient\.deposit\(amount,/);

@@ -187,11 +187,11 @@
         position: fixed;
         width: 18rem !important;
         min-width: 18rem !important;
-        transform: translateX(100%);
+        transform: translateX(0);
     }
 
-    #right-panel.right-panel-visible {
-        transform: translateX(0);
+    html[data-right-panel-hidden="true"] #right-panel {
+        transform: translateX(100%);
     }
 }
 
@@ -210,5 +210,424 @@
 @media (prefers-reduced-motion: reduce) {
     .zkapi-progress-indeterminate {
         animation-duration: 2.6s;
+    }
+}
+
+/* zkAPI state experience proposals. These intentionally inherit OA's visual
+ * language; the variants change information architecture, not branding. */
+.zkapi-state-spinner {
+    width: 0.875rem;
+    height: 0.875rem;
+    flex: none;
+    border: 1.5px solid hsl(var(--muted-foreground) / 0.28);
+    border-top-color: hsl(var(--foreground) / 0.72);
+    border-radius: 9999px;
+    animation: zkapi-state-spin 700ms linear infinite;
+}
+
+@keyframes zkapi-state-spin {
+    to { transform: rotate(360deg); }
+}
+
+.zkapi-state-glyph {
+    display: inline-flex;
+    width: 0.875rem;
+    height: 0.875rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.16);
+    color: hsl(var(--muted-foreground));
+    font-size: 0.625rem;
+    font-weight: 700;
+}
+
+.zkapi-state-glyph svg {
+    width: 0.75rem;
+    height: 0.75rem;
+}
+
+.zkapi-state-glyph--success {
+    background: rgb(34 197 94 / 0.13);
+    color: rgb(22 101 52);
+}
+
+.dark .zkapi-state-glyph--success {
+    color: rgb(134 239 172);
+}
+
+.zkapi-state-glyph--error {
+    background: hsl(var(--destructive) / 0.12);
+    color: hsl(var(--destructive));
+}
+
+.zkapi-composer-state {
+    display: block;
+    margin: 0.125rem 0.5rem 0.25rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.6875rem;
+    line-height: 1rem;
+}
+
+.zkapi-composer-inline {
+    display: flex;
+    min-height: 1.75rem;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    background: hsl(var(--muted) / 0.28);
+}
+
+.zkapi-composer-copy {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: baseline;
+    gap: 0.4rem;
+}
+
+.zkapi-composer-copy strong,
+.zkapi-composer-guided-heading strong {
+    flex: none;
+    color: hsl(var(--foreground));
+    font-weight: 550;
+}
+
+.zkapi-composer-copy small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zkapi-composer-state--activity .zkapi-composer-inline {
+    background: transparent;
+    box-shadow: 0 0 0 1px hsl(var(--border)) inset;
+}
+
+.zkapi-composer-state--activity button {
+    min-height: 1.5rem;
+    flex: none;
+    border: 0;
+    border-radius: 0.375rem;
+    padding: 0 0.4rem;
+    background: transparent;
+    color: hsl(var(--foreground));
+    font-size: 0.625rem;
+    font-weight: 550;
+    cursor: pointer;
+    transition: background-color 120ms ease-out, transform 120ms ease-out;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .zkapi-composer-state--activity button:hover {
+        background: hsl(var(--muted) / 0.7);
+    }
+}
+
+.zkapi-composer-state--activity button:active {
+    transform: scale(0.96);
+}
+
+.zkapi-composer-state--activity button:focus-visible,
+.zkapi-billing-explainer summary:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+}
+
+.zkapi-composer-state--guided {
+    border-radius: 0.625rem;
+    padding: 0.5rem 0.625rem 0.55rem;
+    background: hsl(var(--muted) / 0.22);
+    box-shadow: 0 0 0 1px hsl(var(--border) / 0.72) inset;
+}
+
+.zkapi-composer-guided-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.zkapi-composer-guided-heading > span:last-child {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+}
+
+.zkapi-composer-guided-heading small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zkapi-journey {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.35rem;
+    margin-top: 0.65rem;
+}
+
+.zkapi-journey-step {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.3rem;
+    color: hsl(var(--muted-foreground) / 0.68);
+}
+
+.zkapi-journey-step:not(:last-child)::after {
+    position: absolute;
+    z-index: 0;
+    top: 0.45rem;
+    right: -0.25rem;
+    width: 0.35rem;
+    height: 1px;
+    background: hsl(var(--border));
+    content: '';
+}
+
+.zkapi-journey-marker {
+    z-index: 1;
+    display: inline-flex;
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+    font-size: 0.55rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.zkapi-journey-step[data-state="active"] {
+    color: hsl(var(--foreground));
+}
+
+.zkapi-journey-step[data-state="active"] .zkapi-journey-marker {
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+    box-shadow: 0 0 0 3px hsl(var(--foreground) / 0.08);
+}
+
+.zkapi-journey-step[data-state="complete"] {
+    color: hsl(var(--foreground) / 0.82);
+}
+
+.zkapi-journey-step[data-state="complete"] .zkapi-journey-marker {
+    background: rgb(34 197 94 / 0.14);
+    color: rgb(22 101 52);
+}
+
+.dark .zkapi-journey-step[data-state="complete"] .zkapi-journey-marker {
+    color: rgb(134 239 172);
+}
+
+.zkapi-journey-step[data-state="error"] .zkapi-journey-marker {
+    background: hsl(var(--destructive) / 0.12);
+    color: hsl(var(--destructive));
+}
+
+.zkapi-journey-label {
+    overflow: hidden;
+    font-size: 0.625rem;
+    line-height: 0.85rem;
+    text-overflow: ellipsis;
+}
+
+.zkapi-journey--compact {
+    margin-top: 0.5rem;
+}
+
+.zkapi-panel-experience {
+    margin-top: 0.75rem;
+    border-radius: 0.625rem;
+    padding: 0.65rem;
+    background: hsl(var(--muted) / 0.18);
+    box-shadow: 0 0 0 1px hsl(var(--border) / 0.7) inset;
+}
+
+.zkapi-panel-experience--quiet {
+    padding: 0.55rem 0.6rem;
+    background: transparent;
+}
+
+.zkapi-panel-state-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.zkapi-panel-state-heading > div {
+    min-width: 0;
+    flex: 1;
+}
+
+.zkapi-panel-state-heading strong {
+    display: block;
+    color: hsl(var(--foreground));
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 0.9rem;
+}
+
+.zkapi-panel-state-heading p {
+    margin-top: 0.15rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.625rem;
+    line-height: 0.9rem;
+}
+
+.zkapi-running-count {
+    flex: none;
+    border-radius: 9999px;
+    padding: 0.1rem 0.35rem;
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+    font-size: 0.55rem;
+    font-weight: 600;
+}
+
+.zkapi-activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-top: 0.55rem;
+}
+
+.zkapi-activity-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.45rem;
+    min-height: 2.25rem;
+    border-radius: 0.45rem;
+    padding: 0.3rem 0.35rem;
+}
+
+.zkapi-activity-row + .zkapi-activity-row {
+    border-top: 1px solid hsl(var(--border) / 0.55);
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+}
+
+.zkapi-activity-indicator {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.5);
+}
+
+.zkapi-activity-row[data-status="running"] .zkapi-activity-indicator,
+.zkapi-activity-row[data-status="waiting"] .zkapi-activity-indicator {
+    background: hsl(var(--foreground));
+    box-shadow: 0 0 0 3px hsl(var(--foreground) / 0.08);
+}
+
+.zkapi-activity-row[data-status="success"] .zkapi-activity-indicator {
+    background: rgb(34 197 94);
+}
+
+.zkapi-activity-row[data-status="error"] .zkapi-activity-indicator {
+    background: hsl(var(--destructive));
+}
+
+.zkapi-activity-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+}
+
+.zkapi-activity-copy strong,
+.zkapi-activity-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zkapi-activity-copy strong {
+    color: hsl(var(--foreground));
+    font-size: 0.625rem;
+    font-weight: 550;
+}
+
+.zkapi-activity-copy small,
+.zkapi-activity-state,
+.zkapi-activity-empty {
+    color: hsl(var(--muted-foreground));
+    font-size: 0.55rem;
+}
+
+.zkapi-activity-state {
+    max-width: 4.25rem;
+    text-align: end;
+}
+
+.zkapi-activity-empty {
+    margin-top: 0.55rem;
+}
+
+.zkapi-billing-explainer summary {
+    border-radius: 0.25rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.625rem;
+    font-weight: 550;
+    cursor: pointer;
+}
+
+.zkapi-billing-explainer p {
+    margin-top: 0.45rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.625rem;
+    line-height: 0.9rem;
+}
+
+.account-tab-btn[data-status="busy"] .account-tab-dot {
+    background: hsl(var(--foreground));
+    box-shadow: 0 0 0 3px hsl(var(--foreground) / 0.08);
+}
+
+.account-tab-btn[data-status="attention"] .account-tab-dot {
+    background: hsl(var(--destructive));
+}
+
+.account-tab-btn[data-status="waiting"] .account-tab-dot {
+    background: rgb(217 119 6);
+}
+
+@media (max-width: 640px) {
+    .zkapi-composer-copy small {
+        display: none;
+    }
+
+    .zkapi-composer-guided-heading small {
+        white-space: normal;
+    }
+
+    .zkapi-journey-label {
+        display: none;
+    }
+
+    .zkapi-journey-step {
+        justify-content: center;
+    }
+
+    .zkapi-journey-step:not(:last-child)::after {
+        right: -0.4rem;
+        width: 0.8rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .zkapi-state-spinner {
+        animation-duration: 1.4s;
+    }
+
+    .zkapi-composer-state--activity button {
+        transition: none;
     }
 }

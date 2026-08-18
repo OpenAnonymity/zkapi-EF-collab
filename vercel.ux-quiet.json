@@ -1,0 +1,31 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "true",
+  "buildCommand": "./scripts/package-browser-ux-proposal.sh quiet",
+  "outputDirectory": "dist/browser-ux-quiet",
+  "rewrites": [
+    {
+      "source": "/zkapi-deployment/:path*",
+      "destination": "https://d33l4w2z2nh4cg.cloudfront.net/:path*"
+    }
+  ],
+  "redirects": [
+    { "source": "/", "destination": "/funding/", "permanent": false },
+    { "source": "/funding", "destination": "/funding/", "permanent": false }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+      ]
+    },
+    {
+      "source": "/funding/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    }
+  ]
+}
