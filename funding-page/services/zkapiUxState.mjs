@@ -1,4 +1,12 @@
-export const ZKAPI_UX_PROPOSALS = Object.freeze(['quiet', 'guided', 'activity']);
+export const ZKAPI_UX_PROPOSALS = Object.freeze([
+    'quiet',
+    'guided',
+    'activity',
+    'receipt',
+    'relay',
+    'ambient',
+    'capsule'
+]);
 
 const RUNNING_STATUSES = new Set(['running', 'waiting']);
 const ACCESS_PHASES = new Set(['checking', 'syncing', 'proving', 'requesting', 'verifying']);
@@ -229,6 +237,12 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
     const running = activities.filter(isRunningActivity);
     const currentActivity = latest(running, activity => !activity.sessionId || !sessionId || activity.sessionId === sessionId)
         || latest(running);
+    const matchingActivity = predicate => latest(running, activity => predicate(activity)
+        && (!activity.sessionId || !sessionId || activity.sessionId === sessionId))
+        || latest(running, predicate);
+    const accessActivity = matchingActivity(activity => activity.kind === 'access');
+    const settlementActivity = matchingActivity(activity => activity.kind === 'settlement');
+    const walletActivity = matchingActivity(activity => !['access', 'settlement'].includes(activity.kind));
     const recentError = latest(activities, activity => activity.status === 'error'
         && now - Number(activity.finishedAt || activity.updatedAt || 0) < 120_000);
     const note = snapshot.wallet?.note || null;
@@ -238,6 +252,10 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
     const withdrawalBlocking = Boolean(preparedWithdrawal || ['prepared', 'pending'].includes(withdrawal?.phase));
 
     const currentActivityState = activityState(currentActivity);
+    const accessActivityState = activityState(accessActivity);
+    const settlementActivityState = activityState(settlementActivity);
+    const walletActivityState = activityState(walletActivity);
+    const transitionState = settlementState(transition);
     // Once the previous chat has finished, the next real access phase is the
     // useful thing to show. A stale "ready" handoff must not hide proof or key
     // creation work that has already started for the new conversation.
@@ -245,9 +263,10 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
         ? currentActivityState
         : currentActivity?.kind === 'access' && isRunningActivity(currentActivity)
         ? currentActivityState
-        : settlementState(transition) || currentActivityState;
+        : transitionState || currentActivityState;
+    let withdrawalState = null;
     if (!primary && escapeWaiting) {
-        primary = {
+        withdrawalState = {
             phase: 'escape-wait',
             tone: 'waiting',
             title: 'Recovery window in progress',
@@ -256,8 +275,9 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
             busy: false,
             blocksSend: true
         };
+        primary = withdrawalState;
     } else if (!primary && withdrawalBlocking) {
-        primary = {
+        withdrawalState = {
             phase: 'withdrawal',
             tone: 'waiting',
             title: 'Withdrawal in progress',
@@ -266,6 +286,7 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
             busy: false,
             blocksSend: true
         };
+        primary = withdrawalState;
     } else if (!primary && snapshot.lastError) {
         primary = {
             phase: 'error',
@@ -306,24 +327,76 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
         };
     }
 
+    if (!withdrawalState && escapeWaiting) {
+        withdrawalState = {
+            phase: 'escape-wait',
+            tone: 'waiting',
+            title: 'Recovery window in progress',
+            detail: 'Your balance is safe but paused until the escape hatch can be finalized.',
+            compact: 'Recovery window in progress',
+            busy: false,
+            blocksSend: true
+        };
+    } else if (!withdrawalState && withdrawalBlocking) {
+        withdrawalState = {
+            phase: 'withdrawal',
+            tone: 'waiting',
+            title: 'Withdrawal in progress',
+            detail: 'Finish the prepared withdrawal before sending another message.',
+            compact: 'Withdrawal in progress',
+            busy: false,
+            blocksSend: true
+        };
+    }
+
+    // Concurrent private-payment work is routed to the surface where it is
+    // actionable. A queued send owns the composer, while a MetaMask operation
+    // owns the balance control; the activity panel can still show all work.
+    const composerPrimary = transition?.phase === 'waiting'
+        ? transitionState
+        : accessActivityState
+            || withdrawalState
+            || transitionState
+            || settlementActivityState
+            || walletActivityState
+            || primary;
+    const liveTransitionState = transition?.phase === 'ready' && accessActivityState
+        ? null
+        : transitionState;
+    const balancePrimary = walletActivityState
+        || withdrawalState
+        || liveTransitionState
+        || settlementActivityState
+        || accessActivityState
+        || primary;
+    const panelPrimary = walletActivityState
+        || liveTransitionState
+        || settlementActivityState
+        || accessActivityState
+        || withdrawalState
+        || primary;
+
     const showComposer = Boolean(
         transition
-        || currentActivity?.kind === 'access'
-        || currentActivity?.kind === 'settlement'
-        || primary.blocksSend
-        || primary.tone === 'error'
+        || accessActivity
+        || settlementActivity
+        || composerPrimary.blocksSend
+        || composerPrimary.tone === 'error'
     );
 
     return {
         proposal: normalizeZkapiUxProposal(snapshot.config?.ux_proposal),
-        primary,
+        primary: panelPrimary,
+        composerPrimary,
+        balancePrimary,
+        panelPrimary,
         activities,
         runningActivities: running,
         currentActivity,
         recentError,
         note,
         showComposer,
-        journey: buildJourney(primary, transition, primary.activity || currentActivity),
+        journey: buildJourney(composerPrimary, transition, composerPrimary.activity || currentActivity),
         transition,
         sessionId
     };

@@ -54,6 +54,17 @@ export default class ChatArea {
         this.setupEventListeners();
     }
 
+    setMessageActionBusy(button, busy) {
+        if (!button) return;
+        button.classList.toggle('is-processing', busy);
+        button.disabled = busy;
+        if (busy) {
+            button.setAttribute('aria-busy', 'true');
+        } else {
+            button.removeAttribute('aria-busy');
+        }
+    }
+
     /**
      * Sets up event listeners for message actions (copy, regenerate, edit, fork)
      * Uses event delegation for dynamically added messages
@@ -163,13 +174,18 @@ export default class ChatArea {
             const regenerateBtn = e.target.closest('.regenerate-message-btn');
             if (regenerateBtn) {
                 const messageId = regenerateBtn.dataset.messageId;
-                await this.handleRegenerateMessage(messageId);
+                await this.handleRegenerateMessage(messageId, regenerateBtn);
                 return;
             }
 
             const continueBtn = e.target.closest('.continue-message-btn');
             if (continueBtn) {
-                await this.app.continueLimitedResponse?.(continueBtn.dataset.messageId);
+                this.setMessageActionBusy(continueBtn, true);
+                try {
+                    await this.app.continueLimitedResponse?.(continueBtn.dataset.messageId);
+                } finally {
+                    this.setMessageActionBusy(continueBtn, false);
+                }
                 return;
             }
 
@@ -245,14 +261,24 @@ export default class ChatArea {
             const confirmEditBtn = e.target.closest('.confirm-edit-btn');
             if (confirmEditBtn) {
                 const messageId = confirmEditBtn.dataset.messageId;
-                await this.app.confirmEditPrompt(messageId);
+                this.setMessageActionBusy(confirmEditBtn, true);
+                try {
+                    await this.app.confirmEditPrompt(messageId);
+                } finally {
+                    this.setMessageActionBusy(confirmEditBtn, false);
+                }
                 return;
             }
 
             const forkBtn = e.target.closest('.fork-conversation-btn');
             if (forkBtn) {
                 const messageId = forkBtn.dataset.messageId;
-                await this.app.forkConversation(messageId);
+                this.setMessageActionBusy(forkBtn, true);
+                try {
+                    await this.app.forkConversation(messageId);
+                } finally {
+                    this.setMessageActionBusy(forkBtn, false);
+                }
                 return;
             }
 
@@ -296,7 +322,15 @@ export default class ChatArea {
                 if (textarea) {
                     e.preventDefault();
                     const messageId = textarea.dataset.messageId;
-                    await this.app.confirmEditPrompt(messageId);
+                    const confirmEditBtn = textarea.closest('.edit-prompt-form')
+                        ?.querySelector('.confirm-edit-btn');
+                    if (confirmEditBtn?.disabled) return;
+                    this.setMessageActionBusy(confirmEditBtn, true);
+                    try {
+                        await this.app.confirmEditPrompt(messageId);
+                    } finally {
+                        this.setMessageActionBusy(confirmEditBtn, false);
+                    }
                 }
             } else if (e.key === 'Escape') {
                 const textarea = e.target.closest('.edit-prompt-textarea');
@@ -1220,39 +1254,51 @@ export default class ChatArea {
      * Handles regenerating an assistant message
      * @param {string} messageId - The assistant message ID to regenerate
      */
-    async handleRegenerateMessage(messageId) {
+    async handleRegenerateMessage(messageId, triggerButton = null) {
         const session = this.app.getCurrentSession();
         if (!session) return;
-
-        if (this.app.isCurrentSessionStreaming()) {
-            const stopped = await this.app.stopCurrentSessionStreamingAndWait();
-            if (!stopped) return;
-        }
-
-        const messages = await this.app.data.getSessionMessages(session.id);
-        const messageIndex = messages.findIndex(m => m.id === messageId);
-
-        if (messageIndex === -1 || messages[messageIndex].role !== 'assistant') {
+        const sessionId = session.id;
+        this.setMessageActionBusy(triggerButton, true);
+        const mutationToken = this.app.beginSessionMutation(sessionId, { exclusive: true });
+        if (!mutationToken) {
+            await this.app.acknowledgeSessionMutationBusy?.(sessionId);
+            this.setMessageActionBusy(triggerButton, false);
             return;
         }
+        try {
+            const stopped = await this.app.stopSessionStreamingAndWait(sessionId);
+            if (!stopped || this.app.isSessionDeleted(sessionId)) return;
 
-        // Find the previous user message
-        const userMessage = messageIndex > 0 ? messages[messageIndex - 1] : null;
-        if (!userMessage || userMessage.role !== 'user') {
-            return;
+            const messages = await this.app.data.getSessionMessages(sessionId);
+            if (this.app.isSessionDeleted(sessionId)) return;
+            const messageIndex = messages.findIndex(m => m.id === messageId);
+
+            if (messageIndex === -1 || messages[messageIndex].role !== 'assistant') {
+                return;
+            }
+
+            // Find the previous user message
+            const userMessage = messageIndex > 0 ? messages[messageIndex - 1] : null;
+            if (!userMessage || userMessage.role !== 'user') {
+                return;
+            }
+            const userMessageId = userMessage.id;
+
+            // Delete the assistant message and all messages after it
+            const messagesToDelete = messages.slice(messageIndex);
+            for (const msg of messagesToDelete) {
+                await this.app.data.deleteMessage(msg.id);
+            }
+
+            // Re-render messages to remove deleted messages from UI
+            await this.render();
+
+            // Trigger regeneration by calling the app's regenerateResponse method
+            await this.app.regenerateResponse({ sessionId, userMessageId, mutationToken });
+        } finally {
+            this.app.endSessionMutation(sessionId, mutationToken);
+            this.setMessageActionBusy(triggerButton, false);
         }
-
-        // Delete the assistant message and all messages after it
-        const messagesToDelete = messages.slice(messageIndex);
-        for (const msg of messagesToDelete) {
-            await this.app.data.deleteMessage(msg.id);
-        }
-
-        // Re-render messages to remove deleted messages from UI
-        await this.render();
-
-        // Trigger regeneration by calling the app's regenerateResponse method
-        await this.app.regenerateResponse();
     }
 
     /**
@@ -1530,35 +1576,42 @@ export default class ChatArea {
     async handleResendMessage(messageId, triggerButton = null) {
         const session = this.app.getCurrentSession();
         if (!session) return;
-
-        if (this.app.isCurrentSessionStreaming()) {
-            const stopped = await this.app.stopCurrentSessionStreamingAndWait();
-            if (!stopped) return;
+        const sessionId = session.id;
+        this.setMessageActionBusy(triggerButton, true);
+        const mutationToken = this.app.beginSessionMutation(sessionId, { exclusive: true });
+        if (!mutationToken) {
+            await this.app.acknowledgeSessionMutationBusy?.(sessionId);
+            this.setMessageActionBusy(triggerButton, false);
+            return;
         }
+        try {
+            const stopped = await this.app.stopSessionStreamingAndWait(sessionId);
+            if (!stopped || this.app.isSessionDeleted(sessionId)) return;
 
-        const messages = await this.app.data.getSessionMessages(session.id);
-        const messageIndex = messages.findIndex(m => m.id === messageId);
+            const messages = await this.app.data.getSessionMessages(sessionId);
+            if (this.app.isSessionDeleted(sessionId)) return;
+            const messageIndex = messages.findIndex(m => m.id === messageId);
 
-        if (messageIndex === -1 || messages[messageIndex].role !== 'user') return;
+            if (messageIndex === -1 || messages[messageIndex].role !== 'user') return;
+            const userMessageId = messages[messageIndex].id;
 
-        if (triggerButton) {
-            triggerButton.classList.add('is-processing');
-            triggerButton.setAttribute('aria-busy', 'true');
-            triggerButton.blur();
+            if (typeof this.app.pruneMemoryRetrievedContextFromMessage === 'function') {
+                await this.app.pruneMemoryRetrievedContextFromMessage(session, messages, messageIndex);
+            }
+            if (this.app.isSessionDeleted(sessionId)) return;
+
+            // Delete all messages after this user message
+            const messagesToDelete = messages.slice(messageIndex + 1);
+            for (const msg of messagesToDelete) {
+                await this.app.data.deleteMessage(msg.id);
+            }
+
+            await this.render();
+            await this.app.regenerateResponse({ sessionId, userMessageId, mutationToken });
+        } finally {
+            this.app.endSessionMutation(sessionId, mutationToken);
+            this.setMessageActionBusy(triggerButton, false);
         }
-
-        if (typeof this.app.pruneMemoryRetrievedContextFromMessage === 'function') {
-            await this.app.pruneMemoryRetrievedContextFromMessage(session, messages, messageIndex);
-        }
-
-        // Delete all messages after this user message
-        const messagesToDelete = messages.slice(messageIndex + 1);
-        for (const msg of messagesToDelete) {
-            await this.app.data.deleteMessage(msg.id);
-        }
-
-        await this.render();
-        await this.app.regenerateResponse();
     }
 
     /**

@@ -31,6 +31,7 @@ export default class Sidebar {
         };
         this.virtualScrollRaf = null;
         this.listenersAttached = false;
+        this.deletingSessionIds = new Set();
         this.isResizing = false;
         this.resizeStartX = 0;
         this.resizeStartWidth = 0;
@@ -126,6 +127,7 @@ export default class Sidebar {
      */
     buildSessionHTML(session) {
         const isActive = session.id === this.app.state.currentSessionId;
+        const isDeleting = this.deletingSessionIds.has(session.id);
         const titleClasses = [];
         if (session.title === 'New Chat') {
             titleClasses.push('italic', 'text-muted-foreground');
@@ -143,12 +145,14 @@ export default class Sidebar {
         const shareLabel = isShared ? 'Update Share' : 'Share';
 
         // Build indicator icons
-        let indicatorHtml = '';
+        let indicatorHtml = `<span class="session-delete-progress ${isDeleting ? '' : 'hidden'} ml-1 flex-shrink-0 text-muted-foreground" aria-hidden="true">
+            <span class="zkapi-sidebar-orbit block h-3 w-3 rounded-full border-2 border-current border-t-transparent"></span>
+        </span>`;
         const leaseTransition = this.app.newChatSettlementState;
         if (leaseTransition?.sessionId === session.id) {
             if (leaseTransition.phase === 'settling' || leaseTransition.phase === 'waiting') {
                 indicatorHtml += `<span class="ml-1 flex-shrink-0 text-amber-600 dark:text-amber-300" title="Closing this chat's private key in the background" aria-label="Closing private key">
-                    <span class="block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"></span>
+                    <span class="zkapi-sidebar-orbit block h-3 w-3 rounded-full border-2 border-current border-t-transparent"></span>
                 </span>`;
             } else if (leaseTransition.phase === 'ready') {
                 indicatorHtml += `<span class="ml-1 flex-shrink-0 text-status-success" title="Private key settled" aria-label="Private key settled">
@@ -184,7 +188,7 @@ export default class Sidebar {
         const starMenuLabel = isStarred ? 'Unstar' : 'Star';
 
         return `
-            <div class="group relative flex h-9 items-center rounded-lg ${isActive ? 'chat-session active' : 'hover-highlight'} transition-colors pl-3 chat-session" data-session-id="${session.id}">
+            <div class="group relative flex h-9 items-center rounded-lg ${isActive ? 'chat-session active' : 'hover-highlight'} transition-colors pl-3 chat-session" data-session-id="${this.escapeHtmlAttribute(session.id)}" data-deleting="${isDeleting ? 'true' : 'false'}" aria-busy="${isDeleting ? 'true' : 'false'}">
                 <a class="flex flex-1 items-center justify-between h-full min-w-0 text-foreground hover:text-foreground cursor-pointer">
                     <div class="flex min-w-0 flex-1 items-center">
                         <input class="session-title-input w-full cursor-pointer truncate bg-transparent text-sm leading-5 focus:outline-none text-foreground ${titleClass}" placeholder="Untitled Chat" readonly data-session-id="${this.escapeHtmlAttribute(session.id)}" value="${this.escapeHtmlAttribute(session.title)}">
@@ -192,15 +196,15 @@ export default class Sidebar {
                     </div>
                 </a>
                 <div class="flex shrink-0 items-center relative">
-                    <button class="${starButtonClass}" aria-label="${starLabel}" title="${starLabel}" aria-pressed="${isStarred ? 'true' : 'false'}" data-session-id="${this.escapeHtmlAttribute(session.id)}">
+                    <button class="${starButtonClass}" aria-label="${starLabel}" title="${starLabel}" aria-pressed="${isStarred ? 'true' : 'false'}" data-session-id="${this.escapeHtmlAttribute(session.id)}"${isDeleting ? ' disabled' : ''}>
                         ${this.getStarIconSvg(isStarred)}
                     </button>
-                    <button class="session-menu-btn inline-flex items-center justify-center whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 gap-2 leading-6 text-muted-foreground border border-transparent h-9 w-9 opacity-0 group-hover:opacity-100" aria-label="Session options" data-session-id="${session.id}">
+                    <button class="session-menu-btn inline-flex items-center justify-center whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 gap-2 leading-6 text-muted-foreground border border-transparent h-9 w-9 opacity-0 group-hover:opacity-100" aria-label="Session options" data-session-id="${this.escapeHtmlAttribute(session.id)}"${isDeleting ? ' disabled' : ''}>
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z" />
                         </svg>
                     </button>
-                    <div class="session-menu hidden absolute right-0 top-10 z-[100] rounded-lg border border-border bg-popover shadow-lg p-1 min-w-[175px]" data-session-id="${session.id}">
+                    <div class="session-menu hidden absolute right-0 top-10 z-[100] rounded-lg border border-border bg-popover shadow-lg p-1 min-w-[175px]" data-session-id="${this.escapeHtmlAttribute(session.id)}">
                         <button class="rename-session-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Rename</button>
                         <button class="toggle-star-session-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">${starMenuLabel}</button>
                         <button class="copy-link-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Copy Link</button>
@@ -208,7 +212,7 @@ export default class Sidebar {
                         ${isShared ? `<button class="delete-share-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Delete Share</button>` : ''}
                         <button class="export-pdf-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Export as PDF</button>
                         <button class="export-markdown-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Export as Markdown</button>
-                        <button class="delete-session-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${session.id}">Delete</button>
+                        <button class="delete-session-action w-full text-left px-3 py-2 text-sm text-popover-foreground hover-highlight hover:text-accent-foreground rounded-md transition-colors" data-session-id="${this.escapeHtmlAttribute(session.id)}" aria-busy="${isDeleting ? 'true' : 'false'}"${isDeleting ? ' disabled' : ''}>Delete</button>
                     </div>
                 </div>
             </div>
@@ -257,8 +261,16 @@ export default class Sidebar {
             if (deleteAction) {
                 e.stopPropagation();
                 const sessionId = deleteAction.dataset.sessionId;
+                if (this.deletingSessionIds.has(sessionId)) return;
+                this.deletingSessionIds.add(sessionId);
+                this.setSessionDeletionBusy(sessionId, true, deleteAction);
                 this.closeAllMenus();
-                this.app.deleteSession(sessionId);
+                try {
+                    await this.app.deleteSession(sessionId);
+                } finally {
+                    this.deletingSessionIds.delete(sessionId);
+                    this.setSessionDeletionBusy(sessionId, false, deleteAction);
+                }
                 return;
             }
 
@@ -338,6 +350,7 @@ export default class Sidebar {
             const sessionEl = e.target.closest('.chat-session');
             if (sessionEl) {
                 const sessionId = sessionEl.dataset.sessionId;
+                if (this.deletingSessionIds.has(sessionId)) return;
                 this.closeAllMenus();
                 this.app.switchSession(sessionId);
             }
@@ -566,6 +579,29 @@ export default class Sidebar {
                 menu.classList.add('hidden');
             }
         });
+    }
+
+    setSessionDeletionBusy(sessionId, busy, action = null) {
+        const list = this.app.elements.sessionsList;
+        if (!list) return;
+        const row = Array.from(list.querySelectorAll('.chat-session'))
+            .find(element => element.dataset.sessionId === sessionId);
+        if (!row) return;
+
+        row.dataset.deleting = busy ? 'true' : 'false';
+        row.setAttribute('aria-busy', busy ? 'true' : 'false');
+        row.querySelector('.session-delete-progress')?.classList.toggle('hidden', !busy);
+        row.querySelectorAll('.session-star-btn, .session-menu-btn').forEach(button => {
+            button.disabled = busy;
+        });
+
+        const deleteAction = action?.isConnected
+            ? action
+            : row.querySelector('.delete-session-action');
+        if (deleteAction) {
+            deleteAction.disabled = busy;
+            deleteAction.setAttribute('aria-busy', busy ? 'true' : 'false');
+        }
     }
 
     shouldVirtualize(sessions) {

@@ -11,16 +11,23 @@ function escapeFallback(value) {
 }
 
 export function getZkapiExperience(app, sessionId = app?.state?.currentSessionId) {
-    return deriveZkapiUxState({
+    const state = deriveZkapiUxState({
         snapshot: zkapiClient.snapshot(),
         transition: app?.newChatSettlementState || null,
         sessionId
     });
+    if (typeof document !== 'undefined') {
+        document.documentElement.dataset.zkapiUxProposal = state.proposal;
+    }
+    return state;
 }
 
 function stateGlyph(primary) {
     if (primary.tone === 'working') {
         return '<span class="zkapi-state-spinner" aria-hidden="true"></span>';
+    }
+    if (primary.tone === 'waiting') {
+        return '<span class="zkapi-state-glyph zkapi-state-glyph--waiting" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.75v3.5l2.25 1.35" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4"/></svg></span>';
     }
     if (primary.tone === 'error') {
         return '<span class="zkapi-state-glyph zkapi-state-glyph--error" aria-hidden="true">!</span>';
@@ -65,8 +72,75 @@ function renderActivityRows(state, escapeHtml = escapeFallback, limit = 4) {
         </li>`).join('')}</ul>`;
 }
 
+function visualStateLabel(primary) {
+    if (primary.tone === 'error') return 'Needs attention';
+    if (primary.phase === 'queued') return 'Queued';
+    if (primary.phase === 'closing') return 'Finishing';
+    if (primary.activity?.kind === 'access') return 'Securing';
+    if (primary.busy) return 'Working';
+    if (primary.tone === 'success') return 'Ready';
+    return primary.compact;
+}
+
+function disclosureChevron() {
+    return '<svg class="zkapi-disclosure-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m5.5 6.5 2.5 2.5 2.5-2.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>';
+}
+
+function isPassiveLowTextState(primary) {
+    return ['unfunded', 'loading', 'ready', 'chat-ready'].includes(primary?.phase)
+        && primary?.tone !== 'error';
+}
+
+function capsuleEndpoints(primary) {
+    const phase = primary?.phase || '';
+    if (primary?.tone === 'error' || phase === 'error' || phase === 'canceled') {
+        return {
+            origin: '<span class="zkapi-capsule-origin zkapi-capsule-origin--neutral" aria-hidden="true"><i></i></span>',
+            end: '<span class="zkapi-capsule-end zkapi-capsule-end--error" aria-hidden="true">×</span>'
+        };
+    }
+    if (primary?.tone === 'waiting' || ['waiting', 'withdrawal', 'escape-wait'].includes(phase)) {
+        return {
+            origin: '<span class="zkapi-capsule-origin zkapi-capsule-origin--neutral" aria-hidden="true"><i></i></span>',
+            end: '<span class="zkapi-capsule-end zkapi-capsule-end--hold" aria-hidden="true">Ⅱ</span>'
+        };
+    }
+    if (phase === 'closing') {
+        return {
+            origin: '<span class="zkapi-capsule-origin zkapi-capsule-origin--neutral" aria-hidden="true"><i></i></span>',
+            end: '<span class="zkapi-capsule-end zkapi-capsule-end--closing" aria-hidden="true">…</span>'
+        };
+    }
+    return {
+        origin: '<span class="zkapi-capsule-check" aria-hidden="true">✓</span>',
+        end: '<span class="zkapi-capsule-arrow" aria-hidden="true">→</span>'
+    };
+}
+
+function renderLowTextPanel(state, escapeHtml = escapeFallback) {
+    const primary = state.panelPrimary || state.primary;
+    if (isPassiveLowTextState(primary) || (!state.showComposer && primary.tone !== 'error')) return '';
+    return `
+        <details class="zkapi-panel-experience zkapi-panel-experience--disclosure" data-tone="${escapeHtml(primary.tone)}">
+            <summary>
+                ${stateGlyph(primary)}
+                <span>${escapeHtml(visualStateLabel(primary))}</span>
+                ${disclosureChevron()}
+            </summary>
+            <div class="zkapi-panel-disclosure-body">
+                <strong>${escapeHtml(primary.title)}</strong>
+                <p>${escapeHtml(primary.detail)}</p>
+                ${renderActivityRows(state, escapeHtml, 3)}
+            </div>
+        </details>`;
+}
+
 export function renderZkapiPanelExperience(state, escapeHtml = escapeFallback) {
-    const { primary, proposal } = state;
+    const primary = state.panelPrimary || state.primary;
+    const { proposal } = state;
+    if (['receipt', 'relay', 'ambient', 'capsule'].includes(proposal)) {
+        return renderLowTextPanel(state, escapeHtml);
+    }
     if (proposal === 'guided') {
         return `
             <section class="zkapi-panel-experience zkapi-panel-experience--guided" aria-label="Private chat status">
@@ -101,24 +175,75 @@ export function renderZkapiPanelExperience(state, escapeHtml = escapeFallback) {
 function showActivityPanel(app) {
     const panel = app?.rightPanel;
     if (!panel) return;
+    panel.zkapiDisclosureOpen = true;
     panel.show?.();
     panel.loadSessionData?.();
+    requestAnimationFrame(() => {
+        const disclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
+        if (!disclosure) return;
+        disclosure.open = true;
+        const summary = disclosure.querySelector('summary');
+        summary?.focus?.({ preventScroll: true });
+        summary?.scrollIntoView?.({ block: 'nearest' });
+    });
 }
 
-export function renderZkapiComposerStatus(element, app) {
+export function renderZkapiComposerStatus(element, app, stateOverride = null) {
     if (!element) return;
-    const state = getZkapiExperience(app);
-    const { primary, proposal } = state;
+    const state = stateOverride || getZkapiExperience(app);
+    const primary = state.composerPrimary || state.primary;
+    const { proposal } = state;
+    if (proposal === 'receipt'
+        || (['relay', 'ambient', 'capsule'].includes(proposal) && isPassiveLowTextState(primary))) {
+        element.className = 'hidden';
+        element.innerHTML = '';
+        delete element.dataset.zkapiStateSignature;
+        element.removeAttribute('aria-busy');
+        return;
+    }
     if (!state.showComposer) {
         element.className = 'hidden';
         element.innerHTML = '';
+        delete element.dataset.zkapiStateSignature;
         element.removeAttribute('aria-busy');
         return;
     }
 
+    const visualSignature = `${proposal}:${primary.phase}:${primary.tone}:${primary.busy}`;
+    if (['relay', 'ambient', 'capsule'].includes(proposal)
+        && element.dataset.zkapiStateSignature === visualSignature) {
+        return;
+    }
+    element.dataset.zkapiStateSignature = visualSignature;
+
     element.className = `zkapi-composer-state zkapi-composer-state--${proposal}`;
+    element.dataset.tone = primary.tone;
+    element.dataset.phase = primary.phase;
     element.setAttribute('aria-busy', primary.busy ? 'true' : 'false');
-    if (proposal === 'guided') {
+    if (proposal === 'relay') {
+        element.innerHTML = `
+            <button type="button" class="zkapi-composer-relay" data-zkapi-open-activity aria-label="${escapeFallback(primary.title)}. Open details">
+                ${stateGlyph(primary)}
+                <span>${escapeFallback(visualStateLabel(primary))}</span>
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9m-3-3 3 3-3 3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4"/></svg>
+            </button>`;
+        element.querySelector('[data-zkapi-open-activity]')?.addEventListener('click', () => showActivityPanel(app));
+    } else if (proposal === 'ambient') {
+        element.innerHTML = `
+            <button type="button" class="zkapi-composer-ambient-button" data-zkapi-open-activity aria-label="${escapeFallback(primary.title)}. Open details">
+                ${stateGlyph(primary)}
+            </button>`;
+        element.querySelector('[data-zkapi-open-activity]')?.addEventListener('click', () => showActivityPanel(app));
+    } else if (proposal === 'capsule') {
+        const endpoints = capsuleEndpoints(primary);
+        element.innerHTML = `
+            <button type="button" class="zkapi-composer-capsule" data-zkapi-open-activity aria-label="${escapeFallback(primary.title)}. Open details">
+                ${endpoints.origin}
+                ${stateGlyph(primary)}
+                ${endpoints.end}
+            </button>`;
+        element.querySelector('[data-zkapi-open-activity]')?.addEventListener('click', () => showActivityPanel(app));
+    } else if (proposal === 'guided') {
         element.innerHTML = `
             <div class="zkapi-composer-guided-heading">
                 ${stateGlyph(primary)}
@@ -145,21 +270,21 @@ export function renderZkapiComposerStatus(element, app) {
 export function updateZkapiBalanceControl(button, app) {
     if (!button) return;
     const state = getZkapiExperience(app);
-    const { primary, note } = state;
+    const primary = state.balancePrimary || state.primary;
+    const { note } = state;
     const label = button.querySelector('[data-private-balance-label]');
     let status = note ? 'logged-in' : 'none';
     let text = note ? zkapiClient.formatMoney(note.current_balance) : 'Private balance';
     if (primary.tone === 'working') {
         status = 'busy';
-        text = primary.compact;
     } else if (primary.tone === 'error') {
         status = 'attention';
-        text = 'Payment needs attention';
     } else if (primary.phase === 'escape-wait' || primary.phase === 'withdrawal') {
         status = 'waiting';
-        text = primary.compact;
     }
     button.dataset.status = status;
+    button.dataset.phase = primary.phase;
+    button.dataset.zkapiUxProposal = state.proposal;
     button.title = `${primary.title}. ${primary.detail}`;
     button.setAttribute('aria-label', button.title);
     button.setAttribute('aria-busy', primary.busy ? 'true' : 'false');

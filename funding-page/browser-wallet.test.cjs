@@ -11,6 +11,46 @@ function sha256(file) {
     return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+function sourceBlockAt(source, markerIndex) {
+    assert.ok(markerIndex >= 0, 'source block marker is missing');
+    const blockStart = source.indexOf('{', markerIndex);
+    assert.ok(blockStart >= 0, 'source block opening brace is missing');
+    let depth = 0;
+    for (let index = blockStart; index < source.length; index += 1) {
+        if (source[index] === '{') depth += 1;
+        if (source[index] === '}') {
+            depth -= 1;
+            if (depth === 0) return source.slice(blockStart, index + 1);
+        }
+    }
+    assert.fail('source block closing brace is missing');
+}
+
+function sourceMethodAt(source, marker) {
+    const markerIndex = source.indexOf(marker);
+    assert.ok(markerIndex >= 0, `source method marker is missing: ${marker}`);
+    const parametersStart = source.indexOf('(', markerIndex);
+    assert.ok(parametersStart >= 0, `source method parameters are missing: ${marker}`);
+
+    let parameterDepth = 0;
+    let parametersEnd = -1;
+    for (let index = parametersStart; index < source.length; index += 1) {
+        if (source[index] === '(') parameterDepth += 1;
+        if (source[index] === ')') {
+            parameterDepth -= 1;
+            if (parameterDepth === 0) {
+                parametersEnd = index;
+                break;
+            }
+        }
+    }
+    assert.ok(parametersEnd >= 0, `source method parameters do not close: ${marker}`);
+
+    const bodyStart = source.indexOf('{', parametersEnd);
+    assert.ok(bodyStart >= 0, `source method body is missing: ${marker}`);
+    return source.slice(markerIndex, bodyStart) + sourceBlockAt(source, bodyStart);
+}
+
 test('browser build contains every wallet WASM operation', () => {
     const bytes = fs.readFileSync(path.join(__dirname, 'wasm/zkapi_browser_bg.wasm'));
     const module = new WebAssembly.Module(bytes);
@@ -154,7 +194,7 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
     const api = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
 
-    assert.match(runtime, /async acquireEphemeralKey\(sessionId, onProgress = \(\) => \{\}\)/);
+    assert.match(runtime, /async acquireEphemeralKey\(sessionId, onProgress = \(\) => \{\}, options = \{\}\)/);
     assert.match(runtime, /apiKey: lease\.api_key/);
     assert.match(runtime, /spendingLimitUsd: Number\(lease\.spending_limit_usd\)/);
     assert.match(runtime, /selectLeaseSpendingLimitCredits/);
@@ -164,7 +204,7 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     assert.match(runtime, /lease\.inFlight = Math\.max\(0, lease\.inFlight - 1\)/);
     assert.doesNotMatch(runtime, /requestsServed|requests_per_key|lease_request_limit/);
     assert.doesNotMatch(runtime, /async inferenceFetch\(/);
-    assert.match(client, /async acquireInferenceAccess\(sessionId\)/);
+    assert.match(client, /async acquireInferenceAccess\(sessionId, options = \{\}\)/);
     assert.doesNotMatch(client, /async inferenceFetch\(/);
     assert.match(api, /await zkapiClient\.acquireInferenceAccess\(sessionId\)/);
     assert.match(api, /stream: true/);
@@ -214,7 +254,7 @@ test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => 
 test('New Chat opens immediately and settles its previous lease in the background', () => {
     const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
     const handlerStart = app.indexOf('async handleNewChatRequest(options = {})');
-    const helperStart = app.indexOf('\n    startPreviousChatLeaseSettlement(previousSession, previousLease) {', handlerStart);
+    const helperStart = app.indexOf('\n    startPreviousChatLeaseSettlement(previousSession, previousLease = null) {', handlerStart);
     assert.ok(handlerStart >= 0 && helperStart > handlerStart, 'New Chat settlement helper is missing');
 
     const handler = app.slice(handlerStart, helperStart);
@@ -222,15 +262,17 @@ test('New Chat opens immediately and settles its previous lease in the backgroun
     assert.match(handler, /this\.startPreviousChatLeaseSettlement\(previousSession, previousLease\)/);
     assert.doesNotMatch(handler, /await this\.startPreviousChatLeaseSettlement/);
     assert.ok(
-        handler.indexOf('clearCurrentSession') < handler.indexOf('startPreviousChatLeaseSettlement'),
-        'the new composer must open before background settlement starts'
+        handler.indexOf('startPreviousChatLeaseSettlement') < handler.indexOf('clearCurrentSession'),
+        'the retirement barrier must exist before a fast send can use the new composer'
     );
 
     const helper = app.slice(helperStart, app.indexOf('/**', helperStart));
     assert.match(helper, /this\.newChatSettlementPromise = settlement/);
-    assert.match(helper, /await this\.stopSessionStreamingAndWait/);
+    assert.match(helper, /await this\.cancelPendingSendsAndWait/);
+    assert.match(helper, /const currentLease = zkapiClient\.activeLease/);
+    assert.match(helper, /currentLease\.session_id !== ownerSessionId/);
     assert.match(helper, /await zkapiClient\.settleActiveLease\(\)/);
-    assert.match(helper, /error\?\.code !== 'lease_requests_in_flight'/);
+    assert.match(helper, /\['lease_requests_in_flight', 'lease_pending'\]\.includes\(error\?\.code\)/);
     assert.match(helper, /inferenceService\.clearAccessInfo\(ownerSession\)/);
     assert.match(helper, /phase: 'settling'/);
     assert.match(helper, /phase: 'ready'/);
@@ -238,16 +280,632 @@ test('New Chat opens immediately and settles its previous lease in the backgroun
     assert.match(helper, /zkapi-lease-settlement-complete/);
     assert.doesNotMatch(helper, /newChatButton\.disabled/);
 
-    const sendStart = app.indexOf('async sendMessage()');
-    const send = app.slice(sendStart, app.indexOf('// Create session if none exists', sendStart));
-    assert.match(send, /await this\.waitForPreviousChatLeaseSettlement\(\)/);
-    assert.match(send, /retry settlement, and visibly queue the send/);
-    assert.match(send, /this\.startPreviousChatLeaseSettlement\(owningSession, activeLease\)/);
-    assert.doesNotMatch(send, /Continue the active chat until its private key expires/);
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+    assert.match(send, /capturePendingSendDraft/);
+    assert.match(send, /sendSubmissionsInFlight/);
+    assert.match(send, /clearAcceptedChatbarDraft\(initiatingSessionId, draft\)/);
+    assert.match(captured, /deliveryState: settlementPendingAtSend/);
+    assert.match(captured, /this\.startPreviousChatLeaseSettlement\(owningSession, activeLease\)/);
+    assert.match(captured, /await this\.waitForPreviousChatLeaseSettlement\(/);
+    assert.match(captured, /signal: abortController\.signal/);
+    assert.doesNotMatch(captured, /Continue the active chat until its private key expires/);
     assert.ok(
-        send.indexOf('waitForPreviousChatLeaseSettlement') < send.indexOf('const activeLease'),
-        'a fast send must await background settlement before checking lease ownership'
+        captured.indexOf("this.addMessage('user'") < captured.indexOf('await zkapiClient.init()')
+            && captured.indexOf('await zkapiClient.init()') < captured.indexOf('waitForPreviousChatLeaseSettlement'),
+        'the pending user message must be persisted before initialization or settlement waits'
     );
+});
+
+test('queued-send wiring snapshots before awaiting and exposes inline failure actions', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const templates = fs.readFileSync(path.join(__dirname, 'components/MessageTemplates.js'), 'utf8');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+
+    assert.ok(send.indexOf('this.sendSubmissionsInFlight.set(submission.key, submission)') < send.indexOf('await this.sendCapturedMessage(draft, submission)'));
+    assert.ok(send.indexOf('clearAcceptedChatbarDraft') < send.indexOf('await this.sendCapturedMessage(draft, submission)'));
+    assert.match(app, /retainUnacceptedText/);
+    assert.match(app, /retainUnacceptedFiles/);
+    assert.match(captured, /sessionId: session\.id/);
+    assert.match(captured, /this\.announceZkapiSendState\('Message accepted'\)/);
+    assert.match(captured, /updateOutgoingDeliveryState\(userMessage, 'failed'/);
+    assert.match(templates, /data-delivery-state/);
+    assert.match(templates, />Retry</);
+    assert.match(templates, />Edit</);
+});
+
+test('queued-send guards are session-scoped and New Chat cancels the session being left', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const constructorStart = app.indexOf('constructor()');
+    const constructor = app.slice(constructorStart, app.indexOf('\n    async init()', constructorStart));
+    const newChatStart = app.indexOf('async handleNewChatRequest(options = {})');
+    const newChatEnd = app.indexOf('\n    /**', newChatStart);
+    const newChat = app.slice(newChatStart, newChatEnd);
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+
+    assert.match(constructor, /this\.sendSubmissionsInFlight = new Map\(\)/);
+    assert.match(constructor, /this\.pendingSettlementSendSessions = new Set\(\)/);
+    assert.match(send, /const initiatingSubmissionKey = initiatingSessionId \|\| '__new_chat__'/);
+    assert.match(send, /this\.sendSubmissionsInFlight\.has\(initiatingSubmissionKey\)/);
+    assert.match(captured, /submission\.key = createdSession\.id/);
+    assert.match(captured, /this\.sendSubmissionsInFlight\.set\(submission\.key, submission\)/);
+
+    assert.match(newChat, /this\.stopSessionStreaming\(previousSession\.id\)/);
+    assert.ok(
+        newChat.indexOf('stopSessionStreaming(previousSession.id)') < newChat.indexOf('clearCurrentSession'),
+        'New Chat must cancel a queued send before leaving its session'
+    );
+    assert.match(newChat, /this\.stopSessionStreaming\(previousLease\.session_id\)/);
+
+    assert.match(app, /async waitForPreviousChatLeaseSettlement\(sessionId, \{ signal = null \} = \{\}\)/);
+    assert.match(app, /Promise\.race\(\[settled, canceled\]\)/);
+    assert.match(app, /this\.pendingSettlementSendSessions\.delete\(sessionId\)/);
+});
+
+test('New Chat can abort a send before its session has been allocated', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const createSession = sourceMethodAt(app, 'async createSession(');
+    const newChatStart = app.indexOf('async handleNewChatRequest(options = {})');
+    const newChatEnd = app.indexOf('\n    /**', newChatStart);
+    const newChat = app.slice(newChatStart, newChatEnd);
+    const restoreStart = app.indexOf('restoreUnacceptedChatbarDraft(draft)');
+    const restoreEnd = app.indexOf('\n    clearAllChatbarStates()', restoreStart);
+    const restore = app.slice(restoreStart, restoreEnd);
+
+    const ownClick = send.indexOf('controller: new AbortController()');
+    const firstAwait = send.indexOf('await this.sendCapturedMessage(draft, submission)');
+    assert.ok(ownClick >= 0 && ownClick < firstAwait, 'the click must own an abort controller before its first await');
+    assert.match(send, /submission\.draft\s*=\s*draft/);
+
+    const initialRead = createSession.indexOf("await chatDB.getSetting('selectedModel')");
+    const abortCheck = createSession.indexOf('if (options.signal?.aborted) return null');
+    const allocation = createSession.indexOf('this.state.sessions.unshift(session)');
+    assert.ok(
+        initialRead >= 0 && abortCheck > initialRead && allocation > abortCheck,
+        'an abort during the initial settings read must stop allocation'
+    );
+
+    const findPending = newChat.indexOf("previousSession?.id || '__new_chat__'");
+    const discard = newChat.indexOf('pendingSubmission.draft.discarded = true');
+    const abort = newChat.indexOf('pendingSubmission.controller.abort()');
+    const clear = newChat.indexOf('await this.clearCurrentSession(');
+    assert.ok(findPending >= 0 && discard > findPending && abort > discard && clear > abort);
+    assert.match(restore, /draft\.discarded/);
+});
+
+test('new-chat sends bind drafts during allocation and restore failures to their owning composer', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const createSession = sourceMethodAt(app, 'async createSession(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+    const restoreStart = app.indexOf('restoreUnacceptedChatbarDraft(draft)');
+    const restoreEnd = app.indexOf('\n    clearAllChatbarStates()', restoreStart);
+    const restore = app.slice(restoreStart, restoreEnd);
+
+    const allocated = createSession.indexOf('options.onAllocated?.(session)');
+    const persisted = createSession.indexOf('await chatDB.saveSession(session)');
+    assert.ok(allocated >= 0, 'createSession must expose the newly allocated session synchronously');
+    assert.ok(persisted > allocated, 'the draft must bind before createSession waits on persistence');
+
+    assert.match(captured, /draft\.sessionId\s*=\s*createdSession\.id/);
+    assert.match(captured, /onAllocated:\s*bindSubmissionToSession/);
+    assert.match(captured, /sessionsById\.get\(draft\.sessionId\)/);
+    assert.match(captured, /entry\.id\s*===\s*draft\.sessionId/);
+    assert.ok(
+        captured.indexOf('sessionsById.get(draft.sessionId)')
+            < captured.indexOf("await this.createSession('New Chat'"),
+        'a previously bound draft must recover its original session instead of allocating another'
+    );
+
+    assert.match(restore, /targetSessionId\s*=\s*draft\.sessionId\s*\|\|\s*null/);
+    assert.match(restore, /isViewingSession\(targetSessionId\)/);
+    assert.match(restore, /sessionChatbarStates\.set\(targetSessionId/);
+});
+
+test('accepted attachments remain recoverable until their durable metadata is prepared', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+    const retry = sourceMethodAt(app, 'async regenerateResponse(');
+    const prepare = sourceMethodAt(app, 'async ensureMessageFileMetadata(');
+
+    const provisional = captured.indexOf('pendingFileObjects: currentFiles');
+    const accepted = captured.indexOf("await this.addMessage('user'");
+    const prepared = captured.indexOf('this.ensureMessageFileMetadata(userMessage, currentFiles)');
+    assert.ok(provisional >= 0 && accepted > provisional, 'raw attachments must be part of the accepted message');
+    assert.ok(prepared > accepted, 'attachment conversion must happen after the recoverable message is persisted');
+
+    assert.match(retry, /lastUserMessage\.pendingFileObjects\?\.length/);
+    assert.match(retry, /ensureMessageFileMetadata\(lastUserMessage\)/);
+    assert.ok(
+        retry.indexOf('ensureMessageFileMetadata(lastUserMessage)')
+            < retry.indexOf('inferenceService.streamCompletion('),
+        'retry must finish provisional attachment conversion before opening the model stream'
+    );
+
+    assert.match(prepare, /Array\.isArray\(message\.pendingFileObjects\)/);
+    const preparationStart = prepare.indexOf('const preparation =');
+    const preparation = sourceBlockAt(prepare, preparationStart);
+    const build = preparation.indexOf('await this.buildMessageFileMetadata(pendingFiles)');
+    const clearMatch = /delete (?:latestMessage|message)\.pendingFileObjects/.exec(preparation);
+    const saveMatch = /await chatDB\.saveMessage\((?:latestMessage|message)\)/.exec(preparation);
+    const clear = clearMatch?.index ?? -1;
+    const save = saveMatch?.index ?? -1;
+    assert.ok(build >= 0 && clear > build && save > clear, 'provisional files clear only after conversion and are then persisted');
+});
+
+test('joining attachment preparation hydrates and persists the retry message clone', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const prepareStart = app.indexOf('async ensureMessageFileMetadata(');
+    const prepareEnd = app.indexOf('\n    updateEditDraftContent(', prepareStart);
+    const prepare = app.slice(prepareStart, prepareEnd);
+    const existingStart = prepare.indexOf('if (existing)');
+    const existing = sourceBlockAt(prepare, existingStart);
+
+    const awaitExisting = existing.indexOf('const files = await existing');
+    const hydrate = existing.indexOf('message.files = files');
+    const clearPending = existing.indexOf('delete message.pendingFileObjects');
+    const persist = existing.indexOf('await chatDB.saveMessage(message)');
+    assert.ok(
+        awaitExisting >= 0 && hydrate > awaitExisting && clearPending > hydrate && persist > clearPending,
+        'a distinct IndexedDB retry clone must be saved after it joins the original preparation'
+    );
+});
+
+test('editing after attachment preparation failure cannot resurrect pending raw files', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const enterStart = app.indexOf('async enterEditMode(');
+    const enterEnd = app.indexOf('\n    cancelEditMode(', enterStart);
+    const enterEdit = app.slice(enterStart, enterEnd);
+    const confirmStart = app.indexOf('async confirmEditPrompt(');
+    const confirmEnd = app.indexOf('\n    /**\n     * Forks the conversation', confirmStart);
+    const confirmEdit = app.slice(confirmStart, confirmEnd);
+
+    const pendingGuardStart = enterEdit.indexOf('if (message.pendingFileObjects?.length)');
+    const pendingGuard = sourceBlockAt(enterEdit, pendingGuardStart);
+    const catchStart = pendingGuard.indexOf('catch (error)');
+    const failure = sourceBlockAt(pendingGuard, catchStart);
+    const blocksUnsafeEdit = /\breturn(?:\s+[^;]+)?;/.test(failure);
+
+    const replaceFiles = confirmEdit.indexOf('message.files =');
+    const clearMatch = /(?:delete\s+message\.pendingFileObjects|message\.pendingFileObjects\s*=\s*(?:null|\[\]))/.exec(
+        replaceFiles >= 0 ? confirmEdit.slice(replaceFiles) : ''
+    );
+    const clearPending = clearMatch ? replaceFiles + clearMatch.index : -1;
+    const persist = confirmEdit.indexOf('await chatDB.saveMessage(message)', replaceFiles);
+    const clearsPendingBeforeSave = replaceFiles >= 0 && clearPending > replaceFiles && persist > clearPending;
+
+    assert.ok(
+        blocksUnsafeEdit || clearsPendingBeforeSave,
+        'failed raw attachments must either block editing or be cleared atomically with the edited attachment set'
+    );
+});
+
+test('retry reuses the accepted model and search choice instead of live composer state', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+    const retry = sourceMethodAt(app, 'async regenerateResponse(');
+
+    assert.match(captured, /model:\s*capturedModelName\s*\|\|\s*session\.model/);
+    assert.match(captured, /metadata\.searchEnabled\s*=\s*true/);
+    assert.match(captured, /modelNameOverride:\s*capturedModelName/);
+    assert.match(
+        captured.slice(captured.indexOf('inferenceService.streamCompletion(')),
+        /\n\s*searchEnabled,\s*\n\s*abortController,/,
+        'the captured search toggle must be an argument to the stream call'
+    );
+
+    assert.match(retry, /lastUserMessage\.model\s*\|\|\s*session\.model/);
+    assert.match(retry, /Boolean\(lastUserMessage\.searchEnabled\)/);
+    assert.match(retry, /modelNameOverride:\s*retryModelName/);
+    assert.match(retry, /modelNameToUse\s*=\s*retryModelName/);
+    assert.match(
+        retry.slice(retry.indexOf('inferenceService.streamCompletion(')),
+        /\n\s*retrySearchEnabled,\s*\n\s*abortController,/,
+        'retry must pass the accepted search choice to the stream call'
+    );
+    assert.doesNotMatch(retry, /this\.searchEnabled/);
+});
+
+test('accepted memory and reasoning controls are persisted and reused by Retry', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+    const retry = sourceMethodAt(app, 'async regenerateResponse(');
+
+    assert.match(
+        send,
+        /memoryMode:\s*options\.memoryMode\s*\n\s*\?\?\s*\(this\.memoryFeatureEnabled[^,\n]*this\.memoryMode/
+    );
+    assert.match(send, /reasoningEnabled:\s*[^,\n]*this\.reasoningEnabled/);
+    assert.match(
+        send,
+        /reasoningEffort:\s*normalizeReasoningEffort\(options\.reasoningEffort\s*\?\?\s*this\.reasoningEffort\)/
+    );
+
+    assert.match(captured, /memoryMode:\s*capturedMemoryMode/);
+    assert.match(captured, /reasoningEnabled:\s*capturedReasoningEnabled/);
+    assert.match(captured, /reasoningEffort:\s*capturedReasoningEffort/);
+    assert.match(captured, /capturedMemoryMode/);
+    assert.match(
+        captured.slice(captured.indexOf('inferenceService.streamCompletion(')),
+        /capturedReasoningEnabled,\s*\n\s*capturedReasoningEffort/,
+        'the accepted reasoning controls must reach the initial stream'
+    );
+
+    assert.match(retry, /lastUserMessage\.memoryMode/);
+    assert.match(retry, /lastUserMessage\.reasoningEnabled/);
+    assert.match(retry, /lastUserMessage\.reasoningEffort/);
+    assert.match(retry, /retryMemoryMode/);
+    assert.match(
+        retry.slice(retry.indexOf('inferenceService.streamCompletion(')),
+        /retryReasoningEnabled,\s*\n\s*retryReasoningEffort/,
+        'Retry must stream with the controls stored on the accepted prompt'
+    );
+});
+
+test('initial sends and retries gate inference on a usable funded note', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const methods = [
+        ['send', sourceMethodAt(app, 'async sendCapturedMessage(')],
+        ['retry', sourceMethodAt(app, 'async regenerateResponse(')]
+    ];
+
+    for (const [label, method] of methods) {
+        const init = method.indexOf('await zkapiClient.init()');
+        const withdrawal = method.indexOf('if (zkapiClient.withdrawalBlocksChat)');
+        const missingNote = method.indexOf('if (!zkapiClient.hasNote)');
+        const acquire = method.indexOf('await this.acquireAndSetAccess(');
+        const stream = method.indexOf('inferenceService.streamCompletion(');
+        assert.ok(init >= 0 && withdrawal > init, `${label} must initialize wallet state before checking it`);
+        assert.ok(missingNote > withdrawal, `${label} must reject both blocked withdrawals and missing notes`);
+        assert.ok(acquire > missingNote && stream > acquire, `${label} must gate key acquisition and inference`);
+        assert.match(method, /accountModal\?\.open\?\.\('withdraw'\)/);
+        assert.match(method, /accountModal\?\.open\?\.\('fund'\)/);
+    }
+});
+
+test('stream failures preserve partial assistant content on both send and retry paths', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const methods = [
+        ['send', sourceMethodAt(app, 'async sendCapturedMessage(')],
+        ['retry', sourceMethodAt(app, 'async regenerateResponse(')]
+    ];
+
+    for (const [label, method] of methods) {
+        const partialStart = method.lastIndexOf('if (firstChunkReceived && streamingMessage)');
+        const partial = sourceBlockAt(method, partialStart);
+        assert.match(partial, /streamingMessage\.content\s*=\s*streamedContent/);
+        assert.match(partial, /streamingMessage\.reasoning\s*=\s*streamedReasoning/);
+        assert.match(partial, /await chatDB\.saveMessage\(streamingMessage\)/);
+        assert.match(partial, /updateOutgoingDeliveryState\([^)]*'failed'/s);
+        assert.doesNotMatch(method, /streamingMessage\.content\s*=\s*userFriendlyMessage/);
+    }
+});
+
+test('cancellation preserves image-only partial responses on send and Retry', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const methods = [
+        ['send', sourceMethodAt(app, 'async sendCapturedMessage(')],
+        ['retry', sourceMethodAt(app, 'async regenerateResponse(')]
+    ];
+
+    for (const [label, method] of methods) {
+        const cancelStart = method.lastIndexOf('if (error.isCancelled)');
+        const cancellation = sourceBlockAt(method, cancelStart);
+        assert.match(
+            cancellation,
+            /(?:streamingMessage\.images\?\.length|Array\.isArray\(streamingMessage\.images\)|streamingMessage\.images\s*&&\s*streamingMessage\.images\.length)/,
+            `${label} cancellation must count generated images as partial output`
+        );
+        assert.match(cancellation, /await chatDB\.saveMessage\(streamingMessage\)/);
+    }
+});
+
+test('session deletion and history clearing await pending send ownership', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const cancel = sourceMethodAt(app, 'async cancelPendingSendsAndWait(');
+    const deleteSession = sourceMethodAt(app, 'async deleteSession(');
+    const deleteAll = sourceMethodAt(app, 'async deleteAllChats(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+
+    assert.match(cancel, /submission\.draft\.discarded\s*=\s*true/);
+    assert.match(cancel, /submission\.controller\?\.abort\(\)/);
+    assert.match(cancel, /sendSubmissionsInFlight/);
+    assert.match(cancel, /sessionStreamingStates/);
+
+    const stopOne = deleteSession.indexOf('await this.cancelPendingSendsAndWait([sessionId])');
+    const deleteOne = deleteSession.indexOf('await chatDB.deleteSession(sessionId)');
+    assert.ok(stopOne >= 0 && deleteOne > stopOne, 'single-chat deletion must await its send before storage deletion');
+
+    const stopAll = deleteAll.indexOf('await this.cancelPendingSendsAndWait()');
+    const clearStorage = deleteAll.indexOf('await chatDB.clearAllChats()');
+    assert.ok(stopAll >= 0 && clearStorage > stopAll, 'history clearing must await every send before clearing storage');
+
+    const finishStart = captured.indexOf('const finishAcceptedSend =');
+    const finish = sourceBlockAt(captured, finishStart);
+    assert.match(finish, /await fileMetadataPromise/);
+});
+
+test('message acceptance becomes atomic at the first durable message write', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const addMessage = sourceMethodAt(app, 'async addMessage(');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+
+    const durableWrite = addMessage.indexOf('await chatDB.saveMessage(message)');
+    const acceptedCallback = addMessage.indexOf('metadata.onPersisted?.(message)');
+    const laterBookkeeping = addMessage.indexOf('await chatDB.getSessionMessages(session.id)');
+    assert.ok(
+        durableWrite >= 0 && acceptedCallback > durableWrite && laterBookkeeping > acceptedCallback,
+        'post-write session/UI failures must not make a durable prompt look unaccepted'
+    );
+
+    const callbackStart = captured.indexOf('onPersisted: (message) =>');
+    const callback = sourceBlockAt(captured, callbackStart);
+    assert.match(callback, /draft\.accepted\s*=\s*true/);
+    assert.match(callback, /draft\.message\s*=\s*message/);
+    assert.match(send, /if \(draft\.accepted && draft\.message\?\.id\)/);
+    assert.match(send, /updateOutgoingDeliveryState\(draft\.message, 'failed'/);
+});
+
+test('memory API overrides remain scoped to the session that approved them', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const constructor = sourceMethodAt(app, 'constructor()');
+    const memoryFlow = sourceMethodAt(app, 'async runMemoryAugmentFlow(');
+    const process = sourceMethodAt(app, 'processMessagesWithFiles(');
+    const refresh = sourceMethodAt(app, 'refreshProcessedMessagesIfMemoryOverrideChanged(');
+    const retry = sourceMethodAt(app, 'async regenerateResponse(');
+    const captured = sourceMethodAt(app, 'async sendCapturedMessage(');
+
+    assert.match(constructor, /this\.memoryApiOverrides = new Map\(\)/);
+    assert.match(memoryFlow, /sessionId:\s*session\.id/);
+    assert.match(
+        memoryFlow,
+        /setMemoryApiOverrideContent\([^;]*memoryRunGeneration,\s*session\.id\)/s
+    );
+    assert.match(memoryFlow, /clearMemoryApiOverrideContent\(session\.id\)/);
+
+    assert.match(process, /getMemoryApiOverrideContent\(sessionId\)/);
+    assert.match(refresh, /getMemoryApiOverrideGeneration\(sessionId\)/);
+    assert.match(refresh, /processMessagesWithFiles\(sourceMessages, modelIdForRequest, sessionId\)/);
+
+    for (const [label, method] of [['send', captured], ['retry', retry]]) {
+        assert.match(
+            method,
+            /processMessagesWithFiles\(sanitizedMessages, modelIdForRequest, session\.id\)/,
+            `${label} must build its request from the owning session's override`
+        );
+        assert.match(
+            method,
+            /getMemoryApiOverrideGeneration\(session\.id\)/,
+            `${label} must snapshot the owning session's override generation`
+        );
+        assert.match(
+            method,
+            /refreshProcessedMessagesIfMemoryOverrideChanged\([\s\S]*?session\.id\s*\)/,
+            `${label} must refresh only from the owning session's override`
+        );
+        assert.match(method, /clearMemoryApiOverrideContent\(session\.id\)/);
+    }
+});
+
+test('Retry reserves its target session synchronously and releases only its own stream', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const chatArea = fs.readFileSync(path.join(__dirname, 'components/ChatArea.js'), 'utf8');
+    const constructor = sourceMethodAt(app, 'constructor()');
+    const retry = sourceMethodAt(app, 'async regenerateResponse(');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+
+    assert.match(constructor, /this\.regenerationReservations = new Set\(\)/);
+    assert.match(retry, /options\.sessionId/);
+    assert.match(retry, /options\.userMessageId/);
+    assert.match(retry, /this\.regenerationReservations\.has\(reservationKey\)/);
+
+    const reserve = retry.indexOf('this.regenerationReservations.add(reservationKey)');
+    const exposeController = retry.indexOf('this.setSessionStreamingState(session.id, true, ownedAbortController');
+    const firstAwait = retry.indexOf('await ');
+    assert.ok(
+        reserve >= 0 && exposeController > reserve && firstAwait > exposeController,
+        'Retry must own the session and expose its abort controller before its first await'
+    );
+
+    const release = retry.lastIndexOf('this.regenerationReservations.delete(reservationKey)');
+    const ownedState = retry.lastIndexOf('ownedState.abortController === ownedAbortController');
+    assert.ok(release > firstAwait && ownedState > release, 'Retry cleanup must release only the stream it owns');
+    assert.match(send, /regenerationReservations\.has\(targetSessionId\)/);
+    assert.match(retry, /sendSubmissionsInFlight\.has\(reservationKey\)/);
+
+    const targetedCalls = chatArea.match(/regenerateResponse\(\{ sessionId, userMessageId, mutationToken \}\)/g) || [];
+    assert.equal(targetedCalls.length, 2, 'both Retry entry points must preserve their session and prompt anchor');
+});
+
+test('deletion tombstones sessions before waiting and gates tracked background writers', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const constructor = sourceMethodAt(app, 'constructor()');
+    const beginMutation = sourceMethodAt(app, 'beginSessionMutation(');
+    const endMutation = sourceMethodAt(app, 'endSessionMutation(');
+    const cancel = sourceMethodAt(app, 'async cancelPendingSendsAndWait(');
+    const deleteSession = sourceMethodAt(app, 'async deleteSession(');
+    const deleteAll = sourceMethodAt(app, 'async deleteAllChats(');
+    const clearMemoryPrompts = sourceMethodAt(app, 'async clearPendingMemoryApprovalPromptsForCurrentSession(');
+    const staleMemoryApproval = sourceMethodAt(app, 'async resolveStaleMemoryApproval(');
+    const confirmEdit = sourceMethodAt(app, 'async confirmEditPrompt(');
+    const title = sourceMethodAt(app, 'async generateSessionTitleIfNeeded(');
+    const extraction = sourceMethodAt(app, 'async runPostTurnMemoryExtraction(');
+    const prepareFiles = sourceMethodAt(app, 'async ensureMessageFileMetadata(');
+    const citations = sourceMethodAt(app, 'async enrichCitationsAndUpdateUI(');
+    const bannedWarning = sourceMethodAt(app, 'async showBannedStationWarningModal(');
+    const scrubber = sourceMethodAt(app, 'async preCacheScrubberRestore(');
+
+    assert.match(constructor, /this\.deletedSessionIds = new Set\(\)/);
+    assert.match(constructor, /this\.messageFilePreparationSessions = new Map\(\)/);
+    assert.match(constructor, /this\.sessionMutationReservations = new Map\(\)/);
+    assert.match(beginMutation, /this\.isSessionDeleted\(sessionId\)/);
+    assert.match(beginMutation, /this\.sessionMutationReservations\.set\(sessionId, reservations\)/);
+    assert.match(endMutation, /this\.sessionMutationReservations\.delete\(sessionId\)/);
+    assert.match(cancel, /submission\.controller\?\.abort\(\)/);
+    assert.match(cancel, /state\?\.abortController\?\.abort\(\)/);
+    assert.match(cancel, /memoryExtractionAbortControllers/);
+    assert.match(cancel, /accessAcquisitionInFlight/);
+    assert.match(cancel, /hasRegeneration/);
+    assert.match(cancel, /hasSessionMutation/);
+    assert.match(cancel, /hasMemoryExtraction/);
+    assert.match(cancel, /hasFilePreparation/);
+    assert.match(cancel, /hasAccessAcquisition/);
+
+    const tombstoneOne = deleteSession.indexOf('this.deletedSessionIds.add(sessionId)');
+    const waitOne = deleteSession.indexOf('await this.cancelPendingSendsAndWait([sessionId])');
+    const deleteOne = deleteSession.indexOf('await chatDB.deleteSession(sessionId)');
+    assert.ok(tombstoneOne >= 0 && waitOne > tombstoneOne && deleteOne > waitOne);
+
+    const tombstoneAll = deleteAll.indexOf('this.deletedSessionIds.add(sessionId)');
+    const waitAll = deleteAll.indexOf('await this.cancelPendingSendsAndWait()');
+    const clearAll = deleteAll.indexOf('await chatDB.clearAllChats()');
+    assert.ok(tombstoneAll >= 0 && waitAll > tombstoneAll && clearAll > waitAll);
+
+    const titleFetch = title.indexOf('await chatDB.getSessionMessages(session.id)');
+    const titleGate = title.indexOf('this.isSessionDeleted(sessionId)', titleFetch);
+    assert.ok(titleFetch >= 0 && titleGate > titleFetch, 'title generation must re-check its tombstone after loading');
+
+    const extractionCall = extraction.indexOf('await ingestMemoryMessages(');
+    const extractionGate = extraction.indexOf('this.isSessionDeleted(session.id)', extractionCall);
+    assert.ok(extractionCall >= 0 && extractionGate > extractionCall, 'memory extraction must gate its post-request writes');
+
+    assert.match(prepareFiles, /messageFilePreparationSessions\.set\(message\.id, message\.sessionId\)/);
+    const fileBuild = prepareFiles.indexOf('await this.buildMessageFileMetadata(pendingFiles)');
+    const fileGate = prepareFiles.indexOf('this.isSessionDeleted(message.sessionId)', fileBuild);
+    assert.ok(fileBuild >= 0 && fileGate > fileBuild, 'file preparation must stop after deletion');
+
+    const citationFetch = citations.indexOf('await Promise.all(metadataPromises)');
+    const citationGate = citations.indexOf('this.isSessionDeleted(message.sessionId)', citationFetch);
+    const citationSave = citations.indexOf('await chatDB.saveMessage(message)', citationFetch);
+    assert.ok(citationFetch >= 0 && citationGate > citationFetch && citationSave > citationGate);
+
+    const scrubberRequest = scrubber.indexOf('restoreResult = await');
+    const scrubberGate = scrubber.lastIndexOf('this.isSessionDeleted(session.id)');
+    const scrubberSave = scrubber.lastIndexOf('await chatDB.saveMessage(message)');
+    assert.ok(scrubberRequest >= 0 && scrubberGate > scrubberRequest && scrubberSave > scrubberGate);
+
+    for (const [label, mutation] of [
+        ['memory-disable cleanup', clearMemoryPrompts],
+        ['stale memory approval', staleMemoryApproval],
+        ['prompt edit', confirmEdit],
+        ['banned-key warning', bannedWarning]
+    ]) {
+        const begin = mutation.indexOf('this.beginSessionMutation(session.id');
+        const beginById = mutation.indexOf('this.beginSessionMutation(sessionId');
+        const firstAwait = mutation.indexOf('await ');
+        const end = Math.max(
+            mutation.lastIndexOf('this.endSessionMutation(session.id, mutationToken)'),
+            mutation.lastIndexOf('this.endSessionMutation(sessionId, mutationToken)')
+        );
+        const effectiveBegin = Math.max(begin, beginById);
+        assert.ok(
+            effectiveBegin >= 0 && firstAwait > effectiveBegin && end > firstAwait,
+            `${label} must remain owned until its writes finish`
+        );
+    }
+    assert.match(clearMemoryPrompts, /this\.isSessionDeleted\(sessionId\)/);
+
+    assert.match(bannedWarning, /sessionsById\.get\(sessionId\)/);
+    assert.match(bannedWarning, /this\.isSessionDeleted\(session\.id\)/);
+    assert.match(bannedWarning, /sessionId:\s*session\.id/);
+});
+
+test('navigation generations keep delayed loads from stealing the selected composer', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const constructor = sourceMethodAt(app, 'constructor()');
+    const create = sourceMethodAt(app, 'async createSession(');
+    const switchSession = sourceMethodAt(app, 'async switchSession(');
+    const clear = sourceMethodAt(app, 'async clearCurrentSession(');
+    const deleteSession = sourceMethodAt(app, 'async deleteSession(');
+
+    assert.match(constructor, /this\.navigationGeneration = 0/);
+
+    const createGeneration = create.indexOf('++this.navigationGeneration');
+    const createAwait = create.indexOf('await ');
+    const selectDecision = create.indexOf('const shouldSelectCreatedSession');
+    assert.ok(createGeneration >= 0 && createAwait > createGeneration && selectDecision > createAwait);
+    assert.match(create, /this\.navigationGeneration === createNavigationGeneration/);
+    assert.match(create, /this\.state\.currentSessionId === expectedCurrentSessionId/);
+    assert.match(create, /pendingModelPreferenceAtStart/);
+    assert.match(create, /this\.state\.pendingModelName === pendingModelPreferenceAtStart/);
+    const selectedBlock = sourceBlockAt(create, create.indexOf('if (shouldSelectCreatedSession)'));
+    assert.match(selectedBlock, /this\.state\.currentSessionId = session\.id/);
+
+    const switchGeneration = switchSession.indexOf('++this.navigationGeneration');
+    const switchAwait = switchSession.indexOf('await this.ensureSessionLoaded(sessionId)');
+    const switchGate = switchSession.indexOf('this.navigationGeneration !== switchNavigationGeneration');
+    assert.ok(switchGeneration >= 0 && switchAwait > switchGeneration && switchGate > switchAwait);
+
+    const clearGeneration = clear.indexOf('++this.navigationGeneration');
+    const clearAwait = clear.indexOf("await chatDB.getSetting('selectedModel')");
+    const clearGate = clear.indexOf('this.navigationGeneration !== clearNavigationGeneration');
+    assert.ok(clearGeneration >= 0 && clearAwait > clearGeneration && clearGate > clearAwait);
+
+    const deleteGeneration = deleteSession.indexOf('++this.navigationGeneration');
+    const deleteAwait = deleteSession.indexOf('await chatDB.deleteSession(sessionId)');
+    const deleteGate = deleteSession.indexOf('this.navigationGeneration === deleteNavigationGeneration');
+    const fallbackResolution = deleteSession.indexOf('replacementSessionId = this.state.sessions.length');
+    const fallbackSelection = deleteSession.indexOf('this.state.currentSessionId = replacementSessionId');
+    assert.ok(
+        deleteGeneration >= 0 && deleteAwait > deleteGeneration
+            && deleteGate > deleteAwait
+            && fallbackResolution > deleteGate
+            && fallbackSelection > fallbackResolution,
+        'a delayed delete must not replace a newer user-selected chat'
+    );
+    const ownedDeleteBlock = sourceBlockAt(deleteSession, deleteSession.indexOf('if (stillOwnsSelection)'));
+    assert.match(ownedDeleteBlock, /this\.editingMessageId = null/);
+    assert.match(ownedDeleteBlock, /this\.editDrafts\.clear\(\)/);
+    assert.match(ownedDeleteBlock, /replacementSessionId = this\.state\.sessions\.length/);
+    assert.match(ownedDeleteBlock, /this\.state\.currentSessionId = replacementSessionId/);
+    assert.match(deleteSession, /const replacementIsStillSelected = stillOwnsSelection[\s\S]*this\.navigationGeneration === deleteNavigationGeneration[\s\S]*this\.state\.currentSessionId === replacementSessionId/);
+    const replacementBlock = sourceBlockAt(
+        deleteSession,
+        deleteSession.indexOf('if (replacementIsStillSelected)')
+    );
+    assert.match(replacementBlock, /this\.updateUrlWithSession\(replacementSessionId\)/);
+    assert.match(replacementBlock, /sessionStorage\.(?:setItem|removeItem)/);
+    assert.match(replacementBlock, /this\.restoreChatbarStateForSession\(this\.state\.currentSessionId\)/);
+    assert.match(replacementBlock, /this\.rightPanel\?\.onSessionChange/);
+});
+
+test('forks copy the transcript without copying zkAPI access or stealing later navigation', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const fork = sourceMethodAt(app, 'async forkConversation(');
+
+    const generation = fork.indexOf('++this.navigationGeneration');
+    const firstAwait = fork.indexOf('await ');
+    const selectDecision = fork.indexOf('const shouldSelectFork');
+    assert.ok(
+        generation >= 0 && firstAwait > generation && selectDecision > firstAwait,
+        'fork navigation ownership must be claimed before its first asynchronous read'
+    );
+    assert.match(fork, /const sourceSessionId = session\.id/);
+    assert.match(fork, /apiKey:\s*null/);
+    assert.match(fork, /apiKeyInfo:\s*null/);
+    assert.match(fork, /expiresAt:\s*null/);
+    assert.match(fork, /sharedAccess:\s*false/);
+    assert.doesNotMatch(fork, /getAccessInfo\s*\(/);
+    assert.doesNotMatch(fork, /accessInfo\.(?:token|apiKey)/);
+
+    assert.match(fork, /const shouldSelectFork = this\.navigationGeneration === forkNavigationGeneration[\s\S]*this\.state\.currentSessionId === sourceSessionId/);
+    const selectionBlock = sourceBlockAt(fork, fork.indexOf('if (shouldSelectFork)'));
+    assert.match(selectionBlock, /this\.state\.currentSessionId = newSessionId/);
+    assert.match(selectionBlock, /await chatDB\.saveSetting\('currentSessionId', newSessionId\)/);
+    assert.match(fork, /const forkIsStillSelected = shouldSelectFork[\s\S]*this\.navigationGeneration === forkNavigationGeneration[\s\S]*this\.state\.currentSessionId === newSessionId/);
+    const postSelection = fork.slice(fork.indexOf('if (!forkIsStillSelected) return;'));
+    assert.match(postSelection, /this\.editingMessageId = null/);
+    assert.match(postSelection, /this\.editDrafts\.clear\(\)/);
+    assert.match(postSelection, /this\.updateUrlWithSession\(newSessionId\)/);
+    assert.match(postSelection, /this\.rightPanel\?\.onSessionChange\?\.\(newSession\)/);
+
+    assert.match(fork, /const sourceLease = zkapiClient\.activeLease/);
+    assert.match(fork, /sourceLease\?\.session_id === sourceSessionId/);
+    assert.match(fork, /this\.startPreviousChatLeaseSettlement\(session, sourceLease\)/);
 });
 
 test('wallet transactions leave gas estimation and EIP-1559 fee selection to MetaMask', async () => {

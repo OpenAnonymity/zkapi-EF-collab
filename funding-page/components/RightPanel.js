@@ -13,6 +13,23 @@ export default class RightPanel extends OaRightPanelBase {
         this.zkapiUnsubscribe = zkapiClient.subscribe(() => this.loadSessionData());
     }
 
+    renderTopSectionOnly() {
+        const existingDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
+        const disclosureWasOpen = Boolean(this.zkapiDisclosureOpen || existingDisclosure?.open);
+        super.renderTopSectionOnly();
+
+        const disclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
+        if (!disclosure) {
+            this.zkapiDisclosureOpen = false;
+            return;
+        }
+        disclosure.open = disclosureWasOpen;
+        this.zkapiDisclosureOpen = disclosure.open;
+        disclosure.addEventListener('toggle', () => {
+            this.zkapiDisclosureOpen = disclosure.open;
+        });
+    }
+
     loadSessionData() {
         const session = this.currentSession;
         const lease = zkapiClient.activeLease;

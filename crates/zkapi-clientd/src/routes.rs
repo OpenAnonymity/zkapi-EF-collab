@@ -844,7 +844,7 @@ mod tests {
         for (path, expected) in [
             (
                 "/funding/components/AccountModal.js",
-                ["Mutual close", "Escape hatch", "Add ZKAPI to MetaMask"],
+                ["Mutual close", "Escape hatch", "to MetaMask"],
             ),
             (
                 "/funding/services/zkapiClient.js",

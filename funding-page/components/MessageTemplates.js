@@ -125,6 +125,7 @@ function escapeHtmlAttribute(text) {
 }
 
 function normalizePendingPhase(phase) {
+    if (phase === 'settling-previous') return 'settling-previous';
     return phase === 'requesting-key' || phase === 'waiting'
         ? 'requesting-key'
         : 'waiting-response';
@@ -140,18 +141,26 @@ function formatPendingTimestamp(timestamp) {
 }
 
 function getPendingIndicatorLabel(phase) {
-    return normalizePendingPhase(phase) === 'waiting-response'
-        ? 'Waiting for response'
-        : 'Requesting ephemeral key';
+    const normalized = normalizePendingPhase(phase);
+    if (normalized === 'settling-previous') return 'Queued';
+    if (normalized === 'waiting-response') return 'Thinking';
+    return 'Securing';
+}
+
+function getPendingIndicatorDescription(phase) {
+    const normalized = normalizePendingPhase(phase);
+    if (normalized === 'settling-previous') return 'Message accepted. Finishing the previous private chat.';
+    if (normalized === 'waiting-response') return 'Message sent. Waiting for the response.';
+    return 'Preparing private access for this message.';
 }
 
 function buildPendingIndicatorContent(phase = 'requesting-key') {
     const normalizedPhase = normalizePendingPhase(phase);
-    const shimmerClass = ' pending-response-streaming';
     const label = getPendingIndicatorLabel(normalizedPhase);
     return `
-        <div class="pending-response-line">
-            <span class="pending-response-label${shimmerClass}">${escapeHtml(label)}</span>
+        <div class="pending-response-line" data-phase="${escapeHtmlAttribute(normalizedPhase)}" aria-label="${escapeHtmlAttribute(getPendingIndicatorDescription(normalizedPhase))}">
+            <span class="pending-response-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="pending-response-label">${escapeHtml(label)}</span>
         </div>
     `;
 }
@@ -589,6 +598,41 @@ function buildEditableFileAttachments(files, messageId) {
 // Threshold for collapsing long user messages (in characters)
 const USER_MESSAGE_COLLAPSE_THRESHOLD = 560;
 
+function buildUserDeliveryReceipt(message, options = {}) {
+    const persistedState = message.deliveryState || null;
+    if (!persistedState) return '';
+    const interrupted = ['queued', 'securing', 'sending', 'sent'].includes(persistedState)
+        && options.isSessionStreaming === false;
+    const state = interrupted ? 'failed' : persistedState;
+    const copy = {
+        queued: ['Queued', 'Accepted. Waiting for the previous private chat to finish.'],
+        securing: ['Securing', 'Preparing private access for this message.'],
+        sending: ['Sending', 'Private access is ready. Opening the response stream.'],
+        sent: ['Sent', 'The model received this message.'],
+        failed: ['Not sent', message.deliveryError || (interrupted
+            ? 'This send was interrupted. Retry it without losing your prompt.'
+            : 'The message is saved, but it could not be sent.')],
+        canceled: ['Canceled', 'The message is saved and can be edited or retried.']
+    }[state] || ['Pending', 'This message is waiting to be sent.'];
+    const safeId = escapeHtmlAttribute(message.id);
+    const retryActions = ['failed', 'canceled'].includes(state) ? `
+        <span class="user-delivery-actions">
+            <button type="button" class="resend-prompt-btn" data-message-id="${safeId}">Retry</button>
+            <button type="button" class="edit-prompt-btn" data-message-id="${safeId}">Edit</button>
+        </span>` : '';
+    return `
+        <div class="user-delivery-row" data-delivery-state="${escapeHtmlAttribute(state)}" aria-label="${escapeHtmlAttribute(copy[1])}">
+            <details class="user-delivery-details">
+                <summary>
+                    <span class="user-delivery-glyph" aria-hidden="true"><i></i></span>
+                    <span class="user-delivery-label">${escapeHtml(copy[0])}</span>
+                </summary>
+                <span class="user-delivery-popover">${escapeHtml(copy[1])}</span>
+            </details>
+            ${retryActions}
+        </div>`;
+}
+
 /**
  * Builds HTML for a user message bubble.
  * @param {Object} message - Message object with id, content, etc.
@@ -599,6 +643,7 @@ const USER_MESSAGE_COLLAPSE_THRESHOLD = 560;
 function buildUserMessage(message, options = {}) {
     const fileAttachments = buildFileAttachments(message.files);
     const { isEditing = false } = options;
+    const deliveryReceipt = buildUserDeliveryReceipt(message, options);
 
     // If in edit mode, show the edit form instead of the static message
     if (isEditing) {
@@ -713,7 +758,7 @@ function buildUserMessage(message, options = {}) {
 
     // Normal display mode with action buttons (shown on hover)
     return `
-        <div class="${CLASSES.userWrapper}" data-message-id="${message.id}"${getRawContentAttribute(message.content)}>
+        <div class="${CLASSES.userWrapper}" data-message-id="${message.id}"${message.deliveryState ? ` data-delivery-state="${escapeHtmlAttribute(message.deliveryState)}"` : ''}${getRawContentAttribute(message.content)}>
             <div class="${CLASSES.userGroup}">
                 <div class="${CLASSES.userBubble} ${scrubberTogglableClass} ${heightLockedClass}" style="${lockedHeightStyle}">
                     <div class="${CLASSES.userContent} ${collapsibleClass}">
@@ -722,6 +767,7 @@ function buildUserMessage(message, options = {}) {
                     </div>
                     ${showMoreBtn}
                 </div>
+                ${deliveryReceipt}
                 <div class="message-user-actions absolute top-full right-0 mt-1 flex items-center gap-1 z-10">
                     ${message.scrubber ? `
                     <button

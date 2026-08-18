@@ -380,7 +380,7 @@ class OpenRouterAPI {
             return '';
         }
 
-        const access = await zkapiClient.acquireInferenceAccess(sessionId);
+        const access = await zkapiClient.acquireInferenceAccess(sessionId, { signal: options.signal });
         const url = `${access.baseUrl}/chat/completions`;
         const headers = access.headers;
         const titleModelId = options.modelId || this.getCachedModels()[0]?.id || TITLE_SUMMARY_MODEL_ID;
@@ -511,7 +511,9 @@ class OpenRouterAPI {
 
         // zkAPI only obtains and accounts for the bounded key. From here on,
         // this is OA Chat's original streaming transport and SSE parser.
-        const access = await zkapiClient.acquireInferenceAccess(sessionId);
+        const access = await zkapiClient.acquireInferenceAccess(sessionId, {
+            signal: abortController?.signal
+        });
         const url = `${access.baseUrl}/chat/completions`;
         const headers = access.headers;
 

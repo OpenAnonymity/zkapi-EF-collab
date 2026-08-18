@@ -287,8 +287,17 @@ class ZkapiClient extends EventTarget {
         return !!this.wallet?.has_note && !!this.wallet?.note;
     }
 
-    async acquireInferenceAccess(sessionId) {
+    async acquireInferenceAccess(sessionId, options = {}) {
+        const signal = options.signal || null;
+        const throwIfCancelled = () => {
+            if (!signal?.aborted) return;
+            const error = new DOMException('The operation was aborted.', 'AbortError');
+            error.isCancelled = true;
+            throw error;
+        };
+        throwIfCancelled();
         if (!this.initialized) await this.init();
+        throwIfCancelled();
         if (this.browserMode) {
             const activityId = this.beginActivity('access', {
                 phase: 'checking',
@@ -300,14 +309,20 @@ class ZkapiClient extends EventTarget {
             try {
                 const access = await browserWalletRuntime.acquireEphemeralKey(
                     sessionId,
-                    (phase, message) => this.updateActivity(activityId, { phase, message })
+                    (phase, message) => this.updateActivity(activityId, { phase, message }),
+                    { signal }
                 );
+                if (signal?.aborted) {
+                    access.release?.();
+                    throwIfCancelled();
+                }
                 this.completeActivity(activityId, {
                     phase: 'ready',
                     message: 'Private chat ready.'
                 });
                 return access;
             } catch (error) {
+                if (signal?.aborted) error.isCancelled = true;
                 this.failActivity(activityId, error, { blocksSend: true });
                 throw error;
             }
@@ -859,6 +874,13 @@ class ZkapiClient extends EventTarget {
             if (activityId) this.failActivity(activityId, error, { blocksSend: true });
             throw error;
         }
+    }
+
+    async hasPendingLease() {
+        if (!this.initialized) await this.init();
+        if (this.browserMode) return browserWalletRuntime.hasPendingLease();
+        await this.refresh({ quiet: true });
+        return Boolean(this.activeLease || this.wallet?.pending_request);
     }
 
     async syncWithdrawal(onStatus = () => {}) {

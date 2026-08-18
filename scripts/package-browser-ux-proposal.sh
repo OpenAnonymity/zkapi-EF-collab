@@ -6,9 +6,9 @@ proposal="${1:-}"
 dist_root="${2:-$repo_root/dist/browser-ux-$proposal}"
 
 case "$proposal" in
-  quiet|guided|activity) ;;
+  quiet|guided|activity|receipt|relay|ambient|capsule) ;;
   *)
-    echo "Usage: $0 <quiet|guided|activity> [output-directory]" >&2
+    echo "Usage: $0 <quiet|guided|activity|receipt|relay|ambient|capsule> [output-directory]" >&2
     exit 1
     ;;
 esac

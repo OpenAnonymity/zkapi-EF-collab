@@ -57,6 +57,13 @@ function normalizeUrl(value) {
     return String(value || '').replace(/\/+$/, '');
 }
 
+function throwIfAborted(signal) {
+    if (!signal?.aborted) return;
+    const error = new DOMException('The operation was aborted.', 'AbortError');
+    error.isCancelled = true;
+    throw error;
+}
+
 function exactTrustedUrl(supplied, expected, label) {
     if (!expected?.startsWith('https://') && !expected?.startsWith('http://127.0.0.1:')
         && !expected?.startsWith('http://localhost:')) {
@@ -418,6 +425,12 @@ class BrowserWalletRuntime extends EventTarget {
         });
     }
 
+    async hasPendingLease() {
+        await this.init();
+        await this.reload();
+        return Boolean(this.activeLease || this.runtime?.journal);
+    }
+
     async remoteFetch(url, init = {}) {
         const proxyUrl = this.deploymentProxyUrl(url);
         if (proxyUrl) {
@@ -556,12 +569,14 @@ class BrowserWalletRuntime extends EventTarget {
         });
     }
 
-    async prepareLeaseRequest(onProgress = () => {}) {
+    async prepareLeaseRequest(onProgress = () => {}, signal = null) {
+        throwIfAborted(signal);
         if (this.runtime.journal) return this.runtime.journal.prepared_request;
         if (!this.runtime.state) throw new Error('Fund a private balance before starting a chat.');
         if (this.runtime.preparedWithdrawal) throw new Error('Finish the prepared withdrawal before sending another message.');
         onProgress('syncing', 'Checking your private balance…');
         const path = await this.treePath(this.runtime.state.note_id, true);
+        throwIfAborted(signal);
         const now = Date.now();
         const spendingLimitCredits = selectLeaseSpendingLimitCredits(
             this.runtime.state.current_balance,
@@ -588,11 +603,13 @@ class BrowserWalletRuntime extends EventTarget {
             },
             provingKey: this.config.proving_keys.request
         });
+        throwIfAborted(signal);
         await this.commit({ ...this.runtime, journal: prepared.journal });
         return prepared.request;
     }
 
-    async verifyLease(lease, expectedLimitCredits, onProgress = () => {}) {
+    async verifyLease(lease, expectedLimitCredits, onProgress = () => {}, signal = null) {
+        throwIfAborted(signal);
         if (!lease.api_key || Number(lease.expires_at) <= Math.floor(Date.now() / 1000)) {
             throw new Error('The zkAPI server returned an unusable OpenRouter lease.');
         }
@@ -621,6 +638,7 @@ class BrowserWalletRuntime extends EventTarget {
             const verification = await this.remoteJson(`${this.config.openrouter.verifier_url}/submit_key`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
+                signal,
                 body: JSON.stringify({
                     station_id: evidence.station_id,
                     api_key: lease.api_key,
@@ -633,18 +651,21 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async issueLease(sessionId, onProgress = () => {}) {
+    async issueLease(sessionId, onProgress = () => {}, signal = null) {
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
+            throwIfAborted(signal);
             await this.reload();
+            throwIfAborted(signal);
             onProgress('checking', 'Checking for unfinished private activity…');
-            await this.recoverPending({ retireLostKey: true, onProgress });
-            const request = await this.prepareLeaseRequest(onProgress);
+            await this.recoverPending({ retireLostKey: true, onProgress, signal });
+            const request = await this.prepareLeaseRequest(onProgress, signal);
             let lease;
             try {
                 onProgress('requesting', 'Creating a temporary key for this chat…');
                 lease = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
+                    signal,
                     body: JSON.stringify(request)
                 });
             } catch (error) {
@@ -653,7 +674,8 @@ class BrowserWalletRuntime extends EventTarget {
                 }
                 throw error;
             }
-            await this.verifyLease(lease, request.public_inputs.solvency_bound, onProgress);
+            await this.verifyLease(lease, request.public_inputs.solvency_bound, onProgress, signal);
+            throwIfAborted(signal);
             this.activeLease = {
                 ...lease,
                 sessionId,
@@ -677,8 +699,10 @@ class BrowserWalletRuntime extends EventTarget {
         });
     }
 
-    async ensureLease(sessionId, onProgress = () => {}) {
+    async ensureLease(sessionId, onProgress = () => {}, signal = null) {
+        throwIfAborted(signal);
         await this.init();
+        throwIfAborted(signal);
         const normalized = String(sessionId || 'default').slice(0, 160);
         const now = Math.floor(Date.now() / 1000);
         if (this.activeLease && this.activeLease.expires_at > now) {
@@ -720,10 +744,12 @@ class BrowserWalletRuntime extends EventTarget {
         this.leasePromiseSession = normalized;
         this.leasePromise = (async () => {
             if (this.activeLease) await this.retireActiveLease(onProgress);
-            return this.issueLease(normalized, onProgress);
+            return this.issueLease(normalized, onProgress, signal);
         })();
         try {
-            return await this.leasePromise;
+            const lease = await this.leasePromise;
+            throwIfAborted(signal);
+            return lease;
         } finally {
             this.leasePromise = null;
             this.leasePromiseSession = null;
@@ -814,18 +840,19 @@ class BrowserWalletRuntime extends EventTarget {
         return true;
     }
 
-    async recoverPending({ retireLostKey = false, quiet = false, onProgress = () => {} } = {}) {
+    async recoverPending({ retireLostKey = false, quiet = false, onProgress = () => {}, signal = null } = {}) {
+        throwIfAborted(signal);
         if (!this.runtime?.journal || this.activeLease) return false;
         const request = this.runtime.journal.prepared_request;
         try {
-            const status = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases/${encodeURIComponent(request.client_request_id)}`);
+            const status = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases/${encodeURIComponent(request.client_request_id)}`, { signal });
             if (status.status === 'active' && retireLostKey) {
                 if (this.runtime.lease && Number(this.runtime.lease.expires_at) > Math.floor(Date.now() / 1000)
                     && this.runtime.lease.ownerId !== this.ownerId) {
                     return false;
                 }
                 onProgress('settling', 'Finishing an interrupted private chat…');
-                const retired = await this.retireRequest(request.client_request_id, request);
+                const retired = await this.retireRequest(request.client_request_id, request, signal);
                 if (retired.status !== 'finalized') return false;
             } else if (status.status !== 'finalized') {
                 return false;
@@ -833,7 +860,7 @@ class BrowserWalletRuntime extends EventTarget {
             return this.installRecoveredResponse(request.client_request_id, onProgress);
         } catch (error) {
             if (error.status === 404) {
-                const recovery = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/nullifiers/${encodeURIComponent(this.runtime.journal.nullifier)}`);
+                const recovery = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/nullifiers/${encodeURIComponent(this.runtime.journal.nullifier)}`, { signal });
                 if (recovery.request_response) return this.installRecoveredResponse(request.client_request_id, onProgress);
             }
             if (!quiet) throw error;
@@ -841,8 +868,10 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async acquireEphemeralKey(sessionId, onProgress = () => {}) {
-        const lease = await this.ensureLease(sessionId, onProgress);
+    async acquireEphemeralKey(sessionId, onProgress = () => {}, options = {}) {
+        const signal = options.signal || null;
+        const lease = await this.ensureLease(sessionId, onProgress, signal);
+        throwIfAborted(signal);
         lease.inFlight += 1;
         let released = false;
         return {

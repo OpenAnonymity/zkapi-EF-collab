@@ -7,6 +7,11 @@ import {
     deriveZkapiUxState,
     normalizeZkapiUxProposal
 } from './services/zkapiUxState.mjs';
+import {
+    capturePendingSendDraft,
+    retainUnacceptedFiles,
+    retainUnacceptedText
+} from './services/pendingSendContract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -27,6 +32,10 @@ test('UX proposal names are pinned and unknown builds fail closed to Quiet Layer
     assert.equal(normalizeZkapiUxProposal('quiet'), 'quiet');
     assert.equal(normalizeZkapiUxProposal('guided'), 'guided');
     assert.equal(normalizeZkapiUxProposal('activity'), 'activity');
+    assert.equal(normalizeZkapiUxProposal('receipt'), 'receipt');
+    assert.equal(normalizeZkapiUxProposal('relay'), 'relay');
+    assert.equal(normalizeZkapiUxProposal('ambient'), 'ambient');
+    assert.equal(normalizeZkapiUxProposal('capsule'), 'capsule');
     assert.equal(normalizeZkapiUxProposal('surprise'), 'quiet');
 });
 
@@ -127,6 +136,55 @@ test('wallet work also replaces a completed handoff so withdrawal progress is ne
 
     assert.equal(state.primary.title, 'Returning your balance');
     assert.equal(state.journey[1].label, 'Create close proof');
+});
+
+test('concurrent settlement and MetaMask work route to the surface where each is actionable', () => {
+    const state = deriveZkapiUxState({
+        snapshot: fundedSnapshot({
+            activities: [{
+                id: 'deposit-wallet',
+                kind: 'deposit',
+                phase: 'wallet',
+                status: 'waiting',
+                title: 'Adding funds',
+                message: 'Confirm in MetaMask.',
+                startedAt: 2,
+                updatedAt: 3
+            }]
+        }),
+        transition: { phase: 'waiting' }
+    });
+
+    assert.equal(state.composerPrimary.phase, 'queued');
+    assert.equal(state.balancePrimary.activity.kind, 'deposit');
+    assert.equal(state.panelPrimary.activity.kind, 'deposit');
+});
+
+test('pending-send snapshots keep later text and files separate from the accepted payload', () => {
+    const acceptedFile = { name: 'accepted.png' };
+    const laterFile = { name: 'later.pdf' };
+    const draft = capturePendingSendDraft({
+        rawContent: 'first prompt',
+        files: [acceptedFile],
+        searchEnabled: true,
+        modelName: 'anthropic/claude-opus-5',
+        memoryMode: true,
+        reasoningEnabled: false,
+        reasoningEffort: 'high',
+        sessionId: 'chat-a'
+    });
+
+    assert.equal(draft.content, 'first prompt');
+    assert.equal(draft.searchEnabled, true);
+    assert.equal(draft.modelName, 'anthropic/claude-opus-5');
+    assert.equal(draft.memoryMode, true);
+    assert.equal(draft.reasoningEnabled, false);
+    assert.equal(draft.reasoningEffort, 'high');
+    assert.equal(draft.sessionId, 'chat-a');
+    assert.equal(retainUnacceptedText('first prompt', draft.rawContent), '');
+    assert.equal(retainUnacceptedText('second draft', draft.rawContent), 'second draft');
+    assert.deepEqual(retainUnacceptedFiles([acceptedFile, laterFile], draft.files), [laterFile]);
+    assert.throws(() => draft.files.push(laterFile), TypeError);
 });
 
 test('withdrawal and escape-hatch states stay visible outside their modal', () => {
@@ -232,13 +290,29 @@ test('runtime initialization failures are actionable state rather than a frozen 
 
 test('each deployable proposal packages the same real Sepolia client with a distinct presentation flag', () => {
     const script = fs.readFileSync(path.join(root, 'scripts/package-browser-ux-proposal.sh'), 'utf8');
-    for (const proposal of ['quiet', 'guided', 'activity']) {
+    for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
         const vercel = JSON.parse(fs.readFileSync(path.join(root, `vercel.ux-${proposal}.json`), 'utf8'));
         assert.equal(vercel.buildCommand, `./scripts/package-browser-ux-proposal.sh ${proposal}`);
         assert.equal(vercel.outputDirectory, `dist/browser-ux-${proposal}`);
         assert.equal(vercel.rewrites[0].destination, 'https://d33l4w2z2nh4cg.cloudfront.net/:path*');
-        assert.match(script, new RegExp(`quiet\\|guided\\|activity`));
+        assert.match(script, new RegExp(`quiet\\|guided\\|activity\\|receipt\\|relay\\|ambient\\|capsule`));
     }
+});
+
+test('low-text proposals keep protocol detail behind disclosure and preserve the visible balance', () => {
+    const experience = fs.readFileSync(path.join(root, 'funding-page/components/ZkapiStateExperience.js'), 'utf8');
+    const templates = fs.readFileSync(path.join(root, 'funding-page/components/MessageTemplates.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'funding-page/zkapi.css'), 'utf8');
+    assert.match(experience, /renderLowTextPanel/);
+    assert.match(experience, /proposal === 'receipt'/);
+    assert.match(experience, /zkapi-composer-relay/);
+    assert.match(experience, /zkapi-composer-ambient-button/);
+    assert.match(experience, /zkapi-composer-capsule/);
+    assert.doesNotMatch(experience, /text = primary\.compact/);
+    assert.match(templates, /user-delivery-details/);
+    assert.match(templates, /resend-prompt-btn/);
+    assert.match(css, /prefers-reduced-motion: reduce/);
+    assert.match(css, /zkapi-composer-state--ambient/);
 });
 
 test('runtime progress comes from real zkAPI work rather than a fabricated percentage', () => {

@@ -4,6 +4,15 @@ const { pathToFileURL } = require('node:url');
 const test = require('node:test');
 
 const moduleUrl = pathToFileURL(path.join(__dirname, 'services/oaSseStream.mjs'));
+const streamingStateUrl = pathToFileURL(path.join(__dirname, 'domain/streamingState.js'));
+
+test('queued settlement remains distinct from access and response waits', async () => {
+    const { normalizePendingPhase } = await import(streamingStateUrl);
+    assert.equal(normalizePendingPhase('settling-previous'), 'settling-previous');
+    assert.equal(normalizePendingPhase('requesting-key'), 'requesting-key');
+    assert.equal(normalizePendingPhase('waiting'), 'requesting-key');
+    assert.equal(normalizePendingPhase('stream-open'), 'waiting-response');
+});
 
 test('OA SSE transport delivers complete lines before the response finishes', async () => {
     const { consumeSseBody } = await import(moduleUrl);
