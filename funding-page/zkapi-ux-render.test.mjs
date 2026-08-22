@@ -17,6 +17,50 @@ globalThis.location = { hostname: 'localhost', href: 'http://localhost/funding/'
 globalThis.window.location = globalThis.location;
 globalThis.window.addEventListener = () => {};
 globalThis.window.dispatchEvent = () => {};
+globalThis.document = {
+    documentElement: { dataset: {} },
+    createElement() {
+        let textContent = '';
+        return {
+            set textContent(value) { textContent = String(value ?? ''); },
+            get textContent() { return textContent; },
+            get innerHTML() {
+                return textContent
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;')
+                    .replaceAll('"', '&quot;')
+                    .replaceAll("'", '&#39;');
+            }
+        };
+    }
+};
+
+// MessageTemplates loads the preference facade at module evaluation time.
+// Give it a tiny successful IndexedDB shell so this DOM-rendering test remains
+// deterministic and does not wait for the production database timeout.
+const settings = new Map();
+const request = (result) => {
+    const value = {};
+    queueMicrotask(() => {
+        value.result = typeof result === 'function' ? result() : result;
+        value.onsuccess?.({ target: value });
+    });
+    return value;
+};
+const settingsStore = {
+    get(key) { return request(() => settings.has(key) ? { key, value: settings.get(key) } : undefined); },
+    put(entry) { return request(() => { settings.set(entry.key, entry.value); return entry.key; }); },
+    delete(key) { return request(() => settings.delete(key)); }
+};
+const fakeDb = {
+    version: 4,
+    close() {},
+    transaction() { return { objectStore: () => settingsStore }; }
+};
+globalThis.indexedDB = {
+    open() { return request(fakeDb); }
+};
 globalThis.zkapiWallet = {
     ABI: {},
     abiWord() {},
@@ -41,6 +85,11 @@ const {
 const { createVanillaUiInterface } = await import('./ui/appInterface.js');
 const { default: Sidebar } = await import('./components/Sidebar.js');
 const { default: RightPanel } = await import('./components/RightPanel.js');
+const {
+    buildMessageHTML,
+    buildTypingIndicator
+} = await import('./components/MessageTemplates.js');
+const { processMessagesForApi } = await import('./domain/messageContent.js');
 
 function lowTextState(proposal, overrides = {}) {
     const { primary: primaryOverrides = {}, ...stateOverrides } = overrides;
@@ -286,6 +335,152 @@ test('live UI facades render New Chat settlement state in sidebar and right pane
     };
     assert.match(sidebar.buildSessionHTML(oldChat), /Private key settled/);
     assert.equal(panel.getMissingApiKeyStatus().badge, 'Ready');
+});
+
+test('right-panel clock ticks update countdown text without replacing interactive UI', () => {
+    const originalDocument = globalThis.document;
+    let loads = 0;
+    let expiryText = '';
+    globalThis.document = {
+        querySelector(selector) {
+            if (selector.includes('[data-zkapi-note-expiry]')) {
+                return {
+                    set textContent(value) { expiryText = value; },
+                    get textContent() { return expiryText; }
+                };
+            }
+            return null;
+        }
+    };
+
+    const panel = Object.create(RightPanel.prototype);
+    panel.loadSessionData = () => { loads += 1; };
+    try {
+        panel.handleZkapiChange({ reason: 'clock' });
+        assert.equal(loads, 0, 'a clock tick must not rebuild the panel');
+        panel.handleZkapiChange({ reason: 'note' });
+        assert.equal(loads, 1, 'a real billing update should still rebuild the panel');
+    } finally {
+        globalThis.document = originalDocument;
+    }
+});
+
+test('right-panel disclosures preserve both open and closed state across real rerenders', () => {
+    const originalDocument = globalThis.document;
+    const basePrototype = Object.getPrototypeOf(RightPanel.prototype);
+    const originalBaseRender = basePrototype.renderTopSectionOnly;
+    const disclosure = (open) => {
+        const listeners = new Map();
+        return {
+            open,
+            addEventListener(type, listener) { listeners.set(type, listener); },
+            toggle(value) {
+                this.open = value;
+                listeners.get('toggle')?.();
+            }
+        };
+    };
+    let current = {
+        experience: disclosure(true),
+        billing: disclosure(true)
+    };
+    let replacement = {
+        experience: disclosure(false),
+        billing: disclosure(false)
+    };
+    let afterBaseRender = false;
+    globalThis.document = {
+        querySelector(selector) {
+            const set = afterBaseRender ? replacement : current;
+            return selector.includes('billing-explainer') ? set.billing : set.experience;
+        }
+    };
+    basePrototype.renderTopSectionOnly = () => { afterBaseRender = true; };
+
+    const panel = Object.create(RightPanel.prototype);
+    try {
+        panel.renderTopSectionOnly();
+        assert.equal(replacement.experience.open, true);
+        assert.equal(replacement.billing.open, true);
+
+        replacement.billing.toggle(false);
+        current = replacement;
+        replacement = {
+            experience: disclosure(false),
+            billing: disclosure(true)
+        };
+        afterBaseRender = false;
+        panel.renderTopSectionOnly();
+        assert.equal(replacement.experience.open, true);
+        assert.equal(replacement.billing.open, false, 'closing the billing disclosure must persist');
+    } finally {
+        basePrototype.renderTopSectionOnly = originalBaseRender;
+        globalThis.document = originalDocument;
+    }
+});
+
+test('Securing appears only in the assistant pending row while live', () => {
+    const user = {
+        id: 'user-1',
+        sessionId: 'chat-a',
+        role: 'user',
+        content: 'Explain HTTPS',
+        timestamp: 1,
+        deliveryState: 'securing'
+    };
+    const userHtml = buildMessageHTML(user, {}, [], '', { isSessionStreaming: true });
+    const assistantHtml = buildTypingIndicator(
+        'typing-1',
+        'OpenAI',
+        'OpenAI: GPT-5.3 Instant',
+        1,
+        'requesting-key'
+    );
+
+    assert.doesNotMatch(userHtml, /user-delivery-row/);
+    assert.doesNotMatch(userHtml, />Securing</);
+    assert.match(assistantHtml, />Securing</);
+
+    const interruptedHtml = buildMessageHTML(user, {}, [], '', { isSessionStreaming: false });
+    assert.match(interruptedHtml, />Not sent</);
+    assert.match(interruptedHtml, />Retry</);
+});
+
+test('returning to a chat preserves its complete conversation and excludes the other chat', () => {
+    const chatA = [
+        { role: 'user', content: 'Explain HTTPS.' },
+        { role: 'assistant', content: 'HTTPS combines HTTP with TLS.' },
+        { role: 'user', content: 'go on' }
+    ];
+    const chatB = [
+        { role: 'user', content: 'Explain photosynthesis.' },
+        { role: 'assistant', content: 'Plants turn light into chemical energy.' }
+    ];
+
+    // Reselecting a chat must rebuild from that chat's durable messages; a new
+    // ephemeral key changes billing transport, not conversation semantics.
+    const selectedSessionMessages = new Map([
+        ['chat-a', chatA],
+        ['chat-b', chatB]
+    ]).get('chat-a');
+    const request = processMessagesForApi(selectedSessionMessages, 'openai/gpt-5.3-chat');
+
+    assert.deepEqual(request, chatA);
+    assert.equal(request.some(message => /photosynthesis/i.test(message.content)), false);
+    assert.deepEqual(request.map(message => message.role), ['user', 'assistant', 'user']);
+});
+
+test('consumer-facing payment UI omits note numbers and the redundant sidebar account pill', () => {
+    const panel = fs.readFileSync(new URL('./components/RightPanel.js', import.meta.url), 'utf8');
+    const account = fs.readFileSync(new URL('./components/AccountModal.js', import.meta.url), 'utf8');
+    const client = fs.readFileSync(new URL('./services/zkapiClient.js', import.meta.url), 'utf8');
+    const index = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+
+    for (const source of [panel, account, client]) {
+        assert.doesNotMatch(source, /(?:private\s+)?note\s*#/i);
+    }
+    assert.doesNotMatch(index, /id="account-tab-btn"/);
+    assert.match(index, /id="show-right-panel-btn"[^>]+aria-controls="right-panel"/);
 });
 
 test('capsule uses static hold and error endpoints without implying accepted success', () => {

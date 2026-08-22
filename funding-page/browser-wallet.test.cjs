@@ -967,8 +967,11 @@ test('navigation generations keep delayed loads from stealing the selected compo
     const switchSession = sourceMethodAt(app, 'async switchSession(');
     const clear = sourceMethodAt(app, 'async clearCurrentSession(');
     const deleteSession = sourceMethodAt(app, 'async deleteSession(');
+    const send = sourceMethodAt(app, 'async sendMessage(');
+    const inputState = sourceMethodAt(app, 'updateInputState() {');
 
     assert.match(constructor, /this\.navigationGeneration = 0/);
+    assert.match(constructor, /this\.sessionSwitchInFlight = null/);
 
     const createGeneration = create.indexOf('++this.navigationGeneration');
     const createAwait = create.indexOf('await ');
@@ -985,6 +988,15 @@ test('navigation generations keep delayed loads from stealing the selected compo
     const switchAwait = switchSession.indexOf('await this.ensureSessionLoaded(sessionId)');
     const switchGate = switchSession.indexOf('this.navigationGeneration !== switchNavigationGeneration');
     assert.ok(switchGeneration >= 0 && switchAwait > switchGeneration && switchGate > switchAwait);
+    assert.match(switchSession, /sessionId === this\.state\.currentSessionId && !this\.sessionSwitchInFlight/);
+    assert.match(switchSession, /this\.sessionSwitchInFlight = transition/);
+    assert.match(switchSession, /await this\.renderMessages\(\)/);
+    assert.match(switchSession, /this\.state\.currentSessionId !== sessionId/);
+    assert.match(switchSession, /this\.sessionSwitchInFlight === transition/);
+    assert.match(send, /if \(this\.sessionSwitchInFlight\) return/);
+    assert.match(inputState, /const isSwitchingSession = Boolean\(this\.sessionSwitchInFlight\)/);
+    assert.match(inputState, /this\.elements\.messageInput\.disabled = isSwitchingSession/);
+    assert.match(inputState, /Loading selected chat/);
 
     const clearGeneration = clear.indexOf('++this.navigationGeneration');
     const clearAwait = clear.indexOf("await chatDB.getSetting('selectedModel')");
@@ -1017,6 +1029,95 @@ test('navigation generations keep delayed loads from stealing the selected compo
     assert.match(replacementBlock, /sessionStorage\.(?:setItem|removeItem)/);
     assert.match(replacementBlock, /this\.restoreChatbarStateForSession\(this\.state\.currentSessionId\)/);
     assert.match(replacementBlock, /this\.rightPanel\?\.onSessionChange/);
+});
+
+test('A → B → A navigation cannot bind a follow-up to the stale B session', async () => {
+    const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const switchSession = sourceMethodAt(source, 'async switchSession(');
+    const chatDB = { saveSetting() {} };
+    const inferenceService = { getCachedModels() { return []; } };
+    const Harness = Function(
+        'chatDB',
+        'inferenceService',
+        'SESSION_STORAGE_KEY',
+        `return class NavigationHarness { ${switchSession} };`
+    )(chatDB, inferenceService, 'current-session');
+
+    const originalSessionStorage = global.sessionStorage;
+    global.sessionStorage = { setItem() {}, removeItem() {} };
+    const deferred = () => {
+        let resolve;
+        const promise = new Promise(done => { resolve = done; });
+        return { promise, resolve };
+    };
+    const sessionA = { id: 'chat-a', model: 'model-a' };
+    const sessionB = { id: 'chat-b', model: 'model-b' };
+    const makeHarness = () => {
+        const instance = new Harness();
+        instance.navigationGeneration = 0;
+        instance.sessionSwitchInFlight = null;
+        instance.state = {
+            currentSessionId: sessionA.id,
+            sessions: [sessionA, sessionB],
+            sessionsById: new Map([[sessionA.id, sessionA], [sessionB.id, sessionB]])
+        };
+        instance.editingMessageId = null;
+        instance.editDrafts = new Map();
+        instance.chatInput = { updateSearchToggleUI() {} };
+        instance.updateInputState = () => {};
+        instance.saveCurrentSessionScrollPosition = () => {};
+        instance.saveChatbarStateForSession = () => {};
+        instance.updateUrlWithSession = () => {};
+        instance.hideScrollToBottomButton = () => {};
+        instance.renderSessions = () => {};
+        instance.renderCurrentModel = () => {};
+        instance.resetMessageInputLayout = () => {};
+        instance.restoreChatbarStateForSession = () => {};
+        instance.updateShareButtonUI = () => {};
+        instance.renderMessages = async () => {};
+        instance.isMobileView = () => false;
+        instance.rightPanel = null;
+        instance.floatingPanel = null;
+        instance.sidebar = null;
+        return instance;
+    };
+
+    try {
+        const loadB = deferred();
+        const app = makeHarness();
+        app.ensureSessionLoaded = async (sessionId) => {
+            if (sessionId === sessionB.id) await loadB.promise;
+        };
+
+        const staleB = app.switchSession(sessionB.id);
+        await Promise.resolve();
+        await app.switchSession(sessionA.id);
+        loadB.resolve();
+        await staleB;
+
+        assert.equal(app.state.currentSessionId, sessionA.id);
+        assert.equal(app.sessionSwitchInFlight, null);
+
+        const renderB = deferred();
+        const loadingApp = makeHarness();
+        const busyStates = [];
+        loadingApp.updateInputState = () => busyStates.push(Boolean(loadingApp.sessionSwitchInFlight));
+        loadingApp.ensureSessionLoaded = async () => {};
+        loadingApp.renderMessages = () => renderB.promise;
+        const loadingB = loadingApp.switchSession(sessionB.id);
+        for (let i = 0; i < 4 && loadingApp.state.currentSessionId !== sessionB.id; i += 1) {
+            await Promise.resolve();
+        }
+        assert.equal(loadingApp.state.currentSessionId, sessionB.id);
+        assert.equal(loadingApp.sessionSwitchInFlight?.targetSessionId, sessionB.id);
+        assert.equal(busyStates.at(-1), true);
+        renderB.resolve();
+        await loadingB;
+        assert.equal(loadingApp.sessionSwitchInFlight, null);
+        assert.equal(busyStates.at(-1), false);
+    } finally {
+        global.sessionStorage = originalSessionStorage;
+    }
 });
 
 test('forks copy the transcript without copying zkAPI access or stealing later navigation', () => {

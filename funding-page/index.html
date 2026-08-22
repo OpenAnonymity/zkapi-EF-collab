@@ -382,10 +382,6 @@
                     </div>
                 </div>
             </div>
-            <button id="account-tab-btn" data-status="none" class="account-tab-btn" type="button" aria-label="Private balance" aria-controls="account-modal" aria-expanded="false">
-                <span class="account-tab-dot" aria-hidden="true"></span>
-                <span data-private-balance-label>Private balance</span>
-            </button>
         </aside>
 
         <div class="flex flex-1 min-w-0">
@@ -430,7 +426,7 @@
                         </button>
 
                         <!-- Show Right Panel Button -->
-                        <button id="show-right-panel-btn" class="system-panel-toggle-btn inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none">
+                        <button id="show-right-panel-btn" class="system-panel-toggle-btn inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none" aria-label="Toggle system panel" aria-controls="right-panel" aria-expanded="false">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                                 <rect x="4" y="4" width="16" height="16" rx="2"/>
                                 <path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4V4z" fill="currentColor" fill-opacity="0.15" stroke="none"/>

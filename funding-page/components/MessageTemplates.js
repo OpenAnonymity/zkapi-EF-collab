@@ -604,6 +604,10 @@ function buildUserDeliveryReceipt(message, options = {}) {
     const interrupted = ['queued', 'securing', 'sending', 'sent'].includes(persistedState)
         && options.isSessionStreaming === false;
     const state = interrupted ? 'failed' : persistedState;
+    // The assistant placeholder is the single visible Securing indicator while
+    // a live send is preparing private access. Keep the persisted state for
+    // recovery, and still turn an interrupted Securing state into a retry row.
+    if (state === 'securing') return '';
     const copy = {
         queued: ['Queued', 'Accepted. Waiting for the previous private chat to finish.'],
         securing: ['Securing', 'Preparing private access for this message.'],

@@ -10,24 +10,57 @@ import { getZkapiExperience, renderZkapiPanelExperience } from './ZkapiStateExpe
 export default class RightPanel extends OaRightPanelBase {
     constructor(app) {
         super(app);
-        this.zkapiUnsubscribe = zkapiClient.subscribe(() => this.loadSessionData());
+        this.zkapiUnsubscribe = zkapiClient.subscribe((_snapshot, detail) => {
+            this.handleZkapiChange(detail);
+        });
+    }
+
+    handleZkapiChange(detail = {}) {
+        // The client clock exists for countdowns. OA's expiration timer already
+        // updates those values in place, so rebuilding the panel here would
+        // close disclosures, restart animations, and discard focus every second.
+        if (detail.reason === 'clock') {
+            const expiry = document.querySelector('#right-panel [data-zkapi-note-expiry]');
+            if (expiry && zkapiClient.note) {
+                expiry.textContent = `expires in ${zkapiClient.formatExpiry(zkapiClient.note.expiry_ts)}`;
+            }
+            return;
+        }
+        this.loadSessionData();
     }
 
     renderTopSectionOnly() {
-        const existingDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
-        const disclosureWasOpen = Boolean(this.zkapiDisclosureOpen || existingDisclosure?.open);
+        const existingExperienceDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
+        const existingBillingDisclosure = document.querySelector('#right-panel .zkapi-billing-explainer');
+        const experienceWasOpen = existingExperienceDisclosure
+            ? Boolean(existingExperienceDisclosure.open)
+            : Boolean(this.zkapiDisclosureOpen);
+        const billingWasOpen = existingBillingDisclosure
+            ? Boolean(existingBillingDisclosure.open)
+            : Boolean(this.zkapiBillingDisclosureOpen);
         super.renderTopSectionOnly();
 
-        const disclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
-        if (!disclosure) {
+        const experienceDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
+        if (experienceDisclosure) {
+            experienceDisclosure.open = experienceWasOpen;
+            this.zkapiDisclosureOpen = experienceDisclosure.open;
+            experienceDisclosure.addEventListener('toggle', () => {
+                this.zkapiDisclosureOpen = experienceDisclosure.open;
+            });
+        } else {
             this.zkapiDisclosureOpen = false;
-            return;
         }
-        disclosure.open = disclosureWasOpen;
-        this.zkapiDisclosureOpen = disclosure.open;
-        disclosure.addEventListener('toggle', () => {
-            this.zkapiDisclosureOpen = disclosure.open;
-        });
+
+        const billingDisclosure = document.querySelector('#right-panel .zkapi-billing-explainer');
+        if (billingDisclosure) {
+            billingDisclosure.open = billingWasOpen;
+            this.zkapiBillingDisclosureOpen = billingDisclosure.open;
+            billingDisclosure.addEventListener('toggle', () => {
+                this.zkapiBillingDisclosureOpen = billingDisclosure.open;
+            });
+        } else {
+            this.zkapiBillingDisclosureOpen = false;
+        }
     }
 
     loadSessionData() {
@@ -82,7 +115,7 @@ export default class RightPanel extends OaRightPanelBase {
             : experience.primary.busy
                 ? experience.primary.compact
                 : note
-                    ? `note #${note.note_id}`
+                    ? 'ready'
                     : 'not funded';
 
         return `
@@ -95,7 +128,7 @@ export default class RightPanel extends OaRightPanelBase {
                     <span class="max-w-[8.5rem] truncate rounded-full px-2 py-0.5 text-[9px] font-medium ${hasError || experience.primary.tone === 'error' ? 'bg-destructive/10 text-destructive' : experience.primary.busy ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200' : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${hasError ? 'unavailable' : this.escapeHtml(statusBadge)}</span>
                 </div>
                 <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600 transition-all" style="width:${percent}%"></div></div>
-                <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : 'Fund with MetaMask to chat'}</span></div>
+                <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span ${note ? 'data-zkapi-note-expiry' : ''}>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : 'Fund with MetaMask to chat'}</span></div>
                 ${chatBudget ? `<div class="mt-2 rounded-md bg-muted/50 px-2 py-1.5 text-[10px] text-muted-foreground"><span class="font-medium text-foreground">This chat:</span> up to ${this.escapeHtml(new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(Number(chatBudget)))} total model spend across responses and follow-ups</div>` : ''}
                 ${experienceHtml}
                 <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">

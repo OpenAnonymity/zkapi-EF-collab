@@ -543,7 +543,7 @@ class ZkapiClient extends EventTarget {
             expiry_ts: Number(deposited.expiryTs)
         });
         await this.refresh();
-        onStatus(`Private note #${Number(deposited.noteId)} is ready.`);
+        onStatus('Private balance is ready.');
         return {
             noteId: Number(deposited.noteId),
             amount: Number(plan.amount),
@@ -731,7 +731,7 @@ class ZkapiClient extends EventTarget {
             body: JSON.stringify(confirmation)
         });
         await this.refresh();
-        onStatus(`Private note #${Number(deposited.noteId)} is ready.`);
+        onStatus('Private balance is ready.');
         return { noteId: Number(deposited.noteId), amount: Number(amount), receipt };
     }
 
@@ -823,7 +823,7 @@ class ZkapiClient extends EventTarget {
             : await this.apiJson('/wallet/withdraw/confirm', { method: 'POST' });
         if (mode === 'mutual') {
             if (confirmed.status !== 'closed') {
-                throw new Error(`The vault still reports note #${note.note_id} as ${confirmed.status}.`);
+                throw new Error(`The vault still reports this private balance as ${confirmed.status}.`);
             }
             this.rememberWithdrawal(null);
             await this.refresh();

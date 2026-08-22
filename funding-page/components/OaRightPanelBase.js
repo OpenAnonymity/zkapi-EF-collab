@@ -541,6 +541,7 @@ class RightPanel {
 
         if (showBtn) {
             showBtn.classList.toggle('system-panel-toggle-visible', !this.isVisible);
+            showBtn.setAttribute('aria-expanded', this.isVisible ? 'true' : 'false');
         }
 
         if (appContainer) {
@@ -2694,7 +2695,7 @@ class RightPanel {
             <div style="min-height: calc(3rem + 1px);" class="px-3 bg-muted/10 flex items-center">
                 <div class="flex items-center justify-between w-full">
                     <h2 class="text-sm font-semibold text-foreground">System Panel</h2>
-                    <button id="close-right-panel" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none">
+                    <button id="close-right-panel" class="inline-flex items-center justify-center rounded-md transition-colors hover-highlight text-muted-foreground hover:text-foreground h-9 w-9 cursor-pointer select-none" aria-label="Close system panel">
                         <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
                             <rect x="4" y="4" width="16" height="16" rx="2"/>
                             <path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4V4z" fill="currentColor" fill-opacity="0.15" stroke="none"/>

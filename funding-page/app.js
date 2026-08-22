@@ -250,6 +250,7 @@ class ChatApp {
         this.accessAcquisitionInFlight = new Map(); // backend/session/model -> shared access acquisition
         this.sessionScrollPositions = new Map(); // Track scrollTop per session in-memory
         this.sessionChatbarStates = new Map(); // Track in-tab chatbar drafts per session
+        this.sessionSwitchInFlight = null; // Visible transcript must match the session that owns Send
         this.chatScrollSaveFrame = null;
         this.isAutoScrollPaused = false; // Track if auto-scroll is paused during streaming
         this.autoScrollPausedSessionIds = new Set();
@@ -3563,75 +3564,99 @@ class ChatApp {
      * @param {string} sessionId - ID of the session to switch to
      */
     async switchSession(sessionId) {
-        if (!sessionId || sessionId === this.state.currentSessionId) {
-            return;
-        }
-
+        if (!sessionId) return;
+        // A click on the currently visible chat still has meaning while an
+        // earlier navigation is loading: it cancels that stale destination.
+        // Only the fully settled current selection can be a no-op.
+        if (sessionId === this.state.currentSessionId && !this.sessionSwitchInFlight) return;
         const switchNavigationGeneration = ++this.navigationGeneration;
+
         const previousSessionId = this.state.currentSessionId;
-        await this.ensureSessionLoaded(sessionId);
+        const transition = {
+            generation: switchNavigationGeneration,
+            targetSessionId: sessionId
+        };
+        this.sessionSwitchInFlight = transition;
+        this.updateInputState();
 
-        // Another user action may have switched/cleared sessions while loading.
-        if (this.navigationGeneration !== switchNavigationGeneration
-            || this.state.currentSessionId !== previousSessionId) {
-            return;
-        }
+        try {
+            await this.ensureSessionLoaded(sessionId);
 
-        this.saveCurrentSessionScrollPosition();
-        if (previousSessionId) {
-            this.saveChatbarStateForSession(previousSessionId);
-        }
+            // Another user action may have switched/cleared sessions while loading.
+            if (this.navigationGeneration !== switchNavigationGeneration
+                || this.state.currentSessionId !== previousSessionId) {
+                return;
+            }
 
-        // Clear edit state when switching sessions
-        this.editingMessageId = null;
-        this.editDrafts.clear();
+            const session = this.state.sessionsById.get(sessionId)
+                || this.state.sessions.find(s => s.id === sessionId);
+            if (!session) return;
 
-        this.state.currentSessionId = sessionId;
-        this.isAutoScrollPaused = false;
-        sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-        chatDB.saveSetting('currentSessionId', sessionId);
+            this.saveCurrentSessionScrollPosition();
+            if (previousSessionId) {
+                this.saveChatbarStateForSession(previousSessionId);
+            }
 
-        // Keep current search state (global setting)
-        const session = this.state.sessionsById.get(sessionId) || this.state.sessions.find(s => s.id === sessionId);
-        this.cachedModelDisplayMetadata = inferenceService.getCachedModels(session);
-        if (session) {
+            // Clear edit state when switching sessions
+            this.editingMessageId = null;
+            this.editDrafts.clear();
+
+            this.state.currentSessionId = sessionId;
+            this.isAutoScrollPaused = false;
+            sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+            chatDB.saveSetting('currentSessionId', sessionId);
+
+            // Keep current search state (global setting)
+            this.cachedModelDisplayMetadata = inferenceService.getCachedModels(session);
             this.chatInput.updateSearchToggleUI();
-        }
 
-        // Update URL to reflect current session
-        this.updateUrlWithSession(sessionId);
+            // Update URL to reflect current session
+            this.updateUrlWithSession(sessionId);
 
-        // Clear message navigation immediately before switching to prevent showing stale data
-        if (this.messageNavigation) {
-            this.messageNavigation.hide();
-        }
+            // Clear message navigation immediately before switching to prevent showing stale data
+            if (this.messageNavigation) {
+                this.messageNavigation.hide();
+            }
 
-        // Hide scroll-to-bottom button immediately to prevent it from persisting
-        this.hideScrollToBottomButton();
+            // Hide scroll-to-bottom button immediately to prevent it from persisting
+            this.hideScrollToBottomButton();
 
-        this.renderSessions();
-        this.renderMessages();
-        this.renderCurrentModel();
-        if (this.sidebar && !this.isMobileView()) {
-            this.sidebar.scrollToSession(sessionId);
-        }
+            this.renderSessions();
+            this.renderCurrentModel();
 
-        // Update UI based on new session's streaming state
-        this.resetMessageInputLayout({ resetScroll: true });
-        this.restoreChatbarStateForSession(sessionId);
-        this.updateShareButtonUI();
+            // Update UI based on new session's streaming state. Keep Send gated
+            // until the durable transcript has actually replaced the old chat.
+            this.resetMessageInputLayout({ resetScroll: true });
+            this.restoreChatbarStateForSession(sessionId);
+            this.updateShareButtonUI();
 
-        // Notify right panel of session change
-        if (this.rightPanel && session) {
-            this.rightPanel.onSessionChange(session);
-        }
-        if (this.floatingPanel && session) {
-            this.floatingPanel.render();
-        }
+            // Notify right panel of session change
+            if (this.rightPanel) {
+                this.rightPanel.onSessionChange(session);
+            }
+            if (this.floatingPanel) {
+                this.floatingPanel.render();
+            }
 
-        // Close sidebar on mobile after switching session
-        if (this.isMobileView()) {
-            this.hideSidebar();
+            await this.renderMessages();
+            if (this.navigationGeneration !== switchNavigationGeneration
+                || this.state.currentSessionId !== sessionId) {
+                return;
+            }
+
+            if (this.sidebar && !this.isMobileView()) {
+                this.sidebar.scrollToSession(sessionId);
+            }
+
+            // Close sidebar on mobile after switching session
+            if (this.isMobileView()) {
+                this.hideSidebar();
+            }
+        } finally {
+            if (this.sessionSwitchInFlight === transition) {
+                this.sessionSwitchInFlight = null;
+                this.updateInputState();
+            }
         }
     }
 
@@ -6372,6 +6397,9 @@ class ChatApp {
     }
 
     async sendMessage(options = {}) {
+        // Never bind a prompt while the screen still shows another chat's
+        // transcript. The composer exposes a short loading state instead.
+        if (this.sessionSwitchInFlight) return;
         const targetSessionId = options.sessionId ?? this.state.currentSessionId ?? null;
         const exclusiveOwner = targetSessionId
             ? this.exclusiveSessionMutationOwners.get(targetSessionId) || null
@@ -7598,7 +7626,16 @@ class ChatApp {
                     ? 'Thinking'
                     : 'Securing';
         }
-        indicator.querySelector('.pending-response-line')?.setAttribute('data-phase', normalizedPhase);
+        const pendingLine = indicator.querySelector('.pending-response-line');
+        pendingLine?.setAttribute('data-phase', normalizedPhase);
+        pendingLine?.setAttribute(
+            'aria-label',
+            normalizedPhase === 'settling-previous'
+                ? 'Message accepted. Finishing the previous private chat.'
+                : normalizedPhase === 'waiting-response'
+                    ? 'Message sent. Waiting for the response.'
+                    : 'Preparing private access for this message.'
+        );
     }
 
     /**
@@ -10013,6 +10050,7 @@ class ChatApp {
     updateInputState() {
         const hasContent = this.elements.messageInput.value.trim() || this.uploadedFiles.length > 0;
         const isStreaming = this.isCurrentSessionStreaming();
+        const isSwitchingSession = Boolean(this.sessionSwitchInFlight);
         const currentSessionId = this.state.currentSessionId || null;
         const isWaitingForSettlement = Boolean(
             currentSessionId && this.pendingSettlementSendSessions.has(currentSessionId)
@@ -10028,13 +10066,15 @@ class ChatApp {
         // must become the normal enabled Stop control even though Delete still
         // tracks the mutation token until stream cleanup completes.
         const isTimelineTransitionBusy = isTimelineBusy && !isStreaming;
-        const isSendBusy = isAcceptingSend || isWaitingForSettlement || isTimelineTransitionBusy;
-        const shouldBeDisabled = isAcceptingSend
+        const isSendBusy = isSwitchingSession || isAcceptingSend || isWaitingForSettlement || isTimelineTransitionBusy;
+        const shouldBeDisabled = isSwitchingSession
+            || isAcceptingSend
             || isTimelineTransitionBusy
             || (!isStreaming && !hasContent);
 
-        // Don't disable input during streaming - allow typing
-        this.elements.messageInput.disabled = false;
+        // Don't disable input during streaming, except for the brief interval
+        // where the selected session and rendered transcript may not agree.
+        this.elements.messageInput.disabled = isSwitchingSession;
         this.elements.sendBtn.disabled = shouldBeDisabled;
 
         this.elements.sendBtn.classList.toggle('opacity-40', shouldBeDisabled && !isSendBusy);
@@ -10042,17 +10082,22 @@ class ChatApp {
         this.elements.sendBtn.removeAttribute('aria-busy');
 
         // Update button icon based on streaming state
-        if (isWaitingForSettlement || isTimelineTransitionBusy) {
+        if (isSwitchingSession || isWaitingForSettlement || isTimelineTransitionBusy) {
             this.elements.sendBtn.innerHTML = `
                 <span class="zkapi-send-orbit" aria-hidden="true"><i></i></span>
             `;
             this.elements.sendBtn.setAttribute(
                 'aria-label',
-                isWaitingForSettlement ? 'Cancel queued message' : 'Finishing chat action'
+                isSwitchingSession
+                    ? 'Loading selected chat'
+                    : isWaitingForSettlement
+                        ? 'Cancel queued message'
+                        : 'Finishing chat action'
             );
             this.elements.sendBtn.setAttribute('aria-busy', 'true');
             this.elements.sendBtn.classList.add('bg-primary', 'text-primary-foreground');
             this.elements.sendBtn.classList.remove('bg-destructive', 'hover:bg-destructive/90', 'text-destructive-foreground');
+            if (isSwitchingSession) this.elements.messageInput.placeholder = 'Loading chat…';
         } else if (isAcceptingSend) {
             this.elements.sendBtn.innerHTML = `
                 <svg viewBox="0 0 16 16" class="zkapi-send-check" aria-hidden="true"><path d="m3.25 8.25 3 3 6.5-6.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg>

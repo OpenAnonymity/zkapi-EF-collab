@@ -118,7 +118,7 @@ function operationJourney(activity) {
                     { id: 'confirm', label: 'Confirm deposit' },
                     { id: 'note', label: 'Save private note' }
                 ],
-                activeIndex: at(/saving/i, /note #/i, /ready/i) ? 2 : at(/connect/i) ? 0 : 1
+                activeIndex: at(/saving/i, /private balance/i, /ready/i) ? 2 : at(/connect/i) ? 0 : 1
             };
         case 'token':
             return {

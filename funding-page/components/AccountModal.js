@@ -192,7 +192,7 @@ export default class AccountModal {
                             <p class="text-xs text-muted-foreground">Available</p>
                             <p class="mt-1 text-2xl font-semibold tracking-tight text-foreground">${zkapiClient.formatMoney(note.current_balance)}</p>
                         </div>
-                        <span class="badge-status-success rounded-full px-2 py-1 text-[10px] font-medium">Private note #${note.note_id}</span>
+                        <span class="badge-status-success rounded-full px-2 py-1 text-[10px] font-medium">Ready</span>
                     </div>
                     <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600" style="width:${percent}%"></div></div>
                     <div class="mt-2 flex justify-between text-[11px] text-muted-foreground"><span>${zkapiClient.formatMoney(spent)} used</span><span>expires in ${zkapiClient.formatExpiry(note.expiry_ts)}</span></div>
@@ -235,7 +235,6 @@ export default class AccountModal {
                         <p class="mt-2 text-xs leading-relaxed text-muted-foreground">Your note is frozen. ${ready ? 'The safety window is complete.' : `Finalize in ${zkapiClient.formatExpiry(deadline)}.`}</p>
                     </div>
                     <dl class="zkapi-details">
-                        <div><dt>Note</dt><dd>#${withdrawal.noteId}</dd></div>
                         <div><dt>Destination</dt><dd>${zkapiClient.compact(withdrawal.destination, 9)}</dd></div>
                         <div><dt>Ready</dt><dd>${deadline ? new Date(deadline * 1000).toLocaleString() : 'Checking…'}</dd></div>
                     </dl>
@@ -251,7 +250,7 @@ export default class AccountModal {
             <div class="p-5 space-y-4">
                 <div class="flex items-center justify-between rounded-lg border border-border bg-muted/20 px-4 py-3">
                     <div><p class="text-xs text-muted-foreground">Amount returned</p><p data-withdraw-amount class="mt-0.5 text-lg font-semibold text-foreground">${zkapiClient.formatMoney(note?.current_balance)}</p></div>
-                    <span class="text-xs text-muted-foreground">Note #${note?.note_id ?? '—'}</span>
+                    <span class="text-xs text-muted-foreground">Private balance</span>
                 </div>
                 <fieldset class="space-y-2" ${this.busy ? 'disabled' : ''}>
                     <legend class="mb-2 text-xs font-medium text-foreground">Withdrawal method</legend>
