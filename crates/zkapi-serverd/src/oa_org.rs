@@ -43,7 +43,7 @@ pub struct OaOrgCreatedKey {
 
 #[derive(Debug, Clone)]
 pub enum OaOrgUsage {
-    Pending,
+    Pending { retry_after_seconds: u64 },
     Finalized(OaOrgFinalUsage),
 }
 
@@ -97,6 +97,7 @@ struct OaOrgUsageResponse {
     client_request_id: String,
     station_request_id: String,
     key_hash: String,
+    retry_after_seconds: Option<u64>,
     usage_credits: Option<u128>,
     credit_limit_credits: Option<u128>,
     expires_at_unix: Option<u64>,
@@ -248,6 +249,10 @@ impl OaOrgProvisioner {
         let response: OaOrgUsageResponse = serde_json::from_str(&text).map_err(|error| {
             ServerError::Internal(format!("invalid OA org usage response: {error}"))
         })?;
+        let pending_retry_after_seconds = retry_after_header(&headers)
+            .or(response.retry_after_seconds)
+            .unwrap_or(1)
+            .max(1);
         validate_usage_response(
             response,
             client_request_id,
@@ -255,6 +260,7 @@ impl OaOrgProvisioner {
             expectation.limit_credits,
             expectation.minimum_expires_at,
             expectation.maximum_expires_at,
+            pending_retry_after_seconds,
         )
     }
 }
@@ -463,6 +469,7 @@ fn validate_usage_response(
     expected_limit_credits: u128,
     minimum_expires_at: u64,
     maximum_expires_at: u64,
+    pending_retry_after_seconds: u64,
 ) -> Result<OaOrgUsage, ServerError> {
     let common_matches = response.source == "oa_org"
         && response.version == 1
@@ -479,7 +486,9 @@ fn validate_usage_response(
         ));
     }
     if response.status == "pending" {
-        return Ok(OaOrgUsage::Pending);
+        return Ok(OaOrgUsage::Pending {
+            retry_after_seconds: pending_retry_after_seconds.max(1),
+        });
     }
     let (
         Some(usage_credits),
@@ -669,6 +678,64 @@ mod tests {
         assert!(error.is_retriable());
     }
 
+    #[tokio::test]
+    async fn get_key_usage_preserves_pending_retry_after_header() {
+        async fn pending() -> (
+            StatusCode,
+            [(axum::http::HeaderName, &'static str); 1],
+            Json<Value>,
+        ) {
+            (
+                StatusCode::OK,
+                [(axum::http::header::RETRY_AFTER, "15")],
+                Json(json!({
+                    "source": "oa_org",
+                    "version": 1,
+                    "status": "pending",
+                    "client_request_id": "request-12345678",
+                    "station_request_id": "ab".repeat(32),
+                    "key_hash": "provider-hash",
+                    "retry_after_seconds": 7
+                })),
+            )
+        }
+
+        let app = Router::new().route("/api/zkapi/key_usage", post(pending));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provisioner = OaOrgProvisioner::new(
+            format!("http://127.0.0.1:{}", address.port()),
+            "shared-secret".to_string(),
+        )
+        .unwrap();
+
+        let usage = provisioner
+            .get_key_usage(
+                "request-12345678",
+                "provider-hash",
+                OaOrgUsageExpectation {
+                    credit_limit_usd: 10.0,
+                    duration_minutes: 5,
+                    limit_credits: 10_000_000,
+                    minimum_expires_at: 1_000,
+                    maximum_expires_at: 1_030,
+                },
+            )
+            .await
+            .unwrap();
+        server.abort();
+
+        assert!(matches!(
+            usage,
+            OaOrgUsage::Pending {
+                retry_after_seconds: 15
+            }
+        ));
+    }
+
     #[test]
     fn signatures_require_exact_ed25519_hex_encoding() {
         assert!(is_hex_signature(&"ab".repeat(64)));
@@ -703,6 +770,7 @@ mod tests {
             client_request_id: "request-12345678".to_string(),
             station_request_id: "ab".repeat(32),
             key_hash: "provider-hash".to_string(),
+            retry_after_seconds: None,
             usage_credits: Some(123),
             credit_limit_credits: Some(10_000),
             expires_at_unix: Some(1_000),
@@ -719,8 +787,48 @@ mod tests {
             10_000,
             970,
             1_000,
+            1,
         )
         .unwrap();
         assert!(matches!(usage, OaOrgUsage::Finalized(_)));
+    }
+
+    #[test]
+    fn pending_usage_preserves_the_oa_retry_boundary() {
+        let response = OaOrgUsageResponse {
+            source: "oa_org".to_string(),
+            version: 1,
+            status: "pending".to_string(),
+            client_request_id: "request-12345678".to_string(),
+            station_request_id: "ab".repeat(32),
+            key_hash: "provider-hash".to_string(),
+            retry_after_seconds: Some(7),
+            usage_credits: None,
+            credit_limit_credits: None,
+            expires_at_unix: None,
+            closed_at_unix: None,
+            finalized_at_unix: None,
+            station_id: None,
+            station_signature: None,
+            org_signature: None,
+        };
+
+        let usage = validate_usage_response(
+            response,
+            "request-12345678",
+            "provider-hash",
+            10_000,
+            970,
+            1_000,
+            15,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            usage,
+            OaOrgUsage::Pending {
+                retry_after_seconds: 15
+            }
+        ));
     }
 }

@@ -100,7 +100,15 @@ function isExplicitlyRetriableLeaseError(error) {
     // These responses require a new proof or local lost-key reconciliation;
     // repeatedly sending the same lease request cannot resolve either state.
     return explicitlyRetriable
-        && !['stale_root', 'lease_pending'].includes(error?.code);
+        && !['stale_root', 'lease_pending', 'lease_settlement_pending'].includes(error?.code);
+}
+
+function isExplicitlyRetriableLeaseRetirementError(error) {
+    const explicitlyRetriable = error?.data?.retriable === true
+        || error?.data?.error?.retriable === true;
+    return isExplicitlyRetriableLeaseError(error)
+        || (explicitlyRetriable
+            && ['lease_pending', 'lease_settlement_pending'].includes(error?.code));
 }
 
 function isLeaseRateLimit(error) {
@@ -901,7 +909,7 @@ class BrowserWalletRuntime extends EventTarget {
                 const backoffDelayMs = Math.min(1_000 * (2 ** Math.max(0, attempt - 1)), 10_000);
                 const advertisedRetryMs = leaseRetryAfterMilliseconds(error);
                 const retryDelayMs = Math.max(backoffDelayMs, advertisedRetryMs || 0);
-                if (!isExplicitlyRetriableLeaseError(error)
+                if (!isExplicitlyRetriableLeaseRetirementError(error)
                     || now() + retryDelayMs > deadline) {
                     throw error;
                 }

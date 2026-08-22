@@ -401,7 +401,9 @@ fn build_error_response(
         | ServerError::ProtocolMismatch(_) => StatusCode::BAD_REQUEST,
         ServerError::StaleRoot { .. } => StatusCode::CONFLICT,
         ServerError::Replay | ServerError::NullifierUsed => StatusCode::CONFLICT,
-        ServerError::LeasePending => StatusCode::CONFLICT,
+        ServerError::LeasePending | ServerError::LeaseSettlementPending { .. } => {
+            StatusCode::CONFLICT
+        }
         ServerError::NoteExpired => StatusCode::GONE,
         ServerError::CapacityExhausted => StatusCode::SERVICE_UNAVAILABLE,
         ServerError::Internal(_) | ServerError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -412,6 +414,9 @@ fn build_error_response(
         ServerError::OaRateLimited {
             retry_after_seconds,
             ..
+        }
+        | ServerError::LeaseSettlementPending {
+            retry_after_seconds,
         } => Some(*retry_after_seconds),
         _ => None,
     };
@@ -511,6 +516,22 @@ mod rate_limit_tests {
         let serialized = serde_json::to_value(response).unwrap();
         assert_eq!(serialized["retry_after_seconds"], 37);
         assert_eq!(serialized["error_code"], "oa_hourly_issuance_budget");
+    }
+
+    #[test]
+    fn lease_settlement_pending_maps_to_retriable_409_with_retry_metadata() {
+        let error = ServerError::LeaseSettlementPending {
+            retry_after_seconds: 15,
+        };
+
+        let (status, headers, Json(response)) =
+            build_error_response(&error, "lease-request-123", None);
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(headers.get(RETRY_AFTER).unwrap(), "15");
+        assert_eq!(response.error_code, "lease_settlement_pending");
+        assert!(response.retriable);
+        assert_eq!(response.retry_after_seconds, Some(15));
     }
 }
 

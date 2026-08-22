@@ -97,6 +97,10 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const UPDATE_CHECK_INITIAL_DELAY_MS = 45 * 1000;
 const SESSION_TITLE_MAX_LENGTH = 60;
 const SESSION_TITLE_FALLBACK_LENGTH = 50;
+// OA station disables a key immediately, then finalizes its signed usage after
+// a short safety grace. Keep a full grace margin so the boundary poll cannot
+// strand an already-accepted send in the new chat.
+const NEW_CHAT_SETTLEMENT_DEADLINE_MS = 45_000;
 
 // Layout constants for toolbar overlay prediction
 const SIDEBAR_WIDTH = 220;      // Default sidebar width = minimum width
@@ -4047,7 +4051,7 @@ class ChatApp {
             const stopped = await this.cancelPendingSendsAndWait([ownerSessionId], { timeoutMs: 15_000 });
             if (!stopped) throw new Error('The previous response is still stopping.');
 
-            const deadline = Date.now() + 15_000;
+            const deadline = Date.now() + NEW_CHAT_SETTLEMENT_DEADLINE_MS;
             while (true) {
                 const currentLease = zkapiClient.activeLease;
                 // A canceled access acquisition can finish just after New Chat.
@@ -4059,12 +4063,24 @@ class ChatApp {
                     await zkapiClient.settleActiveLease();
                     break;
                 } catch (error) {
-                    const retryable = ['lease_requests_in_flight', 'lease_pending'].includes(error?.code)
+                    const retryable = [
+                        'lease_requests_in_flight',
+                        'lease_pending',
+                        'lease_settlement_pending'
+                    ].includes(error?.code)
                         || /still (?:settling|being finalized)/i.test(error?.message || '');
-                    if (!retryable || Date.now() >= deadline) {
+                    const retryAfterSeconds = Number(
+                        error?.data?.retry_after_seconds
+                        ?? error?.data?.error?.retry_after_seconds
+                    );
+                    const retryDelayMs = Number.isFinite(retryAfterSeconds)
+                        && retryAfterSeconds >= 0
+                        ? Math.max(100, Math.ceil(retryAfterSeconds * 1_000))
+                        : 100;
+                    if (!retryable || Date.now() + retryDelayMs > deadline) {
                         throw error;
                     }
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
                 }
             }
 

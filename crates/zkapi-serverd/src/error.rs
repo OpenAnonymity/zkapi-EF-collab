@@ -39,6 +39,11 @@ pub enum ServerError {
     LeasePending,
 
     #[error(
+        "OpenRouter lease settlement is still pending; retry after {retry_after_seconds} seconds"
+    )]
+    LeaseSettlementPending { retry_after_seconds: u64 },
+
+    #[error(
         "OA org key issuance was rate limited ({reason}); retry after {retry_after_seconds} seconds"
     )]
     OaRateLimited {
@@ -62,6 +67,7 @@ impl ServerError {
             ServerError::InvalidRequest(_) => "invalid_request",
             ServerError::ProtocolMismatch(_) => "protocol_mismatch",
             ServerError::LeasePending => "lease_pending",
+            ServerError::LeaseSettlementPending { .. } => "lease_settlement_pending",
             ServerError::OaRateLimited { reason, .. } => reason,
         }
     }
@@ -80,6 +86,7 @@ impl ServerError {
             ServerError::InvalidRequest(_) => false,
             ServerError::ProtocolMismatch(_) => false,
             ServerError::LeasePending => true,
+            ServerError::LeaseSettlementPending { .. } => true,
             ServerError::OaRateLimited { .. } => true,
         }
     }

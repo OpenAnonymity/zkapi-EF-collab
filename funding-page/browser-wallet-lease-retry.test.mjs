@@ -346,3 +346,81 @@ test('lease retirement honors Retry-After without changing the settlement reques
     assert.ok(bodies.every(body => body === bodies[0]));
     assert.deepEqual(JSON.parse(bodies[0]), request);
 });
+
+test('lease retirement crosses the OA finalization boundary with the exact original request', async () => {
+    const runtime = runtimeForLeaseRequests();
+    const request = {
+        client_request_id: 'settlement-boundary-request',
+        proof: { a: ['proof-must-not-change'] },
+        public_inputs: { solvency_bound: 25_000_000 }
+    };
+    const pending = [
+        new BrowserWalletHttpError(
+            'OpenRouter lease is already active or awaiting settlement',
+            409,
+            'lease_pending',
+            { retriable: true, retry_after_seconds: 4 }
+        ),
+        new BrowserWalletHttpError(
+            'OpenRouter lease settlement is still pending',
+            409,
+            'lease_settlement_pending',
+            { retriable: true, retry_after_seconds: 11 }
+        )
+    ];
+    const bodies = [];
+    const waits = [];
+    let clock = 0;
+    runtime.remoteJson = async (_url, init) => {
+        bodies.push(init.body);
+        const error = pending.shift();
+        if (error) throw error;
+        return { status: 'finalized' };
+    };
+
+    const result = await runtime.retireRequest(request.client_request_id, request, null, {
+        maxWaitMs: 45_000,
+        now: () => clock,
+        sleep: async milliseconds => {
+            waits.push(milliseconds);
+            clock += milliseconds;
+        }
+    });
+
+    assert.equal(result.status, 'finalized');
+    assert.deepEqual(waits, [4_000, 11_000]);
+    assert.equal(clock, 15_000);
+    assert.equal(bodies.length, 3);
+    assert.ok(bodies.every(body => body === bodies[0]));
+    assert.deepEqual(JSON.parse(bodies[0]), request);
+});
+
+for (const code of ['lease_pending', 'lease_settlement_pending']) {
+    test(`lease issuance never retries retirement-only ${code}`, async () => {
+        const runtime = runtimeForLeaseRequests();
+        const error = new BrowserWalletHttpError(
+            'The previous lease is still settling.',
+            409,
+            code,
+            { retriable: true, retry_after_seconds: 15 }
+        );
+        let attempts = 0;
+        let sleeps = 0;
+        runtime.remoteJson = async () => {
+            attempts += 1;
+            throw error;
+        };
+
+        await assert.rejects(
+            runtime.requestLeaseWithRetry(
+                { client_request_id: `issuance-${code}` },
+                () => {},
+                null,
+                { sleep: async () => { sleeps += 1; } }
+            ),
+            candidate => candidate === error
+        );
+        assert.equal(attempts, 1);
+        assert.equal(sleeps, 0);
+    });
+}

@@ -267,12 +267,16 @@ test('New Chat opens immediately and settles its previous lease in the backgroun
     );
 
     const helper = app.slice(helperStart, app.indexOf('/**', helperStart));
+    assert.match(app, /const NEW_CHAT_SETTLEMENT_DEADLINE_MS = 45_000/);
     assert.match(helper, /this\.newChatSettlementPromise = settlement/);
     assert.match(helper, /await this\.cancelPendingSendsAndWait/);
     assert.match(helper, /const currentLease = zkapiClient\.activeLease/);
     assert.match(helper, /currentLease\.session_id !== ownerSessionId/);
     assert.match(helper, /await zkapiClient\.settleActiveLease\(\)/);
-    assert.match(helper, /\['lease_requests_in_flight', 'lease_pending'\]\.includes\(error\?\.code\)/);
+    assert.match(helper, /Date\.now\(\) \+ NEW_CHAT_SETTLEMENT_DEADLINE_MS/);
+    assert.match(helper, /'lease_requests_in_flight',[\s\S]*'lease_pending',[\s\S]*'lease_settlement_pending'/);
+    assert.match(helper, /error\?\.data\?\.retry_after_seconds/);
+    assert.match(helper, /Date\.now\(\) \+ retryDelayMs > deadline/);
     assert.match(helper, /inferenceService\.clearAccessInfo\(ownerSession\)/);
     assert.match(helper, /phase: 'settling'/);
     assert.match(helper, /phase: 'ready'/);
@@ -322,12 +326,14 @@ test('New Chat settlement logs through the application service without a compone
         'inferenceService',
         'chatDB',
         'networkLogger',
+        'NEW_CHAT_SETTLEMENT_DEADLINE_MS',
         `return class SettlementHarness { ${method} };`
     )(
         zkapiClient,
         { clearAccessInfo() {} },
         { async saveSession() {} },
-        networkLogger
+        networkLogger,
+        45_000
     );
     const app = new Harness();
     app.state = { sessionsById: new Map([[session.id, session]]) };

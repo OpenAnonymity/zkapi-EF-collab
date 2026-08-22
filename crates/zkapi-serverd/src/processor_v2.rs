@@ -535,8 +535,15 @@ impl RequestProcessor {
                 },
             )
             .await?;
-        let OaOrgUsage::Finalized(receipt) = receipt else {
-            return Err(ServerError::LeasePending);
+        let receipt = match receipt {
+            OaOrgUsage::Finalized(receipt) => receipt,
+            OaOrgUsage::Pending {
+                retry_after_seconds,
+            } => {
+                return Err(ServerError::LeaseSettlementPending {
+                    retry_after_seconds,
+                })
+            }
         };
         if receipt.closed_at < lease.issued_at {
             return Err(ServerError::Internal(
