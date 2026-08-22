@@ -22,7 +22,7 @@ use crate::dashboard::{
 };
 use crate::error::ServerError;
 use crate::nullifier_store::{api_request_binding, NullifierStore, TranscriptRecord};
-use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner, OaOrgUsage};
+use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner, OaOrgUsage, OaOrgUsageExpectation};
 use crate::openrouter::OpenRouterProvisioner;
 use crate::pricing;
 use crate::provider::{ApiProvider, ProviderResponse, UsageInfo};
@@ -509,16 +509,29 @@ impl RequestProcessor {
         let provisioner = self.oa_org.as_ref().ok_or_else(|| {
             ServerError::Internal("OA org lease provider is unavailable".to_string())
         })?;
+        let lease_config = self.config.openrouter_leases.as_ref().ok_or_else(|| {
+            ServerError::Internal("OA org lease configuration is unavailable".to_string())
+        })?;
+        if lease_config.ttl_seconds == 0 || !lease_config.ttl_seconds.is_multiple_of(60) {
+            return Err(ServerError::Internal(
+                "OA org lease duration is not a positive whole number of minutes".to_string(),
+            ));
+        }
+        let duration_minutes = lease_config.ttl_seconds / 60;
         let expected_limit_credits = pricing::usd_to_credits(lease.spending_limit_usd);
         let receipt = provisioner
             .get_key_usage(
                 &lease.client_request_id,
                 key_hash,
-                expected_limit_credits,
-                lease.expires_at,
-                lease
-                    .expires_at
-                    .saturating_add(OA_LEASE_EXPIRY_SAFETY_SECONDS),
+                OaOrgUsageExpectation {
+                    credit_limit_usd: lease.spending_limit_usd,
+                    duration_minutes,
+                    limit_credits: expected_limit_credits,
+                    minimum_expires_at: lease.expires_at,
+                    maximum_expires_at: lease
+                        .expires_at
+                        .saturating_add(OA_LEASE_EXPIRY_SAFETY_SECONDS),
+                },
             )
             .await?;
         let OaOrgUsage::Finalized(receipt) = receipt else {

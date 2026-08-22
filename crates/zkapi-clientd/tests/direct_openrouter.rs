@@ -402,6 +402,9 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             return Err(StatusCode::UNAUTHORIZED);
         }
         let key_hash = body["key_hash"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+        if body["credit_limit"] != 0.005 || body["duration_minutes"] != 1 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let (client_request_id, expires_at) = state
             .flow
             .leases
@@ -410,7 +413,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             .get(key_hash)
             .cloned()
             .ok_or(StatusCode::NOT_FOUND)?;
-        if body["client_request_id"] != client_request_id {
+        if body["client_request_id"] != client_request_id || body["expires_at_unix"] != expires_at {
             return Err(StatusCode::CONFLICT);
         }
         let poll = {

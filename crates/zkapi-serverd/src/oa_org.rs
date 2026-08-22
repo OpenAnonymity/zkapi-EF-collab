@@ -58,6 +58,15 @@ pub struct OaOrgFinalUsage {
     pub org_signature: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OaOrgUsageExpectation {
+    pub credit_limit_usd: f64,
+    pub duration_minutes: u64,
+    pub limit_credits: u128,
+    pub minimum_expires_at: u64,
+    pub maximum_expires_at: u64,
+}
+
 pub struct OaOrgProvisioner {
     http: reqwest::Client,
     base_url: String,
@@ -190,13 +199,11 @@ impl OaOrgProvisioner {
         })
     }
 
-    pub async fn get_key_usage(
+    pub(crate) async fn get_key_usage(
         &self,
         client_request_id: &str,
         key_hash: &str,
-        expected_limit_credits: u128,
-        minimum_expires_at: u64,
-        maximum_expires_at: u64,
+        expectation: OaOrgUsageExpectation,
     ) -> Result<OaOrgUsage, ServerError> {
         let response = self
             .http
@@ -205,6 +212,13 @@ impl OaOrgProvisioner {
             .json(&json!({
                 "client_request_id": client_request_id,
                 "key_hash": key_hash,
+                // The org persists this metadata for new leases. Supplying it
+                // here also lets the authenticated relay settle leases issued
+                // before that metadata existed; the station independently
+                // checks both values against its signed issuance binding.
+                "credit_limit": expectation.credit_limit_usd,
+                "duration_minutes": expectation.duration_minutes,
+                "expires_at_unix": expectation.maximum_expires_at,
             }))
             .send()
             .await
@@ -235,9 +249,9 @@ impl OaOrgProvisioner {
             response,
             client_request_id,
             key_hash,
-            expected_limit_credits,
-            minimum_expires_at,
-            maximum_expires_at,
+            expectation.limit_credits,
+            expectation.minimum_expires_at,
+            expectation.maximum_expires_at,
         )
     }
 }
