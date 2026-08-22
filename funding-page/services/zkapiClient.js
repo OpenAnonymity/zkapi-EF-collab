@@ -85,7 +85,10 @@ class ZkapiClient extends EventTarget {
             }
             this.attachWalletEvents();
             this.refreshTimer = window.setInterval(() => this.refresh({ quiet: true }), 15_000);
-            this.clockTimer = window.setInterval(() => this.emitChange('clock'), 1_000);
+            // Time-only ticks have their own channel. Publishing them as a
+            // semantic state change caused every subscriber to rebuild UI once
+            // per second, disconnecting animated nodes and resetting focus.
+            this.clockTimer = window.setInterval(() => this.emitClock(), 1_000);
             this.initialized = true;
             return this.snapshot();
         })().catch((error) => {
@@ -131,6 +134,21 @@ class ZkapiClient extends EventTarget {
             initialized: this.initialized,
             activities: this.activities.map(activity => ({ ...activity }))
         };
+    }
+
+    runtimeStateSignature() {
+        const error = this.lastError ? {
+            name: this.lastError.name || null,
+            code: this.lastError.code || null,
+            status: this.lastError.status || null,
+            message: this.lastError.shortMessage || this.lastError.message || String(this.lastError)
+        } : null;
+        return JSON.stringify({
+            config: this.config,
+            wallet: this.wallet,
+            withdrawal: this.withdrawal,
+            error
+        });
     }
 
     beginActivity(kind, details = {}) {
@@ -203,6 +221,18 @@ class ZkapiClient extends EventTarget {
         return () => this.removeEventListener('change', handler);
     }
 
+    subscribeClock(listener) {
+        const handler = (event) => listener(event.detail);
+        this.addEventListener('clock', handler);
+        return () => this.removeEventListener('clock', handler);
+    }
+
+    emitClock() {
+        this.dispatchEvent(new CustomEvent('clock', {
+            detail: { now: Date.now() }
+        }));
+    }
+
     emitChange(reason = 'update') {
         this.dispatchEvent(new CustomEvent('change', { detail: { reason } }));
         window.dispatchEvent(new CustomEvent('zkapi-state-changed', {
@@ -210,11 +240,11 @@ class ZkapiClient extends EventTarget {
         }));
     }
 
-    rememberWithdrawal(value) {
+    rememberWithdrawal(value, { emit = true } = {}) {
         this.withdrawal = value;
         if (value) localStorage.setItem(WITHDRAWAL_STORAGE_KEY, JSON.stringify(value));
         else localStorage.removeItem(WITHDRAWAL_STORAGE_KEY);
-        this.emitChange('withdrawal');
+        if (emit) this.emitChange('withdrawal');
     }
 
     async apiJson(path, options = {}) {
@@ -243,6 +273,7 @@ class ZkapiClient extends EventTarget {
     }
 
     async refresh({ quiet = false } = {}) {
+        const stateBeforeRefresh = this.runtimeStateSignature();
         if (!quiet) {
             this.loading = true;
             this.emitChange('loading');
@@ -265,16 +296,22 @@ class ZkapiClient extends EventTarget {
                     mode: prepared.mode,
                     noteId: prepared.note_id,
                     destination: prepared.destination
-                });
-            } else if (!wallet?.note && !prepared) {
-                this.rememberWithdrawal(null);
+                }, { emit: false });
+            } else if (!wallet?.note && !prepared && this.withdrawal) {
+                this.rememberWithdrawal(null, { emit: false });
             }
         } catch (error) {
             this.lastError = error;
             if (!quiet) throw error;
         } finally {
             this.loading = false;
-            this.emitChange(this.lastError ? 'error' : 'runtime');
+            // Periodic/browser-runtime refreshes often return byte-for-byte
+            // equivalent state. Do not fan those out as semantic UI changes;
+            // full panel/modal renders would otherwise replay animations even
+            // though nothing users can act on changed.
+            if (!quiet || stateBeforeRefresh !== this.runtimeStateSignature()) {
+                this.emitChange(this.lastError ? 'error' : 'runtime');
+            }
         }
         return this.snapshot();
     }

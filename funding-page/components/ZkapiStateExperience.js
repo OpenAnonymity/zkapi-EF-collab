@@ -223,10 +223,16 @@ export function renderZkapiComposerStatus(element, app, stateOverride = null) {
         primary.busy,
         primary.title,
         primary.detail,
-        primary.compact
+        primary.compact,
+        visualStateLabel(primary),
+        proposal === 'guided'
+            ? state.journey.map(step => [step.id, step.label, step.state])
+            : null
     ]);
-    if (['receipt', 'relay', 'ambient', 'capsule'].includes(proposal)
-        && element.dataset.zkapiStateSignature === visualSignature) {
+    // Assigning identical innerHTML still destroys and recreates descendants,
+    // restarting spinners, orbits, and entrance animations. Every proposal can
+    // safely retain its DOM while its complete rendered state is unchanged.
+    if (element.dataset.zkapiStateSignature === visualSignature) {
         return;
     }
     element.dataset.zkapiStateSignature = visualSignature;

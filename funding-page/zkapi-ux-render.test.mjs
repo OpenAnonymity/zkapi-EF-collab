@@ -85,6 +85,9 @@ const {
 const { createVanillaUiInterface } = await import('./ui/appInterface.js');
 const { default: Sidebar } = await import('./components/Sidebar.js');
 const { default: RightPanel } = await import('./components/RightPanel.js');
+const { default: AccountModal } = await import('./components/AccountModal.js');
+const { default: WelcomePanel } = await import('./components/WelcomePanel.js');
+const { default: zkapiClient } = await import('./services/zkapiClient.js');
 const {
     buildMessageHTML,
     buildTypingIndicator
@@ -117,10 +120,21 @@ function lowTextState(proposal, overrides = {}) {
 
 function composerElement() {
     const attributes = new Map();
+    let innerHTML = '';
+    let innerHTMLWrites = 0;
     return {
         className: '',
-        innerHTML: '',
         dataset: {},
+        set innerHTML(value) {
+            innerHTML = String(value);
+            innerHTMLWrites += 1;
+        },
+        get innerHTML() {
+            return innerHTML;
+        },
+        get innerHTMLWrites() {
+            return innerHTMLWrites;
+        },
         setAttribute(name, value) {
             attributes.set(name, String(value));
         },
@@ -238,6 +252,55 @@ test('passive state clears the visual signature so the same active phase renders
     assert.match(element.innerHTML, />Queued</);
 });
 
+test('unchanged clock renders retain composer descendants for every UX proposal', () => {
+    for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
+        const state = lowTextState(proposal, {
+            journey: [
+                { id: 'balance', label: 'Check balance', state: 'complete' },
+                { id: 'key', label: 'Create private key', state: 'active' }
+            ]
+        });
+        const element = composerElement();
+
+        renderZkapiComposerStatus(element, null, state);
+        const writesAfterFirstRender = element.innerHTMLWrites;
+        renderZkapiComposerStatus(element, null, state);
+
+        assert.equal(
+            element.innerHTMLWrites,
+            writesAfterFirstRender,
+            `${proposal} must not replace identical animated descendants`
+        );
+    }
+});
+
+test('composer memoization still renders changed labels and guided journey steps', () => {
+    const element = composerElement();
+    const activityState = lowTextState('receipt', {
+        primary: { phase: 'requesting', activity: { kind: 'settlement' } }
+    });
+    renderZkapiComposerStatus(element, null, activityState);
+    const firstWrites = element.innerHTMLWrites;
+    renderZkapiComposerStatus(element, null, lowTextState('receipt', {
+        primary: { phase: 'requesting', activity: { kind: 'access' } }
+    }));
+    assert.equal(element.innerHTMLWrites, firstWrites + 1);
+    assert.match(element.innerHTML, />Securing</);
+
+    const guided = composerElement();
+    const firstJourney = lowTextState('guided', {
+        journey: [{ id: 'balance', label: 'Check balance', state: 'active' }]
+    });
+    renderZkapiComposerStatus(guided, null, firstJourney);
+    const guidedWrites = guided.innerHTMLWrites;
+    renderZkapiComposerStatus(guided, null, {
+        ...firstJourney,
+        journey: [{ id: 'balance', label: 'Check balance', state: 'complete' }]
+    });
+    assert.equal(guided.innerHTMLWrites, guidedWrites + 1);
+    assert.match(guided.innerHTML, /data-state="complete"/);
+});
+
 test('same-phase lease retries refresh every proposal without adding low-text clutter', () => {
     const retryMessage = 'Temporary-key service is busy. Retrying in 2 seconds…';
     for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
@@ -337,6 +400,75 @@ test('live UI facades render New Chat settlement state in sidebar and right pane
     assert.equal(panel.getMissingApiKeyStatus().badge, 'Ready');
 });
 
+test('time-only ticks use a separate channel from semantic client changes', () => {
+    let clockEvents = 0;
+    let semanticEvents = 0;
+    let globalSemanticEvents = 0;
+    const originalWindowDispatch = globalThis.window.dispatchEvent;
+    globalThis.window.dispatchEvent = () => { globalSemanticEvents += 1; };
+    const unsubscribeClock = zkapiClient.subscribeClock(detail => {
+        clockEvents += 1;
+        assert.equal(typeof detail.now, 'number');
+    });
+    const unsubscribeSemantic = zkapiClient.subscribe(() => { semanticEvents += 1; });
+
+    try {
+        zkapiClient.emitClock();
+        assert.equal(clockEvents, 1);
+        assert.equal(semanticEvents, 0);
+        assert.equal(globalSemanticEvents, 0);
+
+        zkapiClient.emitChange('runtime');
+        assert.equal(clockEvents, 1);
+        assert.equal(semanticEvents, 1);
+        assert.equal(globalSemanticEvents, 1);
+    } finally {
+        unsubscribeClock();
+        unsubscribeSemantic();
+        globalThis.window.dispatchEvent = originalWindowDispatch;
+    }
+});
+
+test('unchanged quiet refreshes do not fan out semantic UI events', async () => {
+    const original = {
+        browserMode: zkapiClient.browserMode,
+        config: zkapiClient.config,
+        wallet: zkapiClient.wallet,
+        withdrawal: zkapiClient.withdrawal,
+        lastError: zkapiClient.lastError,
+        apiJson: zkapiClient.apiJson
+    };
+    zkapiClient.browserMode = false;
+    zkapiClient.config = { version: 1 };
+    zkapiClient.wallet = { note: null };
+    zkapiClient.withdrawal = null;
+    zkapiClient.lastError = null;
+    zkapiClient.apiJson = async path => path === '/zkapi/v1/config'
+        ? { version: 1 }
+        : { note: null };
+    let semanticEvents = 0;
+    const unsubscribe = zkapiClient.subscribe(() => { semanticEvents += 1; });
+
+    try {
+        await zkapiClient.refresh({ quiet: true });
+        assert.equal(semanticEvents, 0);
+
+        zkapiClient.apiJson = async path => path === '/zkapi/v1/config'
+            ? { version: 2 }
+            : { note: null };
+        await zkapiClient.refresh({ quiet: true });
+        assert.equal(semanticEvents, 1, 'a real runtime change must still notify subscribers');
+    } finally {
+        unsubscribe();
+        zkapiClient.browserMode = original.browserMode;
+        zkapiClient.config = original.config;
+        zkapiClient.wallet = original.wallet;
+        zkapiClient.withdrawal = original.withdrawal;
+        zkapiClient.lastError = original.lastError;
+        zkapiClient.apiJson = original.apiJson;
+    }
+});
+
 test('right-panel clock ticks update countdown text without replacing interactive UI', () => {
     const originalDocument = globalThis.document;
     let loads = 0;
@@ -356,11 +488,122 @@ test('right-panel clock ticks update countdown text without replacing interactiv
     const panel = Object.create(RightPanel.prototype);
     panel.loadSessionData = () => { loads += 1; };
     try {
-        panel.handleZkapiChange({ reason: 'clock' });
+        panel.handleZkapiClock();
         assert.equal(loads, 0, 'a clock tick must not rebuild the panel');
+        panel.handleZkapiChange({ reason: 'clock' });
+        assert.equal(loads, 0, 'a legacy clock event must remain non-rendering');
         panel.handleZkapiChange({ reason: 'note' });
         assert.equal(loads, 1, 'a real billing update should still rebuild the panel');
     } finally {
+        globalThis.document = originalDocument;
+    }
+});
+
+test('account clock patches preserve the modal and enable escape finalization at its deadline', () => {
+    const originalWallet = zkapiClient.wallet;
+    const originalConfig = zkapiClient.config;
+    const originalWithdrawal = zkapiClient.withdrawal;
+    const originalFormatExpiry = zkapiClient.formatExpiry;
+    const originalActiveElement = globalThis.document.activeElement;
+    const countdown = { textContent: '' };
+    const finalizeButton = { textContent: '', disabled: true };
+    const noteExpiry = { textContent: '' };
+    const leaseExpiry = { textContent: '' };
+    const withdrawalCheckbox = { checked: true };
+    let overlayWrites = 0;
+    const overlay = {
+        scrollTop: 137,
+        set innerHTML(_value) { overlayWrites += 1; },
+        querySelector(selector) {
+            if (selector === '[data-zkapi-escape-countdown]') return countdown;
+            if (selector === '#zkapi-finalize-btn') return finalizeButton;
+            if (selector === '[data-zkapi-balance-expiry]') return noteExpiry;
+            if (selector === '[data-zkapi-active-lease-expiry]') return leaseExpiry;
+            if (selector === '#zkapi-withdraw-confirm') return withdrawalCheckbox;
+            return null;
+        }
+    };
+    const deadline = 2_000_000_000;
+    zkapiClient.wallet = { note: { expiry_ts: deadline + 10_000 } };
+    zkapiClient.config = { active_lease: { expires_at: deadline } };
+    zkapiClient.withdrawal = { phase: 'pending', challengeDeadline: deadline };
+    let expiryLabel = '1m';
+    zkapiClient.formatExpiry = () => expiryLabel;
+    globalThis.document.activeElement = finalizeButton;
+
+    const modal = Object.create(AccountModal.prototype);
+    modal.isOpen = true;
+    modal.overlay = overlay;
+    modal.view = 'withdraw';
+    modal.busy = false;
+    try {
+        modal.handleZkapiClock(deadline * 1000 - 1);
+        assert.equal(finalizeButton.disabled, true);
+        assert.equal(finalizeButton.textContent, 'Finalize in 1m');
+        assert.equal(countdown.textContent, 'Finalize in 1m.');
+        assert.equal(globalThis.document.activeElement, finalizeButton);
+        assert.equal(withdrawalCheckbox.checked, true);
+        assert.equal(overlay.scrollTop, 137);
+        assert.equal(overlayWrites, 0, 'the dialog subtree must remain mounted');
+
+        modal.handleZkapiClock(deadline * 1000);
+        assert.equal(finalizeButton.disabled, false);
+        assert.equal(finalizeButton.textContent, 'Finalize in MetaMask');
+        assert.equal(countdown.textContent, 'The safety window is complete.');
+        assert.equal(globalThis.document.activeElement, finalizeButton);
+        assert.equal(withdrawalCheckbox.checked, true);
+        assert.equal(overlay.scrollTop, 137);
+        assert.equal(overlayWrites, 0, 'crossing the deadline must not rebuild the dialog');
+
+        modal.view = 'balance';
+        modal.handleZkapiClock(deadline * 1000);
+        assert.equal(noteExpiry.textContent, 'expires in 1m');
+        assert.equal(leaseExpiry.textContent, '1m');
+        expiryLabel = 'expired';
+        modal.handleZkapiClock(deadline * 1000 + 1);
+        assert.equal(leaseExpiry.textContent, 'expired');
+        assert.equal(overlayWrites, 0);
+    } finally {
+        zkapiClient.wallet = originalWallet;
+        zkapiClient.config = originalConfig;
+        zkapiClient.withdrawal = originalWithdrawal;
+        zkapiClient.formatExpiry = originalFormatExpiry;
+        globalThis.document.activeElement = originalActiveElement;
+    }
+});
+
+test('welcome success is edge-triggered and retains focus across later state events', () => {
+    const originalDocument = globalThis.document;
+    const originalWallet = zkapiClient.wallet;
+    const focusedChild = { id: 'welcome-continue' };
+    const overlay = {};
+    globalThis.document = {
+        ...originalDocument,
+        activeElement: focusedChild,
+        getElementById(id) { return id === 'welcome-panel' ? overlay : null; }
+    };
+    zkapiClient.wallet = { has_note: true, note: { current_balance: 1 } };
+    const panel = new WelcomePanel({});
+    panel.isOpen = true;
+    panel.step = 'welcome';
+    panel.busy = false;
+    let renders = 0;
+    panel.render = () => { renders += 1; };
+
+    try {
+        zkapiClient.emitClock();
+        assert.equal(renders, 0, 'clock ticks must not reach the welcome renderer');
+        zkapiClient.emitChange('runtime');
+        assert.equal(renders, 1);
+        assert.equal(panel.step, 'success');
+        assert.equal(globalThis.document.activeElement, focusedChild);
+
+        zkapiClient.emitChange('runtime');
+        assert.equal(renders, 1, 'duplicate funded state must retain the existing success DOM');
+        assert.equal(globalThis.document.activeElement, focusedChild);
+    } finally {
+        panel.unsubscribe?.();
+        zkapiClient.wallet = originalWallet;
         globalThis.document = originalDocument;
     }
 });

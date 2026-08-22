@@ -14,8 +14,9 @@ export default class WelcomePanel {
         this.error = '';
         this.returnFocusEl = null;
         this.escapeHandler = null;
-        this.unsubscribe = zkapiClient.subscribe(() => {
-            if (this.isOpen && zkapiClient.hasNote && !this.busy) {
+        this.unsubscribe = zkapiClient.subscribe((_snapshot, detail) => {
+            if (detail?.reason === 'clock') return;
+            if (this.isOpen && zkapiClient.hasNote && !this.busy && this.step !== 'success') {
                 this.step = 'success';
                 this.render();
             }

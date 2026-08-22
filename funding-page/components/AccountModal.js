@@ -16,13 +16,17 @@ export default class AccountModal {
         this.depositAmount = null;
         this.returnFocusEl = null;
         this.escapeHandler = null;
-        this.unsubscribe = zkapiClient.subscribe(() => {
+        this.unsubscribe = zkapiClient.subscribe((_snapshot, detail) => {
+            if (detail?.reason === 'clock') return;
             this.updateTabIndicator();
             // An unfunded modal contains an editable amount. Rebuilding it on
             // background refreshes resets that value and steals input focus.
             // Mutating actions render once from run() after they complete.
             if (this.isOpen && !this.busy && zkapiClient.note
                 && !this.overlay?.contains(document.activeElement)) this.render();
+        });
+        this.clockUnsubscribe = zkapiClient.subscribeClock(({ now } = {}) => {
+            this.handleZkapiClock(now);
         });
         this.attachTabListener();
         this.updateTabIndicator();
@@ -103,6 +107,39 @@ export default class AccountModal {
             element.classList.toggle('text-destructive', isError);
             element.classList.toggle('text-muted-foreground', !isError);
             element.classList.toggle('hidden', !message);
+        }
+    }
+
+    handleZkapiClock(now = Date.now()) {
+        if (!this.isOpen || !this.overlay) return;
+        const setText = (element, value) => {
+            if (element && element.textContent !== value) element.textContent = value;
+        };
+
+        const noteExpiry = this.overlay.querySelector('[data-zkapi-balance-expiry]');
+        if (noteExpiry && zkapiClient.note) {
+            setText(noteExpiry, `expires in ${zkapiClient.formatExpiry(zkapiClient.note.expiry_ts)}`);
+        }
+        const leaseExpiry = this.overlay.querySelector('[data-zkapi-active-lease-expiry]');
+        const rawLease = zkapiClient.config?.active_lease;
+        if (leaseExpiry && rawLease) {
+            setText(leaseExpiry, zkapiClient.formatExpiry(rawLease.expires_at));
+        }
+
+        const withdrawal = zkapiClient.withdrawal;
+        if (this.view !== 'withdraw' || withdrawal?.phase !== 'pending') return;
+        const deadline = Number(withdrawal.challengeDeadline || 0);
+        const clockNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+        const ready = deadline > 0 && clockNow >= deadline * 1000;
+        const remaining = zkapiClient.formatExpiry(deadline);
+        setText(
+            this.overlay.querySelector('[data-zkapi-escape-countdown]'),
+            ready ? 'The safety window is complete.' : `Finalize in ${remaining}.`
+        );
+        const finalizeButton = this.overlay.querySelector('#zkapi-finalize-btn');
+        if (finalizeButton) {
+            setText(finalizeButton, ready ? 'Finalize in MetaMask' : `Finalize in ${remaining}`);
+            finalizeButton.disabled = !ready || this.busy;
         }
     }
 
@@ -195,10 +232,10 @@ export default class AccountModal {
                         <span class="badge-status-success rounded-full px-2 py-1 text-[10px] font-medium">Ready</span>
                     </div>
                     <div class="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600" style="width:${percent}%"></div></div>
-                    <div class="mt-2 flex justify-between text-[11px] text-muted-foreground"><span>${zkapiClient.formatMoney(spent)} used</span><span>expires in ${zkapiClient.formatExpiry(note.expiry_ts)}</span></div>
+                    <div class="mt-2 flex justify-between text-[11px] text-muted-foreground"><span>${zkapiClient.formatMoney(spent)} used</span><span data-zkapi-balance-expiry>expires in ${zkapiClient.formatExpiry(note.expiry_ts)}</span></div>
                 </div>
                 ${zkapiClient.withdrawalBlocksChat ? '<div class="rounded-lg border border-amber-300/60 bg-amber-50/60 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">A withdrawal is prepared or pending. Finish it before sending another message.</div>' : ''}
-                ${zkapiClient.activeLease ? `<div class="rounded-lg border border-blue-300/60 bg-blue-50/60 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"><p>The current chat key can be settled now; there is no need to wait ${zkapiClient.formatExpiry(zkapiClient.activeLease.expires_at)} for expiry.</p><button id="zkapi-settle-key-btn" class="zkapi-secondary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>Settle key now</button></div>` : ''}
+                ${zkapiClient.activeLease ? `<div class="rounded-lg border border-blue-300/60 bg-blue-50/60 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"><p>The current chat key can be settled now; there is no need to wait <span data-zkapi-active-lease-expiry>${zkapiClient.formatExpiry(zkapiClient.activeLease.expires_at)}</span> for expiry.</p><button id="zkapi-settle-key-btn" class="zkapi-secondary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>Settle key now</button></div>` : ''}
                 <div class="grid grid-cols-2 gap-2">
                     <button id="zkapi-refresh-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Refresh</button>
                     <button id="zkapi-withdraw-view-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Withdraw</button>
@@ -232,7 +269,7 @@ export default class AccountModal {
                             <p class="text-sm font-medium text-foreground">Escape hatch pending</p>
                             <span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-semibold text-white">${zkapiClient.escapePeriodBadge()}</span>
                         </div>
-                        <p class="mt-2 text-xs leading-relaxed text-muted-foreground">Your note is frozen. ${ready ? 'The safety window is complete.' : `Finalize in ${zkapiClient.formatExpiry(deadline)}.`}</p>
+                        <p class="mt-2 text-xs leading-relaxed text-muted-foreground">Your note is frozen. <span data-zkapi-escape-countdown>${ready ? 'The safety window is complete.' : `Finalize in ${zkapiClient.formatExpiry(deadline)}.`}</span></p>
                     </div>
                     <dl class="zkapi-details">
                         <div><dt>Destination</dt><dd>${zkapiClient.compact(withdrawal.destination, 9)}</dd></div>

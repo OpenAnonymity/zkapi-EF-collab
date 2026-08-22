@@ -13,20 +13,26 @@ export default class RightPanel extends OaRightPanelBase {
         this.zkapiUnsubscribe = zkapiClient.subscribe((_snapshot, detail) => {
             this.handleZkapiChange(detail);
         });
+        this.zkapiClockUnsubscribe = zkapiClient.subscribeClock(() => {
+            this.handleZkapiClock();
+        });
     }
 
     handleZkapiChange(detail = {}) {
-        // The client clock exists for countdowns. OA's expiration timer already
-        // updates those values in place, so rebuilding the panel here would
-        // close disclosures, restart animations, and discard focus every second.
+        // Keep this defensive guard even though clocks use a separate channel:
+        // an accidental legacy emitChange('clock') must never rebuild the UI.
         if (detail.reason === 'clock') {
-            const expiry = document.querySelector('#right-panel [data-zkapi-note-expiry]');
-            if (expiry && zkapiClient.note) {
-                expiry.textContent = `expires in ${zkapiClient.formatExpiry(zkapiClient.note.expiry_ts)}`;
-            }
+            this.handleZkapiClock();
             return;
         }
         this.loadSessionData();
+    }
+
+    handleZkapiClock() {
+        const expiry = document.querySelector('#right-panel [data-zkapi-note-expiry]');
+        if (expiry && zkapiClient.note) {
+            expiry.textContent = `expires in ${zkapiClient.formatExpiry(zkapiClient.note.expiry_ts)}`;
+        }
     }
 
     renderTopSectionOnly() {
@@ -216,6 +222,8 @@ export default class RightPanel extends OaRightPanelBase {
     destroy() {
         this.zkapiUnsubscribe?.();
         this.zkapiUnsubscribe = null;
+        this.zkapiClockUnsubscribe?.();
+        this.zkapiClockUnsubscribe = null;
         super.destroy();
     }
 }

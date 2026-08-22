@@ -288,8 +288,16 @@ class ChatApp {
         this.pendingTicketCode = null;
         this.hasInitialLinkContext = this.detectInitialLinkContext();
         this.splitCodeWarningOverlay = null;
-        this.zkapiUiUnsubscribe = zkapiClient.subscribe(() => {
+        this.zkapiUiUnsubscribe = zkapiClient.subscribe((_snapshot, detail) => {
+            if (detail?.reason === 'clock') return;
             this.updateLeaseComposerStatus();
+        });
+        this.zkapiClockUiUnsubscribe = zkapiClient.subscribeClock(() => {
+            // A few composer states have real time boundaries (for example a
+            // recent error aging out). The renderer is signature-idempotent,
+            // so this can advance those boundaries without replacing nodes or
+            // restarting their animation timelines on unchanged ticks.
+            renderZkapiComposerStatus(this.elements.zkapiComposerStatus, this);
         });
 
         // Link preview state
@@ -10081,11 +10089,22 @@ class ChatApp {
         this.elements.sendBtn.classList.toggle('opacity-100', !shouldBeDisabled || isSendBusy);
         this.elements.sendBtn.removeAttribute('aria-busy');
 
+        const renderSendVisual = (visualState, html) => {
+            // Preserve the existing child nodes while the visual mode is the
+            // same. Reassigning innerHTML restarts CSS animation timelines even
+            // when the markup is byte-for-byte identical.
+            if (this.elements.sendBtn.dataset?.zkapiVisualState === visualState) return;
+            if (this.elements.sendBtn.dataset) {
+                this.elements.sendBtn.dataset.zkapiVisualState = visualState;
+            }
+            this.elements.sendBtn.innerHTML = html;
+        };
+
         // Update button icon based on streaming state
         if (isSwitchingSession || isWaitingForSettlement || isTimelineTransitionBusy) {
-            this.elements.sendBtn.innerHTML = `
+            renderSendVisual('busy', `
                 <span class="zkapi-send-orbit" aria-hidden="true"><i></i></span>
-            `;
+            `);
             this.elements.sendBtn.setAttribute(
                 'aria-label',
                 isSwitchingSession
@@ -10099,19 +10118,19 @@ class ChatApp {
             this.elements.sendBtn.classList.remove('bg-destructive', 'hover:bg-destructive/90', 'text-destructive-foreground');
             if (isSwitchingSession) this.elements.messageInput.placeholder = 'Loading chat…';
         } else if (isAcceptingSend) {
-            this.elements.sendBtn.innerHTML = `
+            renderSendVisual('accepted', `
                 <svg viewBox="0 0 16 16" class="zkapi-send-check" aria-hidden="true"><path d="m3.25 8.25 3 3 6.5-6.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg>
-            `;
+            `);
             this.elements.sendBtn.setAttribute('aria-label', 'Message accepted');
             this.elements.sendBtn.classList.add('bg-primary', 'text-primary-foreground');
             this.elements.sendBtn.classList.remove('bg-destructive', 'hover:bg-destructive/90', 'text-destructive-foreground');
         } else if (isStreaming) {
             // Change to stop icon (simple square)
-            this.elements.sendBtn.innerHTML = `
+            renderSendVisual('streaming', `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-3 h-3">
                     <rect x="4" y="4" width="16" height="16" rx="2"/>
                 </svg>
-            `;
+            `);
             this.elements.sendBtn.setAttribute('aria-label', 'Stop response');
             // Change button style to indicate stop
             this.elements.sendBtn.classList.add('bg-destructive', 'hover:bg-destructive/90', 'text-destructive-foreground');
@@ -10119,11 +10138,11 @@ class ChatApp {
             this.elements.messageInput.placeholder = "Waiting for response...";
         } else {
             // Restore send icon
-            this.elements.sendBtn.innerHTML = `
+            renderSendVisual('idle', `
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18" />
                 </svg>
-            `;
+            `);
             this.elements.sendBtn.setAttribute('aria-label', 'Send message');
             // Restore primary button style
             this.elements.sendBtn.classList.add('bg-primary', 'hover:bg-primary/90', 'text-primary-foreground');

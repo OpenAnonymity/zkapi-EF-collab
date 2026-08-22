@@ -226,6 +226,79 @@ test('onboarding has a static readable card surface and length-limited answers e
     assert.match(app, /Continue exactly where you left off/);
 });
 
+test('zkAPI clock updates are isolated from semantic rerenders', () => {
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const account = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
+    const welcome = fs.readFileSync(path.join(__dirname, 'components/WelcomePanel.js'), 'utf8');
+    const rightPanel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
+
+    assert.match(client, /setInterval\(\(\) => this\.emitClock\(\), 1_000\)/);
+    assert.doesNotMatch(client, /emitChange\('clock'\)/);
+    assert.match(client, /subscribeClock\(listener\)/);
+    assert.match(client, /stateBeforeRefresh !== this\.runtimeStateSignature\(\)/);
+    assert.match(app, /zkapiClient\.subscribeClock\(/);
+    assert.match(app, /renderZkapiComposerStatus\(this\.elements\.zkapiComposerStatus, this\)/);
+    assert.match(account, /zkapiClient\.subscribeClock\(/);
+    assert.match(account, /data-zkapi-escape-countdown/);
+    assert.match(account, /finalizeButton\.disabled = !ready \|\| this\.busy/);
+    assert.match(welcome, /this\.step !== 'success'/);
+    assert.match(rightPanel, /handleZkapiClock\(\)/);
+    assert.match(rightPanel, /zkapiClockUnsubscribe/);
+});
+
+test('repeated input-state updates retain the animated send-button child', () => {
+    const appSource = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const updateInputState = sourceMethodAt(appSource, 'updateInputState() {');
+    const Harness = Function(`return class InputHarness { ${updateInputState} };`)();
+    const attributes = new Map();
+    let buttonHtml = '';
+    let buttonWrites = 0;
+    const sendBtn = {
+        dataset: {},
+        disabled: false,
+        classList: {
+            toggle() {},
+            add() {},
+            remove() {}
+        },
+        set innerHTML(value) {
+            buttonHtml = String(value);
+            buttonWrites += 1;
+        },
+        get innerHTML() { return buttonHtml; },
+        setAttribute(name, value) { attributes.set(name, String(value)); },
+        removeAttribute(name) { attributes.delete(name); }
+    };
+    const instance = new Harness();
+    instance.elements = {
+        messageInput: { value: 'hello', disabled: false, placeholder: '' },
+        sendBtn
+    };
+    instance.uploadedFiles = [];
+    instance.state = { currentSessionId: 'chat-a' };
+    instance.sessionSwitchInFlight = null;
+    instance.pendingSettlementSendSessions = new Set(['chat-a']);
+    instance.sendSubmissionsInFlight = new Set();
+    instance.exclusiveSessionMutationOwners = new Map();
+    instance.searchEnabled = false;
+    instance.isCurrentSessionStreaming = () => false;
+
+    instance.updateInputState();
+    const orbitMarkup = sendBtn.innerHTML;
+    instance.updateInputState();
+    assert.equal(buttonWrites, 1, 'the busy orbit node must survive an unchanged update');
+    assert.equal(sendBtn.innerHTML, orbitMarkup);
+    assert.equal(sendBtn.dataset.zkapiVisualState, 'busy');
+
+    instance.pendingSettlementSendSessions.clear();
+    instance.updateInputState();
+    assert.equal(buttonWrites, 2, 'a real visual-mode transition must still replace the icon');
+    assert.equal(sendBtn.dataset.zkapiVisualState, 'idle');
+    instance.updateInputState();
+    assert.equal(buttonWrites, 2, 'the idle icon must also remain mounted when unchanged');
+});
+
 test('OA System Panel is preserved with only ticket billing replaced', () => {
     const panel = fs.readFileSync(path.join(__dirname, 'components/RightPanel.js'), 'utf8');
     const modelPicker = fs.readFileSync(path.join(__dirname, 'components/ModelPicker.js'), 'utf8');

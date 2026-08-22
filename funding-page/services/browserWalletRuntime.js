@@ -821,7 +821,6 @@ class BrowserWalletRuntime extends EventTarget {
                 }
             });
             this.scheduleSettlement();
-            this.dispatchEvent(new Event('change'));
             onProgress('ready', 'Private chat ready.');
             return this.activeLease;
         });
@@ -923,17 +922,19 @@ class BrowserWalletRuntime extends EventTarget {
         if (!this.activeLease || !this.runtime?.journal) return;
         const lease = this.activeLease;
         onProgress('settling', 'Closing the temporary key from the previous chat…');
-        await withBrowserWalletLock(this.manifest.deployment_id, async () => {
+        const installed = await withBrowserWalletLock(this.manifest.deployment_id, async () => {
             await this.reload();
             const request = this.runtime.journal?.prepared_request;
             if (!request || request.client_request_id !== lease.client_request_id) return;
             onProgress('usage', 'Confirming the previous chat’s usage…');
             const status = await this.retireRequest(lease.client_request_id, request);
             if (status.status !== 'finalized') throw new Error(`Lease is still ${status.status}.`);
-            await this.installRecoveredResponse(lease.client_request_id, onProgress);
+            return this.installRecoveredResponse(lease.client_request_id, onProgress);
         });
         this.activeLease = null;
-        this.dispatchEvent(new Event('change'));
+        // installRecoveredResponse commits and notifies. Only publish here
+        // when there was no recovered response (and therefore no commit).
+        if (!installed) this.dispatchEvent(new Event('change'));
     }
 
     async settleActiveLease(onProgress = () => {}) {
@@ -960,7 +961,6 @@ class BrowserWalletRuntime extends EventTarget {
             );
         }
         this.activeLease = null;
-        this.dispatchEvent(new Event('change'));
         return this.walletStatus();
     }
 
