@@ -3,6 +3,11 @@
  * Tracks and stores network requests for debugging and monitoring
  */
 
+import {
+    sanitizeNetworkHeaders,
+    sanitizeNetworkValue
+} from './networkLogSanitizer.mjs';
+
 class NetworkLogger {
     constructor() {
         this.logs = [];
@@ -34,6 +39,7 @@ class NetworkLogger {
      * @param {string} details.action - Specific action type for local events
      */
     logRequest(details) {
+        const request = details.request || {};
         const logEntry = {
             id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             timestamp: Date.now(),
@@ -42,9 +48,12 @@ class NetworkLogger {
             method: details.method || 'GET',
             url: details.url || '',
             status: details.status || 0,
-            request: details.request || {},
-            response: details.response || {},
-            error: details.error || null,
+            request: sanitizeNetworkValue({
+                ...request,
+                headers: sanitizeNetworkHeaders(request.headers)
+            }),
+            response: sanitizeNetworkValue(details.response || {}),
+            error: sanitizeNetworkValue(details.error || null),
             message: details.message || '',
             detail: details.detail || '',
             action: details.action || '',
@@ -161,21 +170,7 @@ class NetworkLogger {
      * Sanitize headers (remove sensitive data)
      */
     sanitizeHeaders(headers) {
-        const sanitized = { ...headers };
-
-        // Mask authorization headers
-        if (sanitized.Authorization) {
-            const auth = sanitized.Authorization;
-            if (auth.includes('Bearer')) {
-                const token = auth.split('Bearer ')[1];
-                if (token && token.length > 20) {
-                    sanitized.Authorization = `Bearer ${token.slice(0, 12)}...${token.slice(-8)}`;
-                }
-            }
-            // InferenceTicket tokens are single-use and already consumed, so no need to mask them
-        }
-
-        return sanitized;
+        return sanitizeNetworkHeaders(headers);
     }
 
     /**

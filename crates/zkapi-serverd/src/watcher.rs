@@ -128,6 +128,7 @@ mod tests {
                     policy_evidence_hash: None,
                     proof_blob: Some(vec![1, 2, 3]),
                     request_inputs_json: Some(serde_json::to_string(&request_inputs).unwrap()),
+                    api_request_binding: None,
                     created_at: 0,
                     finalized_at: Some(1),
                 },

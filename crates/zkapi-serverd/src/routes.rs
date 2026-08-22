@@ -40,15 +40,7 @@ use crate::provider::build_provider;
 /// Shared application state.
 type AppState = Arc<RequestProcessor>;
 
-#[derive(Debug, Serialize)]
-struct HttpErrorResponse {
-    #[serde(flatten)]
-    base: ErrorResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    retry_after_seconds: Option<u64>,
-}
-
-type ErrorHttpResponse = (StatusCode, HeaderMap, Json<HttpErrorResponse>);
+type ErrorHttpResponse = (StatusCode, HeaderMap, Json<ErrorResponse>);
 
 // Compact proofs are small; leave headroom for ordinary API payloads.
 const PROTOCOL_BODY_LIMIT_BYTES: usize = 1024 * 1024;
@@ -435,16 +427,14 @@ fn build_error_response(
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let body = HttpErrorResponse {
-        base: ErrorResponse {
-            status: "error".to_string(),
-            client_request_id: client_request_id.to_string(),
-            error_code: err.error_code().to_string(),
-            error_message: err.to_string(),
-            retriable: err.is_retriable(),
-            latest_root,
-            server_time_ms: Some(now_ms),
-        },
+    let body = ErrorResponse {
+        status: "error".to_string(),
+        client_request_id: client_request_id.to_string(),
+        error_code: err.error_code().to_string(),
+        error_message: err.to_string(),
+        retriable: err.is_retriable(),
+        latest_root,
+        server_time_ms: Some(now_ms),
         retry_after_seconds,
     };
 
@@ -514,14 +504,13 @@ mod rate_limit_tests {
 
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(headers.get(RETRY_AFTER).unwrap(), "37");
-        assert_eq!(response.base.error_code, "oa_hourly_issuance_budget");
-        assert!(response.base.retriable);
+        assert_eq!(response.error_code, "oa_hourly_issuance_budget");
+        assert!(response.retriable);
         assert_eq!(response.retry_after_seconds, Some(37));
 
         let serialized = serde_json::to_value(response).unwrap();
         assert_eq!(serialized["retry_after_seconds"], 37);
         assert_eq!(serialized["error_code"], "oa_hourly_issuance_budget");
-        assert!(serialized.get("base").is_none());
     }
 }
 

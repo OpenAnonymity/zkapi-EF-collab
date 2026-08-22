@@ -306,3 +306,43 @@ test('issueLease prepares one proof before delegating all transport attempts', a
     assert.equal(lease.client_request_id, prepared.client_request_id);
     assert.equal(runtime.activeLease.sessionId, 'chat-session');
 });
+
+test('lease retirement honors Retry-After without changing the settlement request', async () => {
+    const runtime = runtimeForLeaseRequests();
+    const request = {
+        client_request_id: 'settlement-request',
+        proof: { a: ['original-proof'] },
+        public_inputs: { solvency_bound: 5_000_000 }
+    };
+    const error = new BrowserWalletHttpError(
+        'OA usage reporting is rate limited.',
+        429,
+        'oa_minute_request_limit',
+        { retriable: true, retry_after_seconds: 7 }
+    );
+    const bodies = [];
+    const waits = [];
+    let attempts = 0;
+    let clock = 0;
+    runtime.remoteJson = async (_url, init) => {
+        attempts += 1;
+        bodies.push(init.body);
+        if (attempts === 1) throw error;
+        return { status: 'finalized' };
+    };
+
+    const result = await runtime.retireRequest(request.client_request_id, request, null, {
+        maxWaitMs: 10_000,
+        now: () => clock,
+        sleep: async milliseconds => {
+            waits.push(milliseconds);
+            clock += milliseconds;
+        }
+    });
+
+    assert.equal(result.status, 'finalized');
+    assert.deepEqual(waits, [7_000]);
+    assert.equal(bodies.length, 2);
+    assert.ok(bodies.every(body => body === bodies[0]));
+    assert.deepEqual(JSON.parse(bodies[0]), request);
+});

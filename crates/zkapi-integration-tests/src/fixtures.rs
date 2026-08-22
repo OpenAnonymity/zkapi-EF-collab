@@ -529,6 +529,7 @@ fn error_body(
         retriable: matches!(error_code, "STALE_ROOT" | "INTERNAL"),
         latest_root,
         server_time_ms: Some(now_ms()),
+        retry_after_seconds: None,
     }
 }
 

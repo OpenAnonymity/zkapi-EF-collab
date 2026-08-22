@@ -21,7 +21,7 @@ use crate::dashboard::{
     charge_usd, decode_request_view, redact_secrets, DashboardEvent, DashboardHub,
 };
 use crate::error::ServerError;
-use crate::nullifier_store::{NullifierStore, TranscriptRecord};
+use crate::nullifier_store::{api_request_binding, NullifierStore, TranscriptRecord};
 use crate::oa_org::{IssuedOpenRouterLease, OaOrgProvisioner, OaOrgUsage};
 use crate::openrouter::OpenRouterProvisioner;
 use crate::pricing;
@@ -235,12 +235,29 @@ impl RequestProcessor {
             return Err(ServerError::Replay);
         }
         let key_name = format!("zkapi-{}", request.client_request_id);
+        // The verified proof may expose a coarse solvency tier above the
+        // deployment's minimum request cap. Bind that exact tier to the child
+        // key's cumulative USD budget for this chat.
+        let mut spending_limit_usd = pricing::credits_to_usd(request.public_inputs.solvency_bound);
+        if !spending_limit_usd.is_finite() || spending_limit_usd <= 0.0 {
+            return Err(ServerError::InvalidRequest(
+                "lease spending limit must be positive".to_string(),
+            ));
+        }
         let mut resume_provisioning = false;
         let mut issued_at = current_timestamp();
         if let Some(existing) = self
             .store
             .lookup_openrouter_lease(&request.client_request_id)
         {
+            let persisted_binding = api_request_binding(&existing.api_request)?;
+            if existing.request_nullifier != request.public_inputs.request_nullifier
+                || persisted_binding != api_request_binding(request)?
+            {
+                return Err(ServerError::Internal(
+                    "pending lease request does not match its nullifier reservation".to_string(),
+                ));
+            }
             if existing.key_source != lease_config.source.label() {
                 return Err(ServerError::Internal(format!(
                     "pending lease source {} does not match configured source {}",
@@ -264,22 +281,26 @@ impl RequestProcessor {
                 }
                 OpenRouterLeaseSourceConfig::OaOrg { .. } => {
                     // OA station issuance is replay-safe. Retain the durable
-                    // reservation and ask for the same one-show key again.
+                    // reservation and ask for the same one-show key again. The
+                    // persisted limit, not any retry input, is authoritative.
+                    let persisted_limit =
+                        pricing::credits_to_usd(existing.api_request.public_inputs.solvency_bound);
+                    if existing.spending_limit_usd.to_bits() != persisted_limit.to_bits()
+                        || !persisted_limit.is_finite()
+                        || persisted_limit <= 0.0
+                    {
+                        return Err(ServerError::Internal(
+                            "pending lease spending limit does not match its bound request"
+                                .to_string(),
+                        ));
+                    }
+                    spending_limit_usd = existing.spending_limit_usd;
                     resume_provisioning = true;
                     issued_at = existing.issued_at;
                 }
             }
         }
         let requested_expires_at = current_timestamp().saturating_add(lease_config.ttl_seconds);
-        // The proof may expose a coarse solvency tier above the deployment's
-        // minimum request cap. Use that exact bound as the child key's
-        // cumulative USD budget for this chat.
-        let spending_limit_usd = pricing::credits_to_usd(request.public_inputs.solvency_bound);
-        if !spending_limit_usd.is_finite() || spending_limit_usd <= 0.0 {
-            return Err(ServerError::InvalidRequest(
-                "lease spending limit must be positive".to_string(),
-            ));
-        }
         if !resume_provisioning {
             self.store.create_openrouter_lease(
                 request,
@@ -641,6 +662,7 @@ impl RequestProcessor {
                 "version, chain, or contract mismatch".to_string(),
             ));
         }
+        let request_binding = api_request_binding(request)?;
         // A byte-identical request already reserved by this endpoint passed
         // all checks on its first attempt. Resume it before root/freshness
         // checks so a transport retry remains possible after those values move.
@@ -649,7 +671,8 @@ impl RequestProcessor {
             let same_request = existing.client_request_id.as_deref()
                 == Some(&request.client_request_id)
                 && existing.payload_hash == Some(request.payload_hash)
-                && existing.reservation_kind == reservation_kind.as_str();
+                && existing.reservation_kind == reservation_kind.as_str()
+                && existing.api_request_binding.as_deref() == Some(request_binding.as_str());
             if !same_request {
                 return Err(ServerError::Replay);
             }
@@ -710,16 +733,8 @@ impl RequestProcessor {
         }
 
         match reservation_kind {
-            ReservationKind::Proxy => self.store.reserve(
-                &public.request_nullifier,
-                &request.client_request_id,
-                &request.payload_hash,
-            )?,
-            ReservationKind::OpenRouterLease => self.store.reserve_openrouter_lease(
-                &public.request_nullifier,
-                &request.client_request_id,
-                &request.payload_hash,
-            )?,
+            ReservationKind::Proxy => self.store.reserve_v2(request)?,
+            ReservationKind::OpenRouterLease => self.store.reserve_openrouter_lease(request)?,
         }
         Ok(None)
     }
@@ -804,6 +819,7 @@ impl RequestProcessor {
             policy_evidence_hash: provider_response.policy_evidence_hash,
             proof_blob: Some(proof_bytes.clone()),
             request_inputs_json: serde_json::to_string(public).ok(),
+            api_request_binding: Some(api_request_binding(request)?),
             created_at: current_timestamp(),
             finalized_at: Some(current_timestamp()),
         };
@@ -1016,4 +1032,290 @@ fn current_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::PathBuf;
+
+    use zkapi_types::wire::{Groth16ProofWire, ProofBackendWire};
+    use zkapi_types::RequestPublicInputsV2;
+
+    use crate::config::OpenRouterLeaseConfig;
+    use crate::provider::EchoProvider;
+
+    fn setup_directory() -> String {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocol/setup/v2")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn oa_lease_processor(store: Arc<NullifierStore>) -> RequestProcessor {
+        let state_seed = Felt252::from_u64(11);
+        let clear_seed = Felt252::from_u64(12);
+        let signer = Arc::new(ServerSigner::new(&state_seed, &clear_seed));
+        RequestProcessor::try_new(
+            ServerConfig {
+                request_charge_cap: 1,
+                policy_charge_cap: 1,
+                proof_setup_dir: setup_directory(),
+                openrouter_leases: Some(OpenRouterLeaseConfig {
+                    source: OpenRouterLeaseSourceConfig::OaOrg {
+                        // No request should reach this address in the mutation
+                        // tests: the bound-retry check must reject first.
+                        org_base_url: "http://127.0.0.1:9".to_string(),
+                        shared_secret: "test-secret".to_string(),
+                    },
+                    ttl_seconds: 300,
+                    settlement_grace_seconds: 0,
+                    settlement_poll_seconds: 1,
+                }),
+                ..Default::default()
+            },
+            store,
+            signer,
+            Arc::new(EchoProvider::new(1)),
+            Felt252::ZERO,
+        )
+        .unwrap()
+    }
+
+    fn unverified_lease_request(processor: &RequestProcessor) -> ApiRequestV2 {
+        let payload = serde_json::to_string(&OpenRouterLeaseAuthorization::default()).unwrap();
+        let state_key = processor.state_signing_key();
+        ApiRequestV2 {
+            client_request_id: "pre-oa-failure-request".to_string(),
+            payload_hash: canonical_payload_hash(payload.as_bytes()),
+            payload,
+            public_inputs: RequestPublicInputsV2 {
+                protocol_version: processor.config.protocol_version,
+                chain_id: processor.config.chain_id,
+                contract_address: processor.config.contract_address,
+                active_root: Felt252::ZERO,
+                state_signing_key_x: state_key.x,
+                state_signing_key_y: state_key.y,
+                request_time: current_timestamp(),
+                solvency_bound: 3_000_000,
+                request_nullifier: Felt252::from_u64(77),
+                authorization_tag: Felt252::from_u64(78),
+                anonymous_commitment_x: Felt252::from_u64(79),
+                anonymous_commitment_y: Felt252::from_u64(80),
+            },
+            proof: Groth16ProofWire {
+                backend: ProofBackendWire::Groth16Bn254,
+                proof: "original-proof-that-was-verified-before-reservation".to_string(),
+            },
+        }
+    }
+
+    fn mutated_request(
+        request: &ApiRequestV2,
+        mutate: impl FnOnce(&mut ApiRequestV2),
+    ) -> ApiRequestV2 {
+        let mut mutation = request.clone();
+        mutate(&mut mutation);
+        mutation
+    }
+
+    #[tokio::test]
+    async fn pre_oa_failure_rejects_every_mutated_reserved_retry() {
+        let store = Arc::new(NullifierStore::in_memory().unwrap());
+        let processor = oa_lease_processor(store.clone());
+        let request = unverified_lease_request(&processor);
+        let original_limit = pricing::credits_to_usd(request.public_inputs.solvency_bound);
+
+        // This is the durable state left after proof verification and lease
+        // reservation but before OA successfully returns a key.
+        store.reserve_openrouter_lease(&request).unwrap();
+        store
+            .create_openrouter_lease(&request, "oa_org", 100, 400, 400, original_limit)
+            .unwrap();
+
+        // A byte-identical transport retry remains resumable even though its
+        // proof is not verified a second time.
+        assert!(processor
+            .validate_and_reserve(&request, ReservationKind::OpenRouterLease)
+            .unwrap()
+            .is_none());
+
+        let changed_payload = "{ \"mode\": \"openrouter_ephemeral_lease\", \"version\": 1 }";
+        let binding_replay_mutations = vec![
+            (
+                "client_request_id",
+                mutated_request(&request, |value| {
+                    value.client_request_id = "different-request-id".to_string()
+                }),
+            ),
+            (
+                "payload_and_payload_hash",
+                mutated_request(&request, |value| {
+                    value.payload = changed_payload.to_string();
+                    value.payload_hash = canonical_payload_hash(changed_payload.as_bytes());
+                }),
+            ),
+            (
+                "active_root",
+                mutated_request(&request, |value| {
+                    value.public_inputs.active_root = Felt252::from_u64(901)
+                }),
+            ),
+            (
+                "state_signing_key_x",
+                mutated_request(&request, |value| {
+                    value.public_inputs.state_signing_key_x = Felt252::from_u64(902)
+                }),
+            ),
+            (
+                "state_signing_key_y",
+                mutated_request(&request, |value| {
+                    value.public_inputs.state_signing_key_y = Felt252::from_u64(903)
+                }),
+            ),
+            (
+                "request_time",
+                mutated_request(&request, |value| value.public_inputs.request_time = 1),
+            ),
+            (
+                "solvency_bound",
+                mutated_request(&request, |value| {
+                    value.public_inputs.solvency_bound = u128::MAX
+                }),
+            ),
+            (
+                "authorization_tag",
+                mutated_request(&request, |value| {
+                    value.public_inputs.authorization_tag = Felt252::from_u64(904)
+                }),
+            ),
+            (
+                "anonymous_commitment_x",
+                mutated_request(&request, |value| {
+                    value.public_inputs.anonymous_commitment_x = Felt252::from_u64(905)
+                }),
+            ),
+            (
+                "anonymous_commitment_y",
+                mutated_request(&request, |value| {
+                    value.public_inputs.anonymous_commitment_y = Felt252::from_u64(906)
+                }),
+            ),
+            (
+                "proof_backend",
+                mutated_request(&request, |value| {
+                    value.proof.backend = ProofBackendWire::StwoCairo
+                }),
+            ),
+            (
+                "proof_string",
+                mutated_request(&request, |value| {
+                    value.proof.proof = "garbage-not-a-proof".to_string()
+                }),
+            ),
+        ];
+        let original_binding = api_request_binding(&request).unwrap();
+        for (field, mutation) in binding_replay_mutations {
+            assert_ne!(
+                api_request_binding(&mutation).unwrap(),
+                original_binding,
+                "{field} was not covered by the complete request binding"
+            );
+            let result = processor.issue_openrouter_lease(&mutation).await;
+            assert!(
+                matches!(&result, Err(ServerError::Replay)),
+                "reserved retry mutation in {field} was not rejected: {}",
+                result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unexpected success".to_string())
+            );
+        }
+
+        for (field, mutation) in [
+            (
+                "protocol_version",
+                mutated_request(&request, |value| value.public_inputs.protocol_version += 1),
+            ),
+            (
+                "chain_id",
+                mutated_request(&request, |value| value.public_inputs.chain_id += 1),
+            ),
+            (
+                "contract_address",
+                mutated_request(&request, |value| {
+                    value.public_inputs.contract_address = Felt252::from_u64(907)
+                }),
+            ),
+        ] {
+            assert_ne!(api_request_binding(&mutation).unwrap(), original_binding);
+            let error = processor
+                .issue_openrouter_lease(&mutation)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{field} mutation unexpectedly succeeded"));
+            assert!(
+                matches!(&error, ServerError::ProtocolMismatch(_)),
+                "{field} mutation returned {error}"
+            );
+        }
+
+        let payload_only = mutated_request(&request, |value| {
+            value.payload = changed_payload.to_string()
+        });
+        let payload_hash_only = mutated_request(&request, |value| {
+            value.payload_hash = Felt252::from_u64(908)
+        });
+        for (field, mutation) in [
+            ("payload", payload_only),
+            ("payload_hash", payload_hash_only),
+        ] {
+            assert_ne!(api_request_binding(&mutation).unwrap(), original_binding);
+            let error = processor
+                .issue_openrouter_lease(&mutation)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{field} mutation unexpectedly succeeded"));
+            assert!(
+                matches!(&error, ServerError::InvalidRequest(_)),
+                "{field} mutation returned {error}"
+            );
+        }
+
+        let changed_nullifier = mutated_request(&request, |value| {
+            value.public_inputs.request_nullifier = Felt252::from_u64(909)
+        });
+        assert_ne!(
+            api_request_binding(&changed_nullifier).unwrap(),
+            original_binding
+        );
+        let error = processor
+            .issue_openrouter_lease(&changed_nullifier)
+            .await
+            .err()
+            .expect("request_nullifier mutation unexpectedly succeeded");
+        assert!(
+            matches!(&error, ServerError::InvalidProof(_)),
+            "request_nullifier mutation returned {error}"
+        );
+
+        assert!(matches!(
+            processor.validate_and_reserve(&request, ReservationKind::Proxy),
+            Err(ServerError::Replay)
+        ));
+
+        let lease = store
+            .lookup_openrouter_lease(&request.client_request_id)
+            .unwrap();
+        assert_eq!(
+            lease.api_request.public_inputs.solvency_bound,
+            request.public_inputs.solvency_bound
+        );
+        assert_eq!(lease.spending_limit_usd.to_bits(), original_limit.to_bits());
+        assert_eq!(lease.status, "provisioning");
+        assert!(lease.key_hash.is_none());
+    }
 }

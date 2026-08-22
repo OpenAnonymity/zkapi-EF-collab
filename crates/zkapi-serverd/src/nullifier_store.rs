@@ -4,6 +4,7 @@
 //! progresses through: Reserved -> Finalized (or ClearanceReserved for withdrawals).
 
 use rusqlite::{params, Connection, OptionalExtension};
+use sha3::{Digest, Keccak256};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,6 +37,9 @@ pub struct TranscriptRecord {
     pub policy_evidence_hash: Option<Felt252>,
     pub proof_blob: Option<Vec<u8>>,
     pub request_inputs_json: Option<String>,
+    /// Domain-separated digest of the complete canonical v2 API request.
+    /// Reserved retries must match this before proof verification is skipped.
+    pub api_request_binding: Option<String>,
     pub created_at: u64,
     pub finalized_at: Option<u64>,
 }
@@ -62,6 +66,19 @@ pub struct OpenRouterLeaseRecord {
 /// SQLite-backed nullifier store.
 pub struct NullifierStore {
     conn: Mutex<Connection>,
+}
+
+/// Bind the complete semantically decoded v2 wire request. Serde emits struct
+/// fields in declaration order, so equivalent JSON input has one canonical
+/// representation while every downstream request field affects the digest.
+pub(crate) fn api_request_binding(request: &ApiRequestV2) -> Result<String, ServerError> {
+    let request = serde_json::to_vec(request).map_err(|error| {
+        ServerError::Internal(format!("failed to serialize v2 request binding: {error}"))
+    })?;
+    let mut digest = Keccak256::new();
+    digest.update(b"zkapi:v2:api-request-binding\0");
+    digest.update(request);
+    Ok(hex::encode(digest.finalize()))
 }
 
 impl NullifierStore {
@@ -92,6 +109,7 @@ impl NullifierStore {
                 policy_evidence_hash TEXT,
                 proof_blob BLOB,
                 request_inputs_json TEXT,
+                api_request_binding TEXT,
                 created_at INTEGER NOT NULL,
                 finalized_at INTEGER
             );
@@ -127,9 +145,14 @@ impl NullifierStore {
             [],
         );
         let _ = conn.execute(
+            "ALTER TABLE nullifiers ADD COLUMN api_request_binding TEXT",
+            [],
+        );
+        let _ = conn.execute(
             "ALTER TABLE openrouter_leases ADD COLUMN key_source TEXT NOT NULL DEFAULT 'openrouter'",
             [],
         );
+        backfill_openrouter_request_bindings(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -149,20 +172,31 @@ impl NullifierStore {
         client_request_id: &str,
         payload_hash: &Felt252,
     ) -> Result<(), ServerError> {
-        self.reserve_with_kind(nullifier, client_request_id, payload_hash, "proxy")
+        self.reserve_with_kind(nullifier, client_request_id, payload_hash, "proxy", None)
     }
 
-    pub fn reserve_openrouter_lease(
+    /// Reserve a v2 proxy request and bind every semantically decoded wire
+    /// field. This permits only an exact retry to skip proof verification.
+    pub fn reserve_v2(&self, request: &ApiRequestV2) -> Result<(), ServerError> {
+        self.reserve_bound_v2(request, "proxy")
+    }
+
+    pub fn reserve_openrouter_lease(&self, request: &ApiRequestV2) -> Result<(), ServerError> {
+        self.reserve_bound_v2(request, "openrouter_lease")
+    }
+
+    fn reserve_bound_v2(
         &self,
-        nullifier: &Felt252,
-        client_request_id: &str,
-        payload_hash: &Felt252,
+        request: &ApiRequestV2,
+        reservation_kind: &str,
     ) -> Result<(), ServerError> {
+        let binding = api_request_binding(request)?;
         self.reserve_with_kind(
-            nullifier,
-            client_request_id,
-            payload_hash,
-            "openrouter_lease",
+            &request.public_inputs.request_nullifier,
+            &request.client_request_id,
+            &request.payload_hash,
+            reservation_kind,
+            Some(&binding),
         )
     }
 
@@ -172,6 +206,7 @@ impl NullifierStore {
         client_request_id: &str,
         payload_hash: &Felt252,
         reservation_kind: &str,
+        api_request_binding: Option<&str>,
     ) -> Result<(), ServerError> {
         let conn = self
             .conn
@@ -182,14 +217,16 @@ impl NullifierStore {
 
         conn.execute(
             "INSERT INTO nullifiers (
-                nullifier, status, reservation_kind, client_request_id, payload_hash, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                nullifier, status, reservation_kind, client_request_id, payload_hash,
+                api_request_binding, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 null_hex,
                 status_to_str(NullifierStatus::Reserved),
                 reservation_kind,
                 client_request_id,
                 payload_hash.to_hex(),
+                api_request_binding,
                 now as i64,
             ],
         )
@@ -573,6 +610,69 @@ impl NullifierStore {
     }
 }
 
+/// Older lease rows already contain the complete original request. Use that
+/// durable copy to migrate their nullifier reservation safely; proxy
+/// reservations have no equivalent source and intentionally remain unbound so
+/// retries fail closed.
+fn backfill_openrouter_request_bindings(conn: &Connection) -> Result<(), ServerError> {
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "SELECT client_request_id, request_nullifier, api_request_json
+                 FROM openrouter_leases",
+            )
+            .map_err(|error| {
+                ServerError::Database(format!("lease binding migration query failed: {error}"))
+            })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| {
+                ServerError::Database(format!("lease binding migration read failed: {error}"))
+            })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| {
+            ServerError::Database(format!("lease binding migration row failed: {error}"))
+        })?
+    };
+
+    for (client_request_id, request_nullifier, request_json) in rows {
+        let Ok(request) = serde_json::from_str::<ApiRequestV2>(&request_json) else {
+            // A malformed durable lease cannot be resumed safely. Leave the
+            // reservation unbound so validate_and_reserve rejects it.
+            continue;
+        };
+        if request.client_request_id != client_request_id
+            || request.public_inputs.request_nullifier.to_hex() != request_nullifier
+        {
+            continue;
+        }
+        let binding = api_request_binding(&request)?;
+        conn.execute(
+            "UPDATE nullifiers SET api_request_binding = ?1
+             WHERE nullifier = ?2
+               AND client_request_id = ?3
+               AND payload_hash = ?4
+               AND reservation_kind = 'openrouter_lease'
+               AND api_request_binding IS NULL",
+            params![
+                binding,
+                request_nullifier,
+                client_request_id,
+                request.payload_hash.to_hex(),
+            ],
+        )
+        .map_err(|error| {
+            ServerError::Database(format!("lease binding migration update failed: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
 /// Convert a NullifierStatus to its string representation for storage.
 fn status_to_str(status: NullifierStatus) -> &'static str {
     match status {
@@ -619,6 +719,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> 
     let policy_evidence_hash: Option<String> = row.get("policy_evidence_hash")?;
     let proof_blob: Option<Vec<u8>> = row.get("proof_blob")?;
     let request_inputs_json: Option<String> = row.get("request_inputs_json")?;
+    let api_request_binding: Option<String> = row.get("api_request_binding")?;
     let created_at: i64 = row.get("created_at")?;
     let finalized_at: Option<i64> = row.get("finalized_at")?;
 
@@ -646,6 +747,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptRecord> 
         policy_evidence_hash: parse_opt_felt(policy_evidence_hash),
         proof_blob,
         request_inputs_json,
+        api_request_binding,
         created_at: created_at as u64,
         finalized_at: finalized_at.map(|t| t as u64),
     })
@@ -762,6 +864,7 @@ mod tests {
             policy_evidence_hash: None,
             proof_blob: None,
             request_inputs_json: None,
+            api_request_binding: None,
             created_at: 0,
             finalized_at: None,
         };
@@ -830,12 +933,31 @@ mod tests {
                 proof: "public-proof".to_string(),
             },
         };
-        store
-            .reserve(&nullifier, "lease-1", &request.payload_hash)
-            .unwrap();
+        store.reserve_openrouter_lease(&request).unwrap();
+        let reservation = store.lookup_by_nullifier(&nullifier).unwrap();
+        assert_eq!(
+            reservation.api_request_binding.as_deref(),
+            Some(api_request_binding(&request).unwrap().as_str())
+        );
         store
             .create_openrouter_lease(&request, "openrouter", 10, 20, 21, 0.001)
             .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE nullifiers SET api_request_binding = NULL WHERE nullifier = ?1",
+                params![nullifier.to_hex()],
+            )
+            .unwrap();
+            backfill_openrouter_request_bindings(&conn).unwrap();
+        }
+        assert_eq!(
+            store
+                .lookup_by_nullifier(&nullifier)
+                .unwrap()
+                .api_request_binding,
+            Some(api_request_binding(&request).unwrap())
+        );
         store
             .activate_openrouter_lease("lease-1", "safe-key-hash")
             .unwrap();

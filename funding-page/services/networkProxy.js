@@ -86,8 +86,7 @@ class NetworkProxy {
             alpn: null,
             lastUpdated: null,
             requestCount: 0,
-            bytesEncrypted: 0,
-            rawLogs: []
+            bytesEncrypted: 0
         };
         this.tlsInspectionEnabled = false;
         this.originalStderr = null;
@@ -156,8 +155,7 @@ class NetworkProxy {
             alpn: null,
             lastUpdated: null,
             requestCount: 0,
-            bytesEncrypted: 0,
-            rawLogs: []
+            bytesEncrypted: 0
         };
     }
 
@@ -199,12 +197,6 @@ class NetworkProxy {
 
     parseTlsOutput(text) {
         if (!text || typeof text !== 'string') return;
-
-        // Store raw log (keep last 50 entries)
-        this.tlsInfo.rawLogs.push({ timestamp: Date.now(), text });
-        if (this.tlsInfo.rawLogs.length > 50) {
-            this.tlsInfo.rawLogs.shift();
-        }
 
         let foundTlsInfo = false;
 

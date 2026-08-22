@@ -882,19 +882,31 @@ class BrowserWalletRuntime extends EventTarget {
         setTimeout(() => void this.retireActiveLease().catch(() => {}), Math.min(delayMs, 2_147_000_000));
     }
 
-    async retireRequest(clientRequestId, request, signal) {
-        const deadline = Date.now() + MAX_RECOVERY_WAIT_MS;
+    async retireRequest(clientRequestId, request, signal, retryOptions = {}) {
+        const now = retryOptions.now || Date.now;
+        const sleep = retryOptions.sleep || delay;
+        const maxWaitMs = retryOptions.maxWaitMs ?? MAX_RECOVERY_WAIT_MS;
+        const deadline = now() + maxWaitMs;
+        const body = JSON.stringify(request);
+        let attempt = 1;
         while (true) {
             try {
                 return await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases/${encodeURIComponent(clientRequestId)}`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify(request),
+                    body,
                     signal
                 });
             } catch (error) {
-                if ((!error.data?.error?.retriable && !error.data?.retriable) || Date.now() + 1_000 >= deadline) throw error;
-                await delay(1_000, signal);
+                const backoffDelayMs = Math.min(1_000 * (2 ** Math.max(0, attempt - 1)), 10_000);
+                const advertisedRetryMs = leaseRetryAfterMilliseconds(error);
+                const retryDelayMs = Math.max(backoffDelayMs, advertisedRetryMs || 0);
+                if (!isExplicitlyRetriableLeaseError(error)
+                    || now() + retryDelayMs > deadline) {
+                    throw error;
+                }
+                await sleep(retryDelayMs, signal);
+                attempt += 1;
             }
         }
     }
