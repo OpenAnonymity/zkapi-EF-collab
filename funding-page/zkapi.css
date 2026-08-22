@@ -887,8 +887,8 @@
     border: 0;
 }
 
-/* A send receipt lives with the message it acknowledges. The transcript is
-   the primary state surface; detailed protocol copy stays behind <details>. */
+/* Delivery changes remain available to assistive technology while the
+   assistant placeholder is the sole visible lifecycle surface. */
 #zkapi-send-announcer {
     position: absolute;
     width: 1px;
@@ -901,160 +901,8 @@
     border: 0;
 }
 
-.user-delivery-row {
-    position: relative;
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 0.35rem;
-    min-height: 1.25rem;
-    margin-top: 0.2rem;
-    color: hsl(var(--color-muted-foreground));
-    font-size: 0.625rem;
-}
-
-.user-delivery-details {
-    position: relative;
-}
-
-.user-delivery-details summary {
-    display: inline-flex;
-    min-height: 1.5rem;
-    align-items: center;
-    gap: 0.3rem;
-    border-radius: 9999px;
-    padding: 0.125rem 0.35rem;
-    cursor: pointer;
-    list-style: none;
-    user-select: none;
-}
-
-.user-delivery-details summary::-webkit-details-marker {
-    display: none;
-}
-
-.user-delivery-details[open] summary {
-    background: hsl(var(--color-muted) / 0.7);
-    color: hsl(var(--color-foreground));
-}
-
-@media (hover: hover) and (pointer: fine) {
-    .user-delivery-details summary:hover {
-        background: hsl(var(--color-muted) / 0.7);
-        color: hsl(var(--color-foreground));
-    }
-}
-
-.user-delivery-details summary:focus-visible,
-.user-delivery-actions button:focus-visible {
-    outline: 2px solid hsl(var(--color-ring));
-    outline-offset: 2px;
-}
-
-.user-delivery-glyph {
-    position: relative;
-    display: inline-flex;
-    width: 0.7rem;
-    height: 0.7rem;
-    align-items: center;
-    justify-content: center;
-}
-
-.user-delivery-glyph::before,
-.user-delivery-glyph i {
-    content: '';
-    position: absolute;
-    border-radius: 9999px;
-}
-
-.user-delivery-glyph::before {
-    inset: 0.125rem;
-    background: currentColor;
-    opacity: 0.85;
-}
-
-.user-delivery-row[data-delivery-state="queued"] .user-delivery-glyph i,
-.user-delivery-row[data-delivery-state="securing"] .user-delivery-glyph i,
-.user-delivery-row[data-delivery-state="sending"] .user-delivery-glyph i {
-    inset: 0;
-    border: 1px solid currentColor;
-    border-top-color: transparent;
-    animation: zkapiReceiptOrbit 1.35s linear infinite;
-}
-
-.user-delivery-row[data-delivery-state="sent"] .user-delivery-glyph::before {
-    inset: 0;
-    border: solid currentColor;
-    border-width: 0 1.5px 1.5px 0;
-    border-radius: 0;
-    background: transparent;
-    transform: translate(0.05rem, -0.05rem) rotate(45deg) scale(0.65);
-}
-
-.user-delivery-row[data-delivery-state="failed"],
-.user-delivery-row[data-delivery-state="canceled"] {
-    color: hsl(var(--color-destructive));
-}
-
-.user-delivery-row[data-delivery-state="failed"] .user-delivery-glyph::before,
-.user-delivery-row[data-delivery-state="canceled"] .user-delivery-glyph::before {
-    inset: 0;
-    border-radius: 50%;
-    background: currentColor;
-}
-
-.user-delivery-row[data-delivery-state="failed"] .user-delivery-glyph::after,
-.user-delivery-row[data-delivery-state="canceled"] .user-delivery-glyph::after {
-    content: '!';
-    position: relative;
-    color: hsl(var(--color-background));
-    font-size: 0.5rem;
-    font-weight: 800;
-    line-height: 1;
-}
-
-.user-delivery-popover {
-    position: absolute;
-    z-index: 70;
-    right: 0;
-    bottom: calc(100% + 0.35rem);
-    width: max-content;
-    max-width: min(17rem, calc(100vw - 2rem));
-    border: 1px solid hsl(var(--color-border));
-    border-radius: 0.5rem;
-    padding: 0.45rem 0.55rem;
-    background: hsl(var(--color-popover));
-    color: hsl(var(--color-popover-foreground));
-    box-shadow: 0 8px 24px hsl(var(--color-foreground) / 0.12);
-    font-size: 0.625rem;
-    line-height: 0.9rem;
-}
-
-.user-delivery-actions {
-    display: inline-flex;
-    gap: 0.25rem;
-}
-
-.user-delivery-actions button {
-    min-height: 1.5rem;
-    border-radius: 9999px;
-    padding: 0.125rem 0.45rem;
-    background: hsl(var(--color-destructive) / 0.08);
-    color: hsl(var(--color-destructive));
-    font-weight: 600;
-}
-
-.user-delivery-actions button.is-processing,
-.user-delivery-actions button[aria-busy="true"] {
-    background: hsl(var(--color-muted) / 0.7);
-    cursor: wait;
-    opacity: 0.72;
-    pointer-events: none;
-}
-
 .message-action-btn.is-processing,
-.confirm-edit-btn.is-processing,
-.user-delivery-actions button.is-processing {
+.confirm-edit-btn.is-processing {
     position: relative;
     color: transparent !important;
     cursor: wait;
@@ -1067,8 +915,7 @@
 }
 
 .message-action-btn.is-processing::after,
-.confirm-edit-btn.is-processing::after,
-.user-delivery-actions button.is-processing::after {
+.confirm-edit-btn.is-processing::after {
     position: absolute;
     top: 50%;
     left: 50%;
@@ -1138,7 +985,6 @@
     animation: zkapiSendCheck 160ms var(--zkapi-ease-out) both;
 }
 
-@keyframes zkapiReceiptOrbit { to { transform: rotate(360deg); } }
 @keyframes zkapiSendOrbit { to { transform: rotate(360deg); } }
 @keyframes zkapiSidebarOrbit { to { transform: rotate(360deg); } }
 @keyframes zkapiActionOrbit { to { transform: translate(-50%, -50%) rotate(360deg); } }
@@ -1181,21 +1027,10 @@
 .dark .zkapi-state-glyph--error,
 .dark .zkapi-journey-step[data-state="error"] .zkapi-journey-marker,
 .dark .zkapi-capsule-end--error,
-.dark .user-delivery-row[data-delivery-state="failed"],
-.dark .user-delivery-row[data-delivery-state="canceled"],
-.dark .user-delivery-actions button,
 .dark #right-panel .text-destructive,
 .dark #account-modal .text-destructive,
 .dark #sidebar .text-destructive {
     color: rgb(248 113 113) !important;
-}
-
-.dark .user-delivery-actions button[aria-busy="true"] {
-    color: hsl(var(--color-muted-foreground)) !important;
-}
-
-.dark .user-delivery-actions button.is-processing {
-    color: transparent !important;
 }
 
 .dark .zkapi-status-dot.error,
@@ -1248,14 +1083,12 @@
         transition: none;
     }
 
-    .user-delivery-glyph i,
     .pending-response-dots i,
     .zkapi-send-orbit i,
     .zkapi-send-check,
     .zkapi-sidebar-orbit,
     .message-action-btn.is-processing::after,
     .confirm-edit-btn.is-processing::after,
-    .user-delivery-actions button.is-processing::after,
     .account-tab-btn[data-status="busy"] .account-tab-dot,
     .zkapi-composer-state--ambient::after {
         animation: none !important;
@@ -1263,8 +1096,7 @@
     }
 
     .message-action-btn.is-processing::after,
-    .confirm-edit-btn.is-processing::after,
-    .user-delivery-actions button.is-processing::after {
+    .confirm-edit-btn.is-processing::after {
         transform: translate(-50%, -50%);
     }
 

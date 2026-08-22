@@ -425,7 +425,7 @@ test('New Chat settlement logs through the application service without a compone
     );
 });
 
-test('queued-send wiring snapshots before awaiting and exposes inline failure actions', () => {
+test('queued-send wiring snapshots before awaiting while user bubbles remain state-free', () => {
     const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
     const templates = fs.readFileSync(path.join(__dirname, 'components/MessageTemplates.js'), 'utf8');
     const send = sourceMethodAt(app, 'async sendMessage(');
@@ -438,9 +438,9 @@ test('queued-send wiring snapshots before awaiting and exposes inline failure ac
     assert.match(captured, /sessionId: session\.id/);
     assert.match(captured, /this\.announceZkapiSendState\('Message accepted'\)/);
     assert.match(captured, /updateOutgoingDeliveryState\(userMessage, 'failed'/);
-    assert.match(templates, /data-delivery-state/);
-    assert.match(templates, />Retry</);
-    assert.match(templates, />Edit</);
+    assert.doesNotMatch(templates, /user-delivery|data-delivery-state/);
+    assert.match(templates, /resend-prompt-btn/);
+    assert.match(templates, /edit-prompt-btn/);
 });
 
 test('queued-send guards are session-scoped and New Chat cancels the session being left', () => {

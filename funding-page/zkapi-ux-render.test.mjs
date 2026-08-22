@@ -662,31 +662,48 @@ test('right-panel disclosures preserve both open and closed state across real re
     }
 });
 
-test('Securing appears only in the assistant pending row while live', () => {
-    const user = {
-        id: 'user-1',
-        sessionId: 'chat-a',
-        role: 'user',
-        content: 'Explain HTTPS',
-        timestamp: 1,
-        deliveryState: 'securing'
-    };
-    const userHtml = buildMessageHTML(user, {}, [], '', { isSessionStreaming: true });
-    const assistantHtml = buildTypingIndicator(
-        'typing-1',
-        'OpenAI',
-        'OpenAI: GPT-5.3 Instant',
-        1,
-        'requesting-key'
-    );
+test('user bubbles omit every delivery state while assistant pending rows own lifecycle', () => {
+    for (const deliveryState of [null, 'queued', 'securing', 'sending', 'sent', 'failed', 'canceled']) {
+        for (const isSessionStreaming of [true, false]) {
+            const userHtml = buildMessageHTML({
+                id: `user-${deliveryState || 'none'}`,
+                sessionId: 'chat-a',
+                role: 'user',
+                content: 'Explain HTTPS',
+                timestamp: 1,
+                deliveryState
+            }, {}, [], '', { isSessionStreaming });
 
-    assert.doesNotMatch(userHtml, /user-delivery-row/);
-    assert.doesNotMatch(userHtml, />Securing</);
-    assert.match(assistantHtml, />Securing</);
+            assert.doesNotMatch(userHtml, /user-delivery|data-delivery-state/);
+            assert.doesNotMatch(userHtml, />\s*(?:Queued|Securing|Sending|Sent|Not sent|Canceled|Retry|Edit)\s*</);
+            assert.match(userHtml, /resend-prompt-btn message-action-btn/);
+            assert.match(userHtml, /edit-prompt-btn message-action-btn/);
+            assert.match(userHtml, /aria-label="Resend prompt"/);
+            assert.match(userHtml, /aria-label="Edit prompt"/);
+        }
+    }
 
-    const interruptedHtml = buildMessageHTML(user, {}, [], '', { isSessionStreaming: false });
-    assert.match(interruptedHtml, />Not sent</);
-    assert.match(interruptedHtml, />Retry</);
+    const pendingPhases = [
+        ['settling-previous', 'settling-previous', 'Queued', 'Message accepted. Finishing the previous private chat.'],
+        ['requesting-key', 'requesting-key', 'Securing', 'Preparing private access for this message.'],
+        ['waiting', 'requesting-key', 'Securing', 'Preparing private access for this message.'],
+        ['waiting-response', 'waiting-response', 'Thinking', 'Message sent. Waiting for the response.'],
+        ['stream-open', 'waiting-response', 'Thinking', 'Message sent. Waiting for the response.']
+    ];
+    for (const [phase, normalizedPhase, label, description] of pendingPhases) {
+        const assistantHtml = buildTypingIndicator(
+            `typing-${phase}`,
+            'OpenAI',
+            'OpenAI: GPT-5.3 Instant',
+            1,
+            phase
+        );
+        assert.match(assistantHtml, /pending-response-line/);
+        assert.match(assistantHtml, /pending-response-dots/);
+        assert.match(assistantHtml, new RegExp(`data-phase="${normalizedPhase}"`));
+        assert.match(assistantHtml, new RegExp(`>${label}<`));
+        assert.match(assistantHtml, new RegExp(`aria-label="${description.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+    }
 });
 
 test('returning to a chat preserves its complete conversation and excludes the other chat', () => {
@@ -781,12 +798,12 @@ test('capsule uses static hold and error endpoints without implying accepted suc
     assert.doesNotMatch(element.innerHTML, /✓|→/);
 });
 
-test('recovery controls have a visible busy state and reduced motion keeps pending copy readable', () => {
+test('message recovery controls have a visible busy state and reduced motion keeps pending copy readable', () => {
     const css = fs.readFileSync(new URL('./zkapi.css', import.meta.url), 'utf8');
     const reducedMotion = css.slice(css.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
 
-    assert.match(css, /\.user-delivery-details summary\s*\{[\s\S]*?min-height: 1\.5rem/);
-    assert.match(css, /\.user-delivery-actions button\[aria-busy="true"\][\s\S]*?pointer-events: none/);
+    assert.doesNotMatch(css, /\.user-delivery-(?:row|details|glyph|label|popover|actions)/);
+    assert.doesNotMatch(css, /zkapiReceiptOrbit/);
     assert.match(css, /\.message-action-btn\.is-processing::after,[\s\S]*?animation: zkapiActionOrbit/);
     assert.match(css, /\.chat-session\[data-deleting="true"\]\s*\{[\s\S]*?cursor: wait/);
     assert.match(css, /\.zkapi-composer-live-status\s*\{[\s\S]*?clip: rect\(0, 0, 0, 0\)/);

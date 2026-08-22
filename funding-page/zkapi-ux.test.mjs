@@ -310,8 +310,11 @@ test('low-text proposals keep protocol detail behind disclosure and preserve the
     assert.match(experience, /zkapi-composer-ambient-button/);
     assert.match(experience, /zkapi-composer-capsule/);
     assert.doesNotMatch(experience, /text = primary\.compact/);
-    assert.match(templates, /user-delivery-details/);
+    assert.doesNotMatch(templates, /buildUserDeliveryReceipt|user-delivery|data-delivery-state/);
     assert.match(templates, /resend-prompt-btn/);
+    assert.match(templates, /edit-prompt-btn/);
+    assert.match(templates, /pending-response-line/);
+    assert.match(templates, /pending-response-dots/);
     assert.match(css, /prefers-reduced-motion: reduce/);
     assert.match(css, /zkapi-composer-state--ambient/);
 });

@@ -598,45 +598,6 @@ function buildEditableFileAttachments(files, messageId) {
 // Threshold for collapsing long user messages (in characters)
 const USER_MESSAGE_COLLAPSE_THRESHOLD = 560;
 
-function buildUserDeliveryReceipt(message, options = {}) {
-    const persistedState = message.deliveryState || null;
-    if (!persistedState) return '';
-    const interrupted = ['queued', 'securing', 'sending', 'sent'].includes(persistedState)
-        && options.isSessionStreaming === false;
-    const state = interrupted ? 'failed' : persistedState;
-    // The assistant placeholder is the single visible Securing indicator while
-    // a live send is preparing private access. Keep the persisted state for
-    // recovery, and still turn an interrupted Securing state into a retry row.
-    if (state === 'securing') return '';
-    const copy = {
-        queued: ['Queued', 'Accepted. Waiting for the previous private chat to finish.'],
-        securing: ['Securing', 'Preparing private access for this message.'],
-        sending: ['Sending', 'Private access is ready. Opening the response stream.'],
-        sent: ['Sent', 'The model received this message.'],
-        failed: ['Not sent', message.deliveryError || (interrupted
-            ? 'This send was interrupted. Retry it without losing your prompt.'
-            : 'The message is saved, but it could not be sent.')],
-        canceled: ['Canceled', 'The message is saved and can be edited or retried.']
-    }[state] || ['Pending', 'This message is waiting to be sent.'];
-    const safeId = escapeHtmlAttribute(message.id);
-    const retryActions = ['failed', 'canceled'].includes(state) ? `
-        <span class="user-delivery-actions">
-            <button type="button" class="resend-prompt-btn" data-message-id="${safeId}">Retry</button>
-            <button type="button" class="edit-prompt-btn" data-message-id="${safeId}">Edit</button>
-        </span>` : '';
-    return `
-        <div class="user-delivery-row" data-delivery-state="${escapeHtmlAttribute(state)}" aria-label="${escapeHtmlAttribute(copy[1])}">
-            <details class="user-delivery-details">
-                <summary>
-                    <span class="user-delivery-glyph" aria-hidden="true"><i></i></span>
-                    <span class="user-delivery-label">${escapeHtml(copy[0])}</span>
-                </summary>
-                <span class="user-delivery-popover">${escapeHtml(copy[1])}</span>
-            </details>
-            ${retryActions}
-        </div>`;
-}
-
 /**
  * Builds HTML for a user message bubble.
  * @param {Object} message - Message object with id, content, etc.
@@ -647,7 +608,6 @@ function buildUserDeliveryReceipt(message, options = {}) {
 function buildUserMessage(message, options = {}) {
     const fileAttachments = buildFileAttachments(message.files);
     const { isEditing = false } = options;
-    const deliveryReceipt = buildUserDeliveryReceipt(message, options);
 
     // If in edit mode, show the edit form instead of the static message
     if (isEditing) {
@@ -762,7 +722,7 @@ function buildUserMessage(message, options = {}) {
 
     // Normal display mode with action buttons (shown on hover)
     return `
-        <div class="${CLASSES.userWrapper}" data-message-id="${message.id}"${message.deliveryState ? ` data-delivery-state="${escapeHtmlAttribute(message.deliveryState)}"` : ''}${getRawContentAttribute(message.content)}>
+        <div class="${CLASSES.userWrapper}" data-message-id="${message.id}"${getRawContentAttribute(message.content)}>
             <div class="${CLASSES.userGroup}">
                 <div class="${CLASSES.userBubble} ${scrubberTogglableClass} ${heightLockedClass}" style="${lockedHeightStyle}">
                     <div class="${CLASSES.userContent} ${collapsibleClass}">
@@ -771,7 +731,6 @@ function buildUserMessage(message, options = {}) {
                     </div>
                     ${showMoreBtn}
                 </div>
-                ${deliveryReceipt}
                 <div class="message-user-actions absolute top-full right-0 mt-1 flex items-center gap-1 z-10">
                     ${message.scrubber ? `
                     <button
@@ -791,6 +750,7 @@ function buildUserMessage(message, options = {}) {
                         class="resend-prompt-btn message-action-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                         data-message-id="${message.id}"
                         data-tooltip="Resend prompt"
+                        aria-label="Resend prompt"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
@@ -800,6 +760,7 @@ function buildUserMessage(message, options = {}) {
                         class="copy-user-message-btn message-action-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                         data-message-id="${message.id}"
                         data-tooltip="Copy prompt"
+                        aria-label="Copy prompt"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" />
@@ -809,6 +770,7 @@ function buildUserMessage(message, options = {}) {
                         class="edit-prompt-btn message-action-btn flex items-center justify-center w-7 h-7 rounded-md transition-colors hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                         data-message-id="${message.id}"
                         data-tooltip="Edit prompt"
+                        aria-label="Edit prompt"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
