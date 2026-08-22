@@ -213,7 +213,10 @@ function buildJourney(primary, transition, activity) {
         if (activity?.kind === 'access' || ACCESS_PHASES.has(activity?.phase)) activeIndex = 2;
         if (primary.phase === 'ready' && activity?.kind === 'access') activeIndex = 2;
     } else {
-        if (['requesting', 'verifying'].includes(activity?.phase)) activeIndex = 1;
+        // A retry wait still belongs to temporary-key creation. Do not jump
+        // back to the balance-verification step while OA is throttling keys.
+        if (activity?.kind === 'access'
+            && ['requesting', 'waiting', 'verifying'].includes(activity?.phase)) activeIndex = 1;
         if (primary.phase === 'ready') activeIndex = 2;
     }
 

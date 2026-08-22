@@ -56,6 +56,15 @@ paths:
               schema: {$ref: "#/components/schemas/OpenRouterLease"}
         "400": {description: Invalid request, proof, or disabled lease mode}
         "409": {description: Existing active or settling lease}
+        "429":
+          description: OA key capacity is temporarily limited; the exact request is safe to retry
+          headers:
+            Retry-After:
+              description: Seconds until the server recommends retrying the same request
+              schema: {type: integer, minimum: 0}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
   /v2/openrouter/leases/{client_request_id}:
     get:
       summary: Read non-secret lease state; never returns the runtime key
@@ -100,6 +109,23 @@ components:
         payload_hash: {type: string, pattern: "^0x[0-9a-f]+$"}
         public_inputs: {type: object, additionalProperties: true}
         proof: {$ref: "#/components/schemas/Groth16Proof"}
+    ErrorResponse:
+      type: object
+      required: [status, client_request_id, error_code, error_message, retriable]
+      properties:
+        status: {const: error}
+        client_request_id: {type: string}
+        error_code:
+          type: string
+          description: Stable machine code; OA limits use oa_minute_request_limit, oa_hourly_issuance_budget, or oa_rate_limited.
+        error_message: {type: string}
+        retriable: {type: boolean}
+        latest_root: {type: string, pattern: "^0x[0-9a-f]+$"}
+        server_time_ms: {type: integer}
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+          description: Present with OA rate limits and matches the Retry-After header.
     OpenRouterLease:
       type: object
       required: [status, client_request_id, api_key, openrouter_api_base, issued_at, expires_at, valid_for_seconds, settle_after, spending_limit_usd, key_source]

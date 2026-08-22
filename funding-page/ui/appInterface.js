@@ -141,6 +141,9 @@ export function createSidebarInterface(app) {
     return {
         elements,
         state: app.state,
+        get newChatSettlementState() {
+            return app.newChatSettlementState;
+        },
         get sessionSearchQuery() {
             return app.sessionSearchQuery;
         },
@@ -210,6 +213,7 @@ const COMPONENT_APP_KEYS = new Set([
     'memoryMode',
     'messageNavigation',
     'modelPicker',
+    'newChatSettlementState',
     'normalizeModelName',
     'processContentWithLatex',
     'pruneMemoryRetrievedContextFromMessage',

@@ -297,6 +297,55 @@ test('New Chat opens immediately and settles its previous lease in the backgroun
     );
 });
 
+test('New Chat settlement logs through the application service without a component facade', async () => {
+    const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const method = sourceMethodAt(
+        source,
+        'startPreviousChatLeaseSettlement(previousSession, previousLease = null)'
+    );
+    const logs = [];
+    const session = { id: 'old-chat', title: 'Old chat' };
+    const lease = { session_id: session.id };
+    const zkapiClient = {
+        activeLease: lease,
+        async settleActiveLease() {
+            this.activeLease = null;
+        }
+    };
+    const networkLogger = {
+        logRequest(entry) {
+            logs.push(entry);
+        }
+    };
+    const Harness = Function(
+        'zkapiClient',
+        'inferenceService',
+        'chatDB',
+        'networkLogger',
+        `return class SettlementHarness { ${method} };`
+    )(
+        zkapiClient,
+        { clearAccessInfo() {} },
+        { async saveSession() {} },
+        networkLogger
+    );
+    const app = new Harness();
+    app.state = { sessionsById: new Map([[session.id, session]]) };
+    app.newChatSettlementPromise = null;
+    app.setNewChatSettlementState = () => {};
+    app.cancelPendingSendsAndWait = async () => true;
+    app.isSessionDeleted = () => false;
+    app.showToast = () => {};
+
+    assert.equal(app.services, undefined, 'the controller must not depend on the UI component facade');
+    await app.startPreviousChatLeaseSettlement(session, lease);
+
+    assert.deepEqual(
+        logs.map(entry => entry.action),
+        ['zkapi-lease-settlement-start', 'zkapi-lease-settlement-complete']
+    );
+});
+
 test('queued-send wiring snapshots before awaiting and exposes inline failure actions', () => {
     const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
     const templates = fs.readFileSync(path.join(__dirname, 'components/MessageTemplates.js'), 'utf8');
@@ -563,6 +612,97 @@ test('initial sends and retries gate inference on a usable funded note', () => {
         assert.ok(acquire > missingNote && stream > acquire, `${label} must gate key acquisition and inference`);
         assert.match(method, /accountModal\?\.open\?\.\('withdraw'\)/);
         assert.match(method, /accountModal\?\.open\?\.\('fund'\)/);
+    }
+});
+
+test('opaque zkAPI chat bindings stay Securing until transport access is real', () => {
+    const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const resolveMethod = sourceMethodAt(source, '\n    resolvePendingPhaseForSession(session)');
+    const advanceMethod = sourceMethodAt(source, 'advancePendingStateAfterAccessGranted(session, typingId = null)');
+    let transportReady = false;
+    const inferenceService = {
+        isTransportAccessReady() {
+            return transportReady;
+        }
+    };
+    const Harness = Function(
+        'inferenceService',
+        `return class PendingAccessHarness { ${resolveMethod} ${advanceMethod} };`
+    )(inferenceService);
+    const app = new Harness();
+    const phases = [];
+    const typing = [];
+    app.updateSessionStreamingPhase = (sessionId, phase) => phases.push({ sessionId, phase });
+    app.updateTypingIndicator = (id, phase) => typing.push({ id, phase });
+    const session = { id: 'chat-a', apiKey: 'opaque-session-binding' };
+
+    assert.equal(app.advancePendingStateAfterAccessGranted(session, 'typing-a'), 'requesting-key');
+    assert.deepEqual(phases.at(-1), { sessionId: session.id, phase: 'requesting-key' });
+    assert.deepEqual(typing.at(-1), { id: 'typing-a', phase: 'requesting-key' });
+
+    transportReady = true;
+    assert.equal(app.advancePendingStateAfterAccessGranted(session, 'typing-a'), 'waiting-response');
+    assert.deepEqual(phases.at(-1), { sessionId: session.id, phase: 'waiting-response' });
+    assert.deepEqual(typing.at(-1), { id: 'typing-a', phase: 'waiting-response' });
+});
+
+test('send and Retry keep delivery Securing while zkAPI transport access is deferred', () => {
+    const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const send = sourceMethodAt(source, 'async sendCapturedMessage(');
+    const retry = sourceMethodAt(source, 'async regenerateResponse(');
+    const refresh = sourceMethodAt(source, 'async refreshAccessAfterCreditExhaustion(');
+
+    for (const [label, method] of [['send', send], ['retry', retry]]) {
+        assert.match(
+            method,
+            /const phase = this\.advancePendingStateAfterAccessGranted\(session, typingId\);[\s\S]*?phase === 'requesting-key' \? 'securing' : 'sending'/,
+            `${label} must derive its receipt from real transport readiness`
+        );
+    }
+    assert.doesNotMatch(
+        send,
+        /if \(userMessage\?\.deliveryState !== 'sending'\)/,
+        'a local session binding must not unconditionally claim that private access is ready'
+    );
+    assert.doesNotMatch(
+        retry,
+        /void this\.updateOutgoingDeliveryState\(lastUserMessage, 'sending'\)/,
+        'Retry must not unconditionally claim that private access is ready'
+    );
+    assert.match(
+        refresh,
+        /updateOutgoingDeliveryState\(message, 'securing'\)/,
+        'an exhausted-key refresh must return the durable receipt to Securing'
+    );
+});
+
+test('successful send and Retry streams complete the accessible send announcement', () => {
+    const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+    const methods = [
+        ['send', sourceMethodAt(app, 'async sendCapturedMessage(')],
+        ['retry', sourceMethodAt(app, 'async regenerateResponse(')]
+    ];
+
+    for (const [label, method] of methods) {
+        const streamStart = method.indexOf('const tokenData = await inferenceService.streamCompletion(');
+        const successEnd = method.indexOf('} catch (error)', streamStart);
+        assert.ok(streamStart >= 0 && successEnd > streamStart, `${label} success path must be present`);
+
+        const successPath = method.slice(streamStart, successEnd);
+        const finalSave = successPath.lastIndexOf('await chatDB.saveMessage(streamingMessage)');
+        const completionAnnouncement = successPath.indexOf(
+            "this.announceZkapiSendState('Response complete')"
+        );
+        assert.ok(finalSave >= 0, `${label} must persist the completed response`);
+        assert.ok(
+            completionAnnouncement > finalSave,
+            `${label} must announce completion only after the response is finalized`
+        );
+        assert.match(
+            successPath,
+            /if \(this\.isViewingSession\(session\.id\)\) \{\s*this\.announceZkapiSendState\('Response complete'\);\s*\}/,
+            `${label} must not announce completion for a background chat`
+        );
     }
 });
 
@@ -926,6 +1066,20 @@ test('wallet transactions leave gas estimation and EIP-1559 fee selection to Met
     assert.match(client, /method: 'eth_sendTransaction'/);
     assert.match(client, /contractRevertSelector\(error\)/);
     assert.match(client, /error\?\.code !== 'stale_root'/);
+});
+
+test('published vault challenge-period getter is probed before the reverting fallback', () => {
+    const client = fs.readFileSync(path.join(__dirname, 'services/zkapiClient.js'), 'utf8');
+    const method = sourceMethodAt(client, 'async loadChallengePeriod()');
+    const publishedGetter = method.indexOf('ABI.legacyChallengePeriod');
+    const fallbackGetter = method.indexOf('ABI.challengePeriod');
+
+    assert.ok(publishedGetter >= 0, 'published CHALLENGE_PERIOD() getter is missing');
+    assert.ok(fallbackGetter >= 0, 'challengePeriod() fallback getter is missing');
+    assert.ok(
+        publishedGetter < fallbackGetter,
+        'the known-reverting fallback must not be probed before the published getter'
+    );
 });
 
 test('lease settlement state is visible in every relevant OA chat surface', () => {

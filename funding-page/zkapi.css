@@ -533,6 +533,7 @@
 }
 
 .zkapi-panel-experience--disclosure > summary:focus-visible,
+.zkapi-composer-receipt:focus-visible,
 .zkapi-composer-relay:focus-visible,
 .zkapi-composer-ambient-button:focus-visible,
 .zkapi-composer-capsule:focus-visible {
@@ -540,6 +541,7 @@
     outline-offset: 2px;
 }
 
+.zkapi-composer-state--receipt,
 .zkapi-composer-state--relay,
 .zkapi-composer-state--capsule {
     display: flex;
@@ -700,6 +702,7 @@
     line-height: 1;
 }
 
+.zkapi-composer-state--receipt[data-tone="waiting"] .zkapi-composer-receipt,
 .zkapi-composer-state--relay[data-tone="waiting"] .zkapi-composer-relay,
 .zkapi-composer-state--capsule[data-tone="waiting"] .zkapi-composer-capsule {
     background: rgb(245 158 11 / 0.08);
@@ -707,6 +710,7 @@
     box-shadow: 0 0 0 1px rgb(217 119 6 / 0.24) inset;
 }
 
+.dark .zkapi-composer-state--receipt[data-tone="waiting"] .zkapi-composer-receipt,
 .dark .zkapi-composer-state--relay[data-tone="waiting"] .zkapi-composer-relay,
 .dark .zkapi-composer-state--capsule[data-tone="waiting"] .zkapi-composer-capsule {
     color: rgb(252 211 77);
@@ -869,6 +873,18 @@
 
 .account-tab-btn[data-status="waiting"] .account-tab-dot {
     background: rgb(217 119 6);
+}
+
+.zkapi-composer-live-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 /* A send receipt lives with the message it acknowledges. The transcript is

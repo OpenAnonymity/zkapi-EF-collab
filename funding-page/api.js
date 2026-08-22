@@ -516,6 +516,12 @@ class OpenRouterAPI {
         });
         const url = `${access.baseUrl}/chat/completions`;
         const headers = access.headers;
+        const throwIfStreamAborted = () => {
+            if (!abortController?.signal?.aborted) return;
+            const error = new DOMException('The operation was aborted.', 'AbortError');
+            error.isCancelled = true;
+            throw error;
+        };
 
         let totalTokens = 0;
         let promptTokens = 0;
@@ -532,19 +538,32 @@ class OpenRouterAPI {
         // Buffering for reasoning chunks to reduce UI updates
         let reasoningBuffer = '';
         let reasoningBufferTimer = null;
+        let reasoningFlushPromise = Promise.resolve();
+        let reasoningFlushError = null;
         const REASONING_BUFFER_DELAY = 50; // ms - flush buffer after this delay
         const REASONING_BUFFER_SIZE = 20; // chars - flush when buffer reaches this size
 
         // Helper to flush reasoning buffer
         const flushReasoningBuffer = () => {
-            if (reasoningBuffer && onReasoningChunk) {
-                onReasoningChunk(reasoningBuffer);
-                reasoningBuffer = '';
-            }
             if (reasoningBufferTimer) {
                 clearTimeout(reasoningBufferTimer);
                 reasoningBufferTimer = null;
             }
+            if (reasoningBuffer && onReasoningChunk) {
+                const bufferedReasoning = reasoningBuffer;
+                reasoningBuffer = '';
+                reasoningFlushPromise = reasoningFlushPromise.then(async () => {
+                    if (reasoningFlushError) return;
+                    try {
+                        await onReasoningChunk(bufferedReasoning);
+                    } catch (error) {
+                        reasoningFlushError = error;
+                    }
+                });
+            }
+            return reasoningFlushPromise.then(() => {
+                if (reasoningFlushError) throw reasoningFlushError;
+            });
         };
 
         // Helper to normalize URLs for deduplication (strip trailing garbage, normalize trailing slashes)
@@ -706,7 +725,9 @@ class OpenRouterAPI {
             });
         };
 
-        const processSseLine = (line) => {
+        const processSseLine = async (line) => {
+            throwIfStreamAborted();
+
             // Skip empty lines
             if (line.trim() === '') return;
 
@@ -723,10 +744,15 @@ class OpenRouterAPI {
             }
 
             const data = line.slice(6);
-            if (data === '[DONE]') return;
+            if (data === '[DONE]') return false;
 
+            let parsed;
             try {
-                const parsed = JSON.parse(data);
+                parsed = JSON.parse(data);
+            } catch (error) {
+                console.error('Error parsing SSE chunk:', error, 'Raw line:', line);
+                return;
+            }
 
                 // Check for annotations in various possible locations in the response
                 // All formats use addAnnotations() which deduplicates by normalized URL
@@ -805,19 +831,24 @@ class OpenRouterAPI {
                         // Flush buffer if it's large enough or on newline
                         if (reasoningBuffer.length >= REASONING_BUFFER_SIZE ||
                             reasoningContent.includes('\n')) {
-                            flushReasoningBuffer();
+                            await flushReasoningBuffer();
                         } else {
                             // Otherwise, set a timer to flush after delay
-                            reasoningBufferTimer = setTimeout(flushReasoningBuffer, REASONING_BUFFER_DELAY);
+                            reasoningBufferTimer = setTimeout(() => {
+                                // The next line or finalization surfaces the recorded
+                                // callback failure without creating an unhandled rejection.
+                                void flushReasoningBuffer().catch(() => {});
+                            }, REASONING_BUFFER_DELAY);
                         }
 
                         // Update token count for reasoning (estimated)
                         estimatedReasoningTokens = Math.ceil(accumulatedReasoning.length / 4);
                         if (onTokenUpdate) {
-                            onTokenUpdate({
+                            await onTokenUpdate({
                                 completionTokens: estimatedReasoningTokens,
                                 isStreaming: true
                             });
+                            throwIfStreamAborted();
                         }
                     }
 
@@ -833,28 +864,30 @@ class OpenRouterAPI {
                     error.isStreamError = true;
                     error.hasReceivedTokens = hasReceivedFirstToken;
 
-                    // Check if this is a terminal error
-                    if (parsed.choices?.[0]?.finish_reason === 'error') {
-                        throw error;
-                    }
+                    // Any provider error event is terminal. Continuing would turn a
+                    // truncated response into an apparently successful completion.
+                    throw error;
                 }
 
                 // Handle message content delta events from reasoning API (if using separate endpoint)
                 if (parsed.type === 'response.output_text.delta') {
                     const contentDelta = parsed.delta || '';
                     if (contentDelta) {
+                        await flushReasoningBuffer();
                         hasReceivedFirstToken = true;
                         accumulatedContent += contentDelta;
-                        onChunk(contentDelta);
+                        await onChunk(contentDelta);
+                        throwIfStreamAborted();
 
                         // Add reasoning tokens to content tokens for cumulative display
                         const estimatedContentTokens = Math.ceil(accumulatedContent.length / 4);
                         completionTokens = estimatedReasoningTokens + estimatedContentTokens;
                         if (onTokenUpdate) {
-                            onTokenUpdate({
+                            await onTokenUpdate({
                                 completionTokens,
                                 isStreaming: true
                             });
+                            throwIfStreamAborted();
                         }
                     }
                     return;
@@ -864,25 +897,29 @@ class OpenRouterAPI {
                 const content = delta?.content;
 
                 if (content) {
+                    await flushReasoningBuffer();
                     hasReceivedFirstToken = true;
                     accumulatedContent += content;
-                    onChunk(content);
+                    await onChunk(content);
+                    throwIfStreamAborted();
 
                     // Add reasoning tokens to content tokens for cumulative display
                     const estimatedContentTokens = Math.ceil(accumulatedContent.length / 4);
                     completionTokens = estimatedReasoningTokens + estimatedContentTokens;
                     if (onTokenUpdate) {
-                        onTokenUpdate({
+                        await onTokenUpdate({
                             completionTokens,
                             isStreaming: true
                         });
+                        throwIfStreamAborted();
                     }
                 }
 
                 // Check for images in the delta (standard OpenRouter format)
                 if (delta?.images) {
                     hasReceivedFirstToken = true;
-                    onChunk(null, { images: delta.images });
+                    await onChunk(null, { images: delta.images });
+                    throwIfStreamAborted();
                 }
 
                 // Check for image data in reasoning_details (only treat recognised image payloads)
@@ -894,7 +931,8 @@ class OpenRouterAPI {
                             type: 'image_url',
                             image_url: { url: this.buildImageUrlFromReasoningDetail(detail) }
                         }));
-                        onChunk(null, { images });
+                        await onChunk(null, { images });
+                        throwIfStreamAborted();
                     }
                 }
 
@@ -916,12 +954,13 @@ class OpenRouterAPI {
 
                     // Update token count with final accurate values
                     if (onTokenUpdate) {
-                        onTokenUpdate({
+                        await onTokenUpdate({
                             totalTokens,
                             promptTokens,
                             completionTokens,
                             isStreaming: false
                         });
+                        throwIfStreamAborted();
                     }
                 }
 
@@ -929,15 +968,13 @@ class OpenRouterAPI {
                 if (parsed.model) {
                     modelUsed = parsed.model;
                 }
-            } catch (e) {
-                console.error('Error parsing SSE chunk:', e, 'Raw line:', line);
-                // Continue processing other chunks
-            }
         };
 
-        const finalizeStreamResult = () => {
+        const finalizeStreamResult = async () => {
+            throwIfStreamAborted();
             // Flush any remaining reasoning buffer
-            flushReasoningBuffer();
+            await flushReasoningBuffer();
+            throwIfStreamAborted();
 
             // Parse citations - prefer annotations over content parsing
             if (searchEnabled) {
@@ -1075,7 +1112,9 @@ class OpenRouterAPI {
                             }
 
                             if (event.type === 'sse-line' && typeof event.line === 'string') {
-                                processSseLine(event.line);
+                                if (await processSseLine(event.line) === false) {
+                                    terminal = true;
+                                }
                                 continue;
                             }
 
@@ -1106,7 +1145,7 @@ class OpenRouterAPI {
                     abortController?.signal?.removeEventListener('abort', cancelFromAbort);
                 }
 
-                return finalizeStreamResult();
+                return await finalizeStreamResult();
             }
 
             // Retry only the initial connection, not mid-stream
@@ -1142,10 +1181,15 @@ class OpenRouterAPI {
 
             await consumeSseBody(response.body, processSseLine);
 
-            return finalizeStreamResult();
+            return await finalizeStreamResult();
         } catch (error) {
             // Flush any remaining reasoning buffer before handling error
-            flushReasoningBuffer();
+            try {
+                await flushReasoningBuffer();
+            } catch {
+                // Preserve the primary stream failure. A reasoning callback failure
+                // is already the primary error when it originates from a flush.
+            }
 
             let streamError = error;
             if (!(streamError instanceof Error)) {

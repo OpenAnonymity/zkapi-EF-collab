@@ -64,6 +64,7 @@ test('private-key creation exposes real proof, server, and verification phases',
     const phases = [
         ['proving', 0],
         ['requesting', 1],
+        ['waiting', 1],
         ['verifying', 1],
         ['ready', 2]
     ];
@@ -318,7 +319,8 @@ test('low-text proposals keep protocol detail behind disclosure and preserve the
 test('runtime progress comes from real zkAPI work rather than a fabricated percentage', () => {
     const runtime = fs.readFileSync(path.join(root, 'funding-page/services/browserWalletRuntime.js'), 'utf8');
     assert.match(runtime, /onProgress\('proving', 'Proving this chat is funded…'\)/);
-    assert.match(runtime, /onProgress\('requesting', 'Creating a temporary key for this chat…'\)/);
+    assert.match(runtime, /attempt === 1[\s\S]*'Creating a temporary key for this chat…'/);
+    assert.match(runtime, /'Retrying temporary key creation…'/);
     assert.match(runtime, /onProgress\('verifying', 'Verifying the new private key with OA…'\)/);
     assert.match(runtime, /onProgress\('applying', 'Updating your private balance…'\)/);
     assert.doesNotMatch(runtime, /onProgress\([^\n]*percent/i);

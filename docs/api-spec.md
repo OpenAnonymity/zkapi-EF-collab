@@ -109,6 +109,14 @@ lease with at most 60 seconds of later-expiry skew, and submits the same
 cryptographic validity are decided by that pinned verifier. The plaintext key
 is returned once and is not persisted.
 
+If the OA org temporarily cannot allocate another child key, zkAPI returns
+HTTP `429` instead of converting the condition into a generic server error.
+The response is explicitly retriable, includes `Retry-After` and matching
+`retry_after_seconds`, and uses `oa_minute_request_limit`,
+`oa_hourly_issuance_budget`, or the generic `oa_rate_limited` machine code.
+Clients must retry the exact prepared request so its proof and nullifier remain
+idempotent; they should not create another proof merely to evade the limit.
+
 The client may send parallel title and completion calls plus follow-ups through
 the same chat lease. There is no request-count or small token quota; the child
 key's cumulative USD limit is the boundary. Calls sharing a key are linkable to

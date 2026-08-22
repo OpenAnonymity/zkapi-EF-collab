@@ -63,6 +63,12 @@ const zkapiBackend = {
         return session?.apiKey || null;
     },
 
+    // requestAccess installs only the opaque chat binding. The real bounded
+    // OpenRouter key is obtained by api.js when the first request starts.
+    isTransportAccessReady(session) {
+        return zkapiClient.activeLease?.session_id === session?.id;
+    },
+
     setAccessInfo(session, accessInfo) {
         if (!session) return;
         const token = accessInfo?.key || accessInfo?.token || session.id;

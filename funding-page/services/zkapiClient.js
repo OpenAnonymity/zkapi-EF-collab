@@ -471,7 +471,11 @@ class ZkapiClient extends EventTarget {
     async loadChallengePeriod() {
         const vault = this.config?.funding?.contract_address;
         if (!vault || !globalThis.ethereum) return;
-        for (const selector of [ABI.challengePeriod, ABI.legacyChallengePeriod]) {
+        // Both published v2 vaults expose the original CHALLENGE_PERIOD()
+        // getter. Probe it first so MetaMask does not report a benign
+        // `execution reverted` RPC warning while connecting. Keep the newer
+        // challengePeriod() getter as a forward-compatible fallback.
+        for (const selector of [ABI.legacyChallengePeriod, ABI.challengePeriod]) {
             try {
                 const value = await this.readContractUint(vault, `0x${selector}`);
                 if (value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)) {

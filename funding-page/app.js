@@ -9,6 +9,7 @@ import { parseReasoningContent } from './services/reasoningParser.js';
 import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort } from './services/reasoningConfig.js';
 import { fetchUrlMetadata } from './services/urlMetadata.js';
 import { resolveProvider, resolveProviderFromModelReference } from './services/providerRegistry.js';
+import networkLogger from './services/networkLogger.js';
 import networkProxy from './services/networkProxy.js';
 import inferenceService from './services/inference/inferenceService.js';
 import ticketClient from './services/ticketClient.js';
@@ -3680,11 +3681,13 @@ class ChatApp {
         return normalizeStreamingPendingPhase(phase);
     }
 
-    advancePendingStateAfterAccessGranted(sessionId, typingId = null) {
-        this.updateSessionStreamingPhase(sessionId, 'waiting-response');
+    advancePendingStateAfterAccessGranted(session, typingId = null) {
+        const phase = this.resolvePendingPhaseForSession(session);
+        this.updateSessionStreamingPhase(session.id, phase);
         if (typingId) {
-            this.updateTypingIndicator(typingId, 'waiting-response');
+            this.updateTypingIndicator(typingId, phase);
         }
+        return phase;
     }
 
     isAccessCreditExhaustedError(error) {
@@ -3693,6 +3696,7 @@ class ChatApp {
 
     async refreshAccessAfterCreditExhaustion(session, {
         typingId = null,
+        message = null,
         modelNameOverride = null,
         modelIdOverride = null,
         reasoningEnabledOverride = null,
@@ -3708,6 +3712,9 @@ class ChatApp {
         inferenceService.clearAccessInfo(session);
         await chatDB.saveSession(session);
         this.updateSessionStreamingPhase(session.id, 'requesting-key');
+        if (message?.id) {
+            await this.updateOutgoingDeliveryState(message, 'securing');
+        }
         if (typingId) {
             this.updateTypingIndicator(typingId, 'requesting-key');
         }
@@ -3724,7 +3731,7 @@ class ChatApp {
             reasoningEnabledOverride,
             signal,
             onGranted: () => {
-                this.advancePendingStateAfterAccessGranted(session.id, typingId);
+                this.advancePendingStateAfterAccessGranted(session, typingId);
             }
         });
 
@@ -4027,7 +4034,7 @@ class ChatApp {
             title: ownerSession?.title || 'Previous chat',
             message: 'Closing the previous chat key in the background. The new chat is ready for typing.'
         });
-        this.services.networkLogger.logRequest({
+        networkLogger.logRequest({
             type: 'local',
             method: 'LOCAL',
             status: 'pending',
@@ -4078,7 +4085,7 @@ class ChatApp {
                 title: ownerSession?.title || 'Previous chat',
                 message: 'Previous chat key closed. A fresh key will be requested when you send.'
             });
-            this.services.networkLogger.logRequest({
+            networkLogger.logRequest({
                 type: 'local',
                 method: 'LOCAL',
                 status: 200,
@@ -4104,7 +4111,7 @@ class ChatApp {
                 title: ownerSession?.title || 'Previous chat',
                 message: error?.message || 'The previous chat key could not be closed.'
             });
-            this.services.networkLogger.logRequest({
+            networkLogger.logRequest({
                 type: 'local',
                 method: 'LOCAL',
                 status: 0,
@@ -5934,9 +5941,12 @@ class ChatApp {
                         signal: abortController.signal,
                         modelNameOverride: retryModelName,
                         reasoningEnabledOverride: retryReasoningEnabled,
-                        onGranted: () => {
-                            this.advancePendingStateAfterAccessGranted(session.id, typingId);
-                            void this.updateOutgoingDeliveryState(lastUserMessage, 'sending');
+                        onGranted: async () => {
+                            const phase = this.advancePendingStateAfterAccessGranted(session, typingId);
+                            await this.updateOutgoingDeliveryState(
+                                lastUserMessage,
+                                phase === 'requesting-key' ? 'securing' : 'sending'
+                            );
                         }
                     });
                     if (this.floatingPanel && this.isViewingSession(session.id)) {
@@ -6236,6 +6246,9 @@ class ChatApp {
                 }
 
                 this.triggerPostTurnMemoryExtraction(session);
+                if (this.isViewingSession(session.id)) {
+                    this.announceZkapiSendState('Response complete');
+                }
 
             } catch (error) {
                 console.error('Error getting AI response:', error);
@@ -6796,8 +6809,12 @@ class ChatApp {
                         signal: abortController.signal,
                         modelNameOverride: capturedModelName,
                         reasoningEnabledOverride: capturedReasoningEnabled,
-                        onGranted: () => {
-                            this.advancePendingStateAfterAccessGranted(session.id, typingId);
+                        onGranted: async () => {
+                            const phase = this.advancePendingStateAfterAccessGranted(session, typingId);
+                            await this.updateOutgoingDeliveryState(
+                                userMessage,
+                                phase === 'requesting-key' ? 'securing' : 'sending'
+                            );
                         }
                     });
                     if (this.floatingPanel && this.isViewingSession(session.id)) {
@@ -6813,10 +6830,6 @@ class ChatApp {
             }
 
             if (await cancelAcceptedSend()) return;
-
-            if (userMessage?.deliveryState !== 'sending') {
-                await this.updateOutgoingDeliveryState(userMessage, 'sending');
-            }
 
             if (userMessage?.id) {
                 this.generateSessionTitleIfNeeded(session.id, userMessage.id).catch(error => {
@@ -7127,6 +7140,9 @@ class ChatApp {
                 }
 
                 this.triggerPostTurnMemoryExtraction(session);
+                if (this.isViewingSession(session.id)) {
+                    this.announceZkapiSendState('Response complete');
+                }
 
                 break retryLoop; // Success - exit retry loop
 
@@ -7189,6 +7205,7 @@ class ChatApp {
                     try {
                         await this.refreshAccessAfterCreditExhaustion(session, {
                             typingId,
+                            message: userMessage,
                             modelNameOverride: modelNameToUse,
                             modelIdOverride: modelIdForRequest,
                             reasoningEnabledOverride: capturedReasoningEnabled,
@@ -7309,9 +7326,9 @@ class ChatApp {
 
     resolvePendingPhaseForSession(session) {
         if (!session) return 'requesting-key';
-        const hasAccessToken = !!inferenceService.getAccessToken(session);
-        const isAccessExpired = inferenceService.isAccessExpired(session);
-        return (!hasAccessToken || isAccessExpired) ? 'requesting-key' : 'waiting-response';
+        return inferenceService.isTransportAccessReady(session)
+            ? 'waiting-response'
+            : 'requesting-key';
     }
 
     isQuickAskPinnedInstantModel(model, modelName = '') {
@@ -7448,7 +7465,7 @@ class ChatApp {
                     modelNameOverride: modelName,
                     signal: abortController.signal,
                     onGranted: () => {
-                        options.onStatus?.('waiting-response');
+                        options.onStatus?.(this.resolvePendingPhaseForSession(session));
                     }
                 });
                 if (this.floatingPanel) {
@@ -7469,7 +7486,7 @@ class ChatApp {
                 throw new Error('Quick ask is unavailable while this chat is streaming.');
             }
         } else {
-            options.onStatus?.('waiting-response');
+            options.onStatus?.(this.resolvePendingPhaseForSession(session));
         }
 
         if (window.networkLogger) {

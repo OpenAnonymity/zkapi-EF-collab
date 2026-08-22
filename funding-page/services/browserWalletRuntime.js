@@ -13,6 +13,14 @@ import {
 const DEFAULT_BROWSER_CONFIG_URL = new URL('../browser-config.json', import.meta.url).href;
 const LEASE_AUTHORIZATION = JSON.stringify({ mode: 'openrouter_ephemeral_lease', version: 1 });
 const MAX_RECOVERY_WAIT_MS = 45_000;
+// OA may briefly throttle child-key creation. Keep retrying the same durable,
+// idempotent lease request long enough to cross a one-minute limiter without
+// ever reproving, waiting indefinitely, or amplifying the limiter with a tight
+// retry loop. The production schedule is 5s, 10s, 20s, then 30s.
+const LEASE_ISSUE_MAX_WAIT_MS = 75_000;
+const LEASE_ISSUE_MAX_ATTEMPTS = 5;
+const LEASE_ISSUE_INITIAL_RETRY_MS = 5_000;
+const LEASE_ISSUE_MAX_RETRY_MS = 30_000;
 const TAB_OWNER_STORAGE_KEY = 'zkapi-browser-tab-owner-v1';
 
 class BrowserWalletHttpError extends Error {
@@ -84,6 +92,52 @@ function delay(milliseconds, signal) {
             reject(error);
         }, { once: true });
     });
+}
+
+function isExplicitlyRetriableLeaseError(error) {
+    const explicitlyRetriable = error?.data?.retriable === true
+        || error?.data?.error?.retriable === true;
+    // These responses require a new proof or local lost-key reconciliation;
+    // repeatedly sending the same lease request cannot resolve either state.
+    return explicitlyRetriable
+        && !['stale_root', 'lease_pending'].includes(error?.code);
+}
+
+function isLeaseRateLimit(error) {
+    return error?.status === 429
+        || /^oa_(?:minute_request_limit|hourly_issuance_budget|rate_limited)$/.test(error?.code || '')
+        || /(?:\b429\b|too many requests|rate[ -]?limit)/i.test(error?.message || '');
+}
+
+function leaseRetryAfterMilliseconds(error) {
+    const candidates = [
+        error?.data?.retry_after_seconds,
+        error?.data?.error?.retry_after_seconds,
+        error?.data?.detail?.retry_after_seconds,
+        error?.data?.error?.detail?.retry_after_seconds
+    ];
+    for (const candidate of candidates) {
+        const seconds = Number(candidate);
+        if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
+    }
+    return null;
+}
+
+function describeRetryDelay(milliseconds) {
+    const seconds = Math.max(1, Math.ceil(milliseconds / 1_000));
+    if (seconds < 60) return seconds === 1 ? '1 second' : `${seconds} seconds`;
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 60) return minutes === 1 ? 'about 1 minute' : `about ${minutes} minutes`;
+    const hours = Math.ceil(minutes / 60);
+    return hours === 1 ? 'about 1 hour' : `about ${hours} hours`;
+}
+
+function makeLeaseRateLimitActionable(error, retryAfterMs = null) {
+    if (!isLeaseRateLimit(error)) return error;
+    error.shortMessage = retryAfterMs != null
+        ? `Temporary-key capacity is full. Your message is saved and was not sent. Try again in ${describeRetryDelay(retryAfterMs)}.`
+        : 'The temporary-key service is still busy. Your message is saved and was not sent; use Retry in a moment.';
+    return error;
 }
 
 function uuid() {
@@ -451,13 +505,30 @@ class BrowserWalletRuntime extends EventTarget {
 
     async remoteJson(url, init = {}) {
         const response = await this.remoteFetch(url, init);
-        const payload = await responsePayload(response);
+        let payload = await responsePayload(response);
         if (!response.ok) {
-            const details = payload?.error || {};
+            const retryAfterHeader = response.headers.get('retry-after');
+            const retryAfter = retryAfterHeader == null || retryAfterHeader.trim() === ''
+                ? Number.NaN
+                : Number(retryAfterHeader);
+            if (Number.isFinite(retryAfter) && retryAfter >= 0
+                && payload?.retry_after_seconds == null) {
+                payload = { ...payload, retry_after_seconds: retryAfter };
+            }
+            const details = payload?.error && typeof payload.error === 'object'
+                ? payload.error
+                : {};
             throw new BrowserWalletHttpError(
-                details.error_message || details.message || payload.message || `HTTP ${response.status}`,
+                details.error_message
+                    || details.message
+                    || payload.error_message
+                    || payload.message
+                    || `HTTP ${response.status}`,
                 response.status,
-                details.error_code || details.code || payload.code,
+                details.error_code
+                    || details.code
+                    || payload.error_code
+                    || payload.code,
                 payload
             );
         }
@@ -651,6 +722,61 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
+    async requestLeaseWithRetry(request, onProgress = () => {}, signal = null, retryOptions = {}) {
+        const maxWaitMs = retryOptions.maxWaitMs ?? LEASE_ISSUE_MAX_WAIT_MS;
+        const maxAttempts = retryOptions.maxAttempts ?? LEASE_ISSUE_MAX_ATTEMPTS;
+        const initialRetryMs = retryOptions.initialRetryMs ?? LEASE_ISSUE_INITIAL_RETRY_MS;
+        const maxRetryMs = retryOptions.maxRetryMs ?? LEASE_ISSUE_MAX_RETRY_MS;
+        const now = retryOptions.now || Date.now;
+        const sleep = retryOptions.sleep || delay;
+        const deadline = now() + maxWaitMs;
+        const body = JSON.stringify(request);
+        let attempt = 1;
+
+        while (true) {
+            throwIfAborted(signal);
+            onProgress(
+                'requesting',
+                attempt === 1
+                    ? 'Creating a temporary key for this chat…'
+                    : 'Retrying temporary key creation…'
+            );
+            try {
+                return await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    signal,
+                    body
+                });
+            } catch (error) {
+                throwIfAborted(signal);
+                const backoffDelayMs = Math.min(
+                    initialRetryMs * (2 ** Math.max(0, attempt - 1)),
+                    maxRetryMs
+                );
+                const advertisedRetryMs = leaseRetryAfterMilliseconds(error);
+                const retryDelayMs = Math.max(backoffDelayMs, advertisedRetryMs || 0);
+                if (!isExplicitlyRetriableLeaseError(error)
+                    || attempt >= maxAttempts
+                    || now() + retryDelayMs > deadline) {
+                    makeLeaseRateLimitActionable(error, advertisedRetryMs);
+                    throw error;
+                }
+
+                const waitLabel = retryDelayMs < 1_000 ? 'a moment' : describeRetryDelay(retryDelayMs);
+                onProgress(
+                    'waiting',
+                    isLeaseRateLimit(error)
+                        ? `OA is briefly limiting new temporary keys. Retrying in ${waitLabel}…`
+                        : `The temporary-key service is briefly unavailable. Retrying in ${waitLabel}…`
+                );
+                throwIfAborted(signal);
+                await sleep(retryDelayMs, signal);
+                attempt += 1;
+            }
+        }
+    }
+
     async issueLease(sessionId, onProgress = () => {}, signal = null) {
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
             throwIfAborted(signal);
@@ -661,13 +787,7 @@ class BrowserWalletRuntime extends EventTarget {
             const request = await this.prepareLeaseRequest(onProgress, signal);
             let lease;
             try {
-                onProgress('requesting', 'Creating a temporary key for this chat…');
-                lease = await this.remoteJson(`${this.config.funding.protocol_server_url}/v2/openrouter/leases`, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    signal,
-                    body: JSON.stringify(request)
-                });
+                lease = await this.requestLeaseWithRetry(request, onProgress, signal);
             } catch (error) {
                 if (error.code === 'stale_root') {
                     await this.commit({ ...this.runtime, journal: null });
@@ -960,5 +1080,5 @@ class BrowserWalletRuntime extends EventTarget {
 }
 
 const browserWalletRuntime = new BrowserWalletRuntime();
-export { BrowserWalletHttpError };
+export { BrowserWalletHttpError, BrowserWalletRuntime };
 export default browserWalletRuntime;

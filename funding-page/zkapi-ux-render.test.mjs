@@ -38,8 +38,12 @@ const {
     renderZkapiComposerStatus,
     renderZkapiPanelExperience
 } = await import('./components/ZkapiStateExperience.js');
+const { createVanillaUiInterface } = await import('./ui/appInterface.js');
+const { default: Sidebar } = await import('./components/Sidebar.js');
+const { default: RightPanel } = await import('./components/RightPanel.js');
 
 function lowTextState(proposal, overrides = {}) {
+    const { primary: primaryOverrides = {}, ...stateOverrides } = overrides;
     const primary = {
         phase: 'queued',
         tone: 'working',
@@ -48,7 +52,7 @@ function lowTextState(proposal, overrides = {}) {
         compact: 'Message queued',
         busy: true,
         blocksSend: true,
-        ...overrides.primary
+        ...primaryOverrides
     };
     return {
         proposal,
@@ -58,7 +62,7 @@ function lowTextState(proposal, overrides = {}) {
         activities: [],
         runningActivities: [],
         journey: [],
-        ...overrides
+        ...stateOverrides
     };
 }
 
@@ -185,6 +189,105 @@ test('passive state clears the visual signature so the same active phase renders
     assert.match(element.innerHTML, />Queued</);
 });
 
+test('same-phase lease retries refresh every proposal without adding low-text clutter', () => {
+    const retryMessage = 'Temporary-key service is busy. Retrying in 2 seconds…';
+    for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
+        const activity = {
+            id: `access-${proposal}`,
+            kind: 'access',
+            phase: 'requesting',
+            status: 'running',
+            title: 'Starting private chat',
+            message: retryMessage,
+            blocksSend: true,
+            startedAt: 1,
+            updatedAt: 2
+        };
+        const initial = lowTextState(proposal, {
+            primary: {
+                phase: 'requesting',
+                title: activity.title,
+                detail: 'Creating a temporary key for this chat…',
+                compact: activity.title,
+                activity
+            },
+            activities: [{ ...activity, message: 'Creating a temporary key for this chat…' }],
+            runningActivities: [activity]
+        });
+        const retrying = lowTextState(proposal, {
+            primary: {
+                phase: 'requesting',
+                title: activity.title,
+                detail: retryMessage,
+                compact: activity.title,
+                activity
+            },
+            activities: [activity],
+            runningActivities: [activity]
+        });
+        const element = composerElement();
+
+        renderZkapiComposerStatus(element, null, initial);
+        const before = element.innerHTML;
+        renderZkapiComposerStatus(element, null, retrying);
+
+        assert.notEqual(element.className, 'hidden', `${proposal} must retain an active retry signal`);
+        assert.notEqual(element.innerHTML, before, `${proposal} must not memoize stale retry copy`);
+        assert.match(element.innerHTML, /Temporary-key service is busy/);
+        assert.equal(element.getAttribute('aria-busy'), 'true');
+        assert.match(renderZkapiPanelExperience(retrying), /Temporary-key service is busy/);
+        if (['receipt', 'relay'].includes(proposal)) {
+            assert.match(element.innerHTML, />Retrying</);
+        }
+        if (['receipt', 'relay', 'ambient', 'capsule'].includes(proposal)) {
+            assert.match(element.innerHTML, /role="status"/);
+            assert.match(element.innerHTML, /aria-live="polite"/);
+        }
+    }
+});
+
+test('live UI facades render New Chat settlement state in sidebar and right panel', () => {
+    const oldChat = { id: 'old-chat', title: 'Old chat' };
+    const app = {
+        state: {
+            currentSessionId: 'new-chat',
+            sessions: [oldChat],
+            sessionsById: new Map([[oldChat.id, oldChat]])
+        },
+        elements: {},
+        newChatSettlementState: null
+    };
+    const ui = createVanillaUiInterface(app, { chatDBImpl: {} });
+    const sidebar = Object.create(Sidebar.prototype);
+    sidebar.app = ui.sidebar;
+    sidebar.deletingSessionIds = new Set();
+    const panel = Object.create(RightPanel.prototype);
+    panel.app = ui.componentApp;
+
+    app.newChatSettlementState = {
+        phase: 'settling',
+        sessionId: oldChat.id,
+        message: 'Closing in the background.'
+    };
+
+    assert.equal(ui.sidebar.newChatSettlementState, app.newChatSettlementState);
+    assert.equal(ui.componentApp.newChatSettlementState, app.newChatSettlementState);
+    assert.match(sidebar.buildSessionHTML(oldChat), /Closing private key/);
+    assert.deepEqual(panel.getMissingApiKeyStatus(), {
+        label: 'Closing previous chat key',
+        badge: 'Settling',
+        badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-500\/15 dark:text-amber-200'
+    });
+
+    app.newChatSettlementState = {
+        phase: 'ready',
+        sessionId: oldChat.id,
+        message: 'Finished.'
+    };
+    assert.match(sidebar.buildSessionHTML(oldChat), /Private key settled/);
+    assert.equal(panel.getMissingApiKeyStatus().badge, 'Ready');
+});
+
 test('capsule uses static hold and error endpoints without implying accepted success', () => {
     const element = composerElement();
     const waiting = lowTextState('capsule', {
@@ -248,6 +351,7 @@ test('recovery controls have a visible busy state and reduced motion keeps pendi
     assert.match(css, /\.user-delivery-actions button\[aria-busy="true"\][\s\S]*?pointer-events: none/);
     assert.match(css, /\.message-action-btn\.is-processing::after,[\s\S]*?animation: zkapiActionOrbit/);
     assert.match(css, /\.chat-session\[data-deleting="true"\]\s*\{[\s\S]*?cursor: wait/);
+    assert.match(css, /\.zkapi-composer-live-status\s*\{[\s\S]*?clip: rect\(0, 0, 0, 0\)/);
     assert.match(reducedMotion, /\.pending-response-streaming\s*\{[\s\S]*?animation: none !important/);
     assert.match(reducedMotion, /\.message-action-btn\.is-processing::after/);
     assert.match(reducedMotion, /-webkit-text-fill-color: currentColor !important/);

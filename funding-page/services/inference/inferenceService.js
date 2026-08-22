@@ -140,6 +140,13 @@ const inferenceService = {
     isAccessExpired(session) {
         return getBackendForSession(session).isAccessExpired(session);
     },
+    isTransportAccessReady(session) {
+        const backend = getBackendForSession(session);
+        if (typeof backend.isTransportAccessReady === 'function') {
+            return Boolean(backend.isTransportAccessReady(session));
+        }
+        return Boolean(backend.getAccessToken(session)) && !backend.isAccessExpired(session);
+    },
     async requestAccess(session, options = {}) {
         const backend = getBackendForSession(session);
         return backend.requestAccess({ ...options, session });

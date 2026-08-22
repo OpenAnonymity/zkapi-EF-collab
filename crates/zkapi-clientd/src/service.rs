@@ -2362,7 +2362,7 @@ fn format_felt_address(address: &Felt252) -> String {
 
 fn abi_words(value: &str) -> Result<Vec<&str>, AuthError> {
     let encoded = value.strip_prefix("0x").unwrap_or(value);
-    if encoded.is_empty() || encoded.len() % 64 != 0 || !encoded.is_ascii() {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(64) || !encoded.is_ascii() {
         return Err(AuthError::Wallet(
             "RPC returned malformed ABI data".to_string(),
         ));

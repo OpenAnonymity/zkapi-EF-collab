@@ -91,6 +91,7 @@ test('title and OA streams thread cancellation through browser lease acquisition
     const acquireEphemeral = sourceMethodAt(runtime, 'async acquireEphemeralKey(');
     const ensureLease = sourceMethodAt(runtime, 'async ensureLease(');
     const issueLease = sourceMethodAt(runtime, 'async issueLease(');
+    const requestLeaseWithRetry = sourceMethodAt(runtime, 'async requestLeaseWithRetry(');
 
     assert.match(title, /acquireInferenceAccess\(sessionId,\s*\{\s*signal:\s*options\.signal\s*\}\)/);
     assert.match(stream, /acquireInferenceAccess\(sessionId,\s*\{\s*signal:\s*abortController\?\.signal\s*\}\)/);
@@ -99,7 +100,8 @@ test('title and OA streams thread cancellation through browser lease acquisition
     assert.match(acquireEphemeral, /ensureLease\(sessionId, onProgress, signal\)/);
     assert.match(ensureLease, /issueLease\(normalized, onProgress, signal\)/);
     assert.match(issueLease, /throwIfAborted\(signal\)/);
-    assert.match(issueLease, /remoteJson\([\s\S]*?signal/);
+    assert.match(issueLease, /requestLeaseWithRetry\(request, onProgress, signal\)/);
+    assert.match(requestLeaseWithRetry, /remoteJson\([\s\S]*?signal/);
 });
 
 test('ordinary Send and exclusive timeline mutations cannot overlap ownership', () => {
