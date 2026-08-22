@@ -356,7 +356,10 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
         {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        if body["credit_limit"] != 0.005 || body["duration_minutes"] != 1 {
+        if body["credit_limit"] != 0.005
+            || body["credit_limit_credits"] != 5_000
+            || body["duration_minutes"] != 1
+        {
             return Err(StatusCode::BAD_REQUEST);
         }
         state.flow.events.lock().unwrap().push("issued".to_string());
@@ -402,7 +405,10 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             return Err(StatusCode::UNAUTHORIZED);
         }
         let key_hash = body["key_hash"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
-        if body["credit_limit"] != 0.005 || body["duration_minutes"] != 1 {
+        if body["credit_limit"] != 0.005
+            || body["credit_limit_credits"] != 5_000
+            || body["duration_minutes"] != 1
+        {
             return Err(StatusCode::BAD_REQUEST);
         }
         let (client_request_id, expires_at) = state

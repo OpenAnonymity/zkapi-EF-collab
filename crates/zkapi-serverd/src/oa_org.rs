@@ -140,6 +140,7 @@ impl OaOrgProvisioner {
         &self,
         client_request_id: &str,
         limit_usd: f64,
+        limit_credits: u128,
         ttl_seconds: u64,
     ) -> Result<OaOrgCreatedKey, ServerError> {
         if ttl_seconds == 0 || !ttl_seconds.is_multiple_of(60) {
@@ -155,6 +156,7 @@ impl OaOrgProvisioner {
             .json(&json!({
                 "client_request_id": client_request_id,
                 "credit_limit": limit_usd,
+                "credit_limit_credits": limit_credits,
                 "duration_minutes": duration_minutes,
             }))
             .send()
@@ -217,6 +219,7 @@ impl OaOrgProvisioner {
                 // before that metadata existed; the station independently
                 // checks both values against its signed issuance binding.
                 "credit_limit": expectation.credit_limit_usd,
+                "credit_limit_credits": expectation.limit_credits,
                 "duration_minutes": expectation.duration_minutes,
                 "expires_at_unix": expectation.maximum_expires_at,
             }))
@@ -651,7 +654,7 @@ mod tests {
         .unwrap();
 
         let error = provisioner
-            .create_key("request-12345678", 3.0, 300)
+            .create_key("request-12345678", 3.0, 3_000_000, 300)
             .await
             .unwrap_err();
         server.abort();

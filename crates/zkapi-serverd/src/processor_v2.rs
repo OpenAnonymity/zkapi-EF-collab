@@ -345,6 +345,7 @@ impl RequestProcessor {
                     .create_key(
                         &request.client_request_id,
                         spending_limit_usd,
+                        request.public_inputs.solvency_bound,
                         lease_config.ttl_seconds,
                     )
                     .await?;
@@ -518,7 +519,7 @@ impl RequestProcessor {
             ));
         }
         let duration_minutes = lease_config.ttl_seconds / 60;
-        let expected_limit_credits = pricing::usd_to_credits(lease.spending_limit_usd);
+        let expected_limit_credits = lease.api_request.public_inputs.solvency_bound;
         let receipt = provisioner
             .get_key_usage(
                 &lease.client_request_id,
@@ -607,7 +608,7 @@ impl RequestProcessor {
         })?;
         let usage = provisioner.get_key_usage(key_hash).await?;
         let raw_charge = pricing::usd_to_credits(usage.usage_usd);
-        let lease_charge_cap = pricing::usd_to_credits(lease.spending_limit_usd);
+        let lease_charge_cap = lease.api_request.public_inputs.solvency_bound;
         let charge = raw_charge.min(lease_charge_cap);
         if charge != raw_charge {
             tracing::warn!(
