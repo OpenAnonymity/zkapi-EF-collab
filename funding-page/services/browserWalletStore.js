@@ -1,3 +1,5 @@
+import { isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
+
 const DB_NAME = 'zkapi-browser-wallet-v1';
 const DB_VERSION = 2;
 const RUNTIME_STORE = 'runtime';
@@ -610,6 +612,360 @@ export async function transferBrowserLateWithdrawalAttempt(identity, record) {
 }
 
 /** Claim an exact-nonce replacement for a dropped background withdrawal start. */
+function backgroundIdentityMatches(record, identity) {
+    return record && identity?.recordId === record.recordId
+        && identity.deploymentId === record.deploymentId
+        && Number(identity.chainId) === Number(record.chainId)
+        && String(identity.contractAddress || '').toLowerCase() === String(record.contractAddress || '').toLowerCase()
+        && Number(identity.noteId) === Number(record.noteId)
+        && identity.mode === record.mode
+        && String(identity.destination || '').toLowerCase() === String(record.destination || '').toLowerCase();
+}
+
+function backgroundHasTransactions(record) {
+    return [record, record?.preparedWithdrawal].some(value => value && (
+        value.transactionHash || value.transactionHashes?.length || value.transactionAttempts?.length
+        || value.submissionId || value.finalizeTransactionHash || value.finalizeTransactionHashes?.length
+        || value.finalizeAttempts?.length || value.finalizeSubmissionId
+    )) || Boolean(record?.startRecoveryPending || record?.startSubmissionId
+        || record?.startRetryFrom || record?.startRetryNonce != null
+        || record?.supersededStartSubmissionClaims?.length || record?.ambiguousStartReplacements?.length);
+}
+
+export function assertBrowserBackgroundWithdrawalAvailable(record, runtime, identity) {
+    if (!backgroundIdentityMatches(record, identity) || !record.state
+        || Number(record.state.note_id) !== Number(record.noteId)
+        || record.mode !== 'mutual' || !['parked', 'restored'].includes(record.phase)
+        || !/^0x[0-9a-fA-F]{40}$/.test(record.destination || '')
+        || record.clearanceReserved !== true || backgroundHasTransactions(record)
+        || Number(record.startBlockNumber || 0) > 0 || Number(record.closeBlockNumber || 0) > 0
+        || Number(record.challengeDeadline || 0) > 0 || record.chainStatus === 'pending_withdrawal'
+        || !['reserving', 'prepared'].includes(record.preparedWithdrawal?.phase || 'prepared')
+        || !isUnsubmittedParkedMutualWithdrawal(record, runtime.lateWithdrawalAttempts || [])) {
+        throw new Error('Check this saved withdrawal before preparing another transaction.');
+    }
+    if (runtime.deploymentId === record.deploymentId && runtime.state
+        && Number(runtime.state.note_id) === Number(record.noteId)) {
+        throw new Error('This balance is already selected; use its normal withdrawal flow.');
+    }
+    if ((runtime.lateWithdrawalAttempts || []).some(attempt =>
+        !LATE_WITHDRAWAL_TERMINAL_STATUSES.has(attempt.status)
+        && attempt.deploymentId === record.deploymentId
+        && Number(attempt.chainId) === Number(record.chainId)
+        && String(attempt.contractAddress || '').toLowerCase() === String(record.contractAddress || '').toLowerCase()
+        && Number(attempt.noteId) === Number(record.noteId))) {
+        throw new Error('A transaction for this saved withdrawal still needs reconciliation.');
+    }
+}
+
+export function isBrowserBackgroundWithdrawalPreparationCancelable(record, runtime, identity = record) {
+    const prepared = record?.preparedWithdrawal;
+    // Only the independent driver guarantees that it awaits a durable nonce
+    // write before calling MetaMask. Never infer this for a legacy claim.
+    if (record?.independentWithdrawal !== true || prepared?.submissionNonceJournalRequired !== true
+        || record.phase !== 'submitted_unconfirmed' || prepared.phase !== 'awaiting_wallet'
+        || record.startSubmissionOutcome !== 'awaiting_wallet'
+        || prepared.submissionOutcome !== 'awaiting_wallet'
+        || !record.startSubmissionId || !record.startOperationId
+        || record.startSubmissionId !== prepared.submissionId
+        || record.startOperationId !== prepared.operationId
+        || Number(record.startResolutionBlock || 0) > 0 || record.resolvedStartClaims?.length) return false;
+    const nonceEvidence = ['from', 'nonce', 'transactionNonce', 'replacementNonce',
+        'submissionFrom', 'submissionNonce', 'startSubmissionFrom', 'startSubmissionNonce',
+        'startRetryFrom', 'startRetryNonce'];
+    if ([record, prepared].some(value => nonceEvidence.some(key => value[key] != null))) return false;
+    const withoutClaim = { ...record, phase: 'parked', startSubmissionId: null,
+        startRecoveryPending: false, startSubmissionOutcome: 'rejected_before_broadcast',
+        preparedWithdrawal: { ...prepared, phase: 'prepared', submissionId: null,
+            submissionOutcome: 'rejected_before_broadcast' } };
+    try {
+        // This also denies hashes, superseded/ambiguous claims, real chain
+        // transitions, selected-note ownership, and a concurrent late WAL.
+        assertBrowserBackgroundWithdrawalAvailable(withoutClaim, runtime, identity);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// The runtime participates only in the ownership check. These operations never
+// write it, so an unrelated chat/deposit/lease can continue without being swapped.
+async function mutateBackgroundWithdrawal(identity, mutate) {
+    const database = await openDatabase();
+    const transaction = durableTransaction(database, [RUNTIME_STORE, WITHDRAWAL_STORE]);
+    const store = transaction.objectStore(WITHDRAWAL_STORE);
+    const [record, runtime] = await Promise.all([
+        requestResult(store.get(identity?.recordId)),
+        requestResult(transaction.objectStore(RUNTIME_STORE).get(RUNTIME_KEY)).then(normalizeRuntime)
+    ]);
+    try {
+        if (!backgroundIdentityMatches(record, identity)) throw new Error('The saved withdrawal identity changed.');
+        const next = mutate(record, runtime);
+        if (!next) { await transactionDone(transaction); return null; }
+        if (JSON.stringify(next) === JSON.stringify(record)) {
+            await transactionDone(transaction);
+            return record;
+        }
+        const saved = { ...next, revision: Number(record.revision || 0) + 1, updatedAt: Date.now() };
+        store.put(saved);
+        await transactionDone(transaction);
+        return saved;
+    } catch (error) {
+        try { transaction.abort(); } catch { /* Already aborted/completed. Preserve the original failure. */ }
+        throw error;
+    }
+}
+
+export async function repairBrowserUnsubmittedBackgroundWithdrawal(identity, observedBlock, expectedRevision) {
+    return mutateBackgroundWithdrawal(identity, (record, runtime) => {
+        if (Number(record.revision) !== Number(expectedRevision)
+            || !Number.isSafeInteger(observedBlock) || observedBlock <= 0
+            || observedBlock < Number(record.lastObservedBlock || 0)
+            || !isUnsubmittedParkedMutualWithdrawal(record, runtime.lateWithdrawalAttempts || [])) return null;
+        const next = { ...record, phase: 'parked', chainStatus: 'active', lastObservedBlock: observedBlock, error: null };
+        for (const key of ['challengeObservedBlock', 'finalityCheckedBlock', 'finalitySource', 'finalizedBlockNumber']) delete next[key];
+        return next;
+    });
+}
+
+export async function resolveBrowserBackgroundWithdrawalForRetry(identity, {
+    expectedRevision, resolvedTransactionHashes, finalizedBlock, observedBlock
+}) {
+    return mutateBackgroundWithdrawal(identity, (record, runtime) => {
+        if (Number(record.revision) !== Number(expectedRevision)
+            || !record.state || record.mode !== 'mutual' || record.chainStatus !== 'active'
+            || record.startRecoveryPending !== false || record.startSubmissionOutcome !== 'resolved'
+            || record.startSubmissionId || record.startRetryFrom || record.startRetryNonce != null
+            || record.preparedWithdrawal?.submissionId || record.finalizeSubmissionId
+            || record.finalizeTransactionHash || record.finalizeTransactionHashes?.length
+            || !Number.isSafeInteger(finalizedBlock) || finalizedBlock <= 0
+            || finalizedBlock < Number(record.startBlockNumber || 0)
+            || finalizedBlock < Number(record.startResolutionBlock || 0)
+            || !Number.isSafeInteger(observedBlock) || observedBlock < finalizedBlock
+            || observedBlock < Number(record.lastObservedBlock || 0)) {
+            throw new Error('The withdrawal changed or still has unresolved transactions. Check its status again.');
+        }
+        if ((runtime.lateWithdrawalAttempts || []).some(attempt =>
+            !LATE_WITHDRAWAL_TERMINAL_STATUSES.has(attempt.status)
+            && attempt.deploymentId === record.deploymentId && Number(attempt.noteId) === Number(record.noteId))) {
+            throw new Error('A late withdrawal transaction still needs reconciliation.');
+        }
+        const knownHashes = [...new Set([record, record.preparedWithdrawal].flatMap(value => value ? [
+            ...(value.transactionHash ? [value.transactionHash] : []), ...(value.transactionHashes || []),
+            ...(value.transactionAttempts || []).map(attempt => attempt.hash)
+        ] : []).map(hash => String(hash).toLowerCase()))].sort();
+        const resolved = [...new Set((resolvedTransactionHashes || []).map(hash => String(hash).toLowerCase()))].sort();
+        if (knownHashes.some(hash => !/^0x[0-9a-f]{64}$/.test(hash))
+            || JSON.stringify(knownHashes) !== JSON.stringify(resolved)) {
+            throw new Error('Every saved withdrawal transaction must be finalized before retrying.');
+        }
+        const prepared = record.preparedWithdrawal || {};
+        const history = [...(record.resolvedStartTransactionHistory || []), {
+            operationId: prepared.operationId, transactionHashes: knownHashes,
+            transactionAttempts: record.transactionAttempts || [],
+            preparedTransactionAttempts: prepared.transactionAttempts || [],
+            dismissedClaims: record.dismissedStartSubmissionClaims || [],
+            supersededClaims: record.supersededStartSubmissionClaims || [],
+            ambiguousClaims: record.ambiguousStartReplacements || [],
+            resolvedClaims: (record.resolvedStartClaims || []).map(claim => ({
+                submissionId: claim.submissionId, operationId: claim.operationId,
+                from: claim.from, nonce: claim.nonce
+            })),
+            finalizedBlock, observedBlock, resolvedAt: Date.now()
+        }];
+        const next = { ...record, phase: 'parked', chainStatus: 'active', error: null,
+            resolvedStartTransactionHistory: history, lastObservedBlock: observedBlock,
+            startRecoveryPending: false, startSubmissionOutcome: 'resolved',
+            preparedWithdrawal: { mode: 'mutual', phase: 'prepared', operationId: crypto.randomUUID(),
+                noteId: Number(record.noteId), destination: record.destination, clearanceReserved: true,
+                withdrawalNullifier: record.withdrawalNullifier || prepared.withdrawalNullifier
+                    || prepared.public_inputs?.withdrawal_nullifier,
+                createdAt: Number(record.createdAt || Date.now()) } };
+        for (const key of ['transactionHash', 'transactionHashes', 'transactionAttempts', 'startBlockNumber',
+            'closeBlockNumber', 'challengeDeadline', 'closedAt', 'challengeObservedBlock', 'finalityCheckedBlock',
+            'finalitySource', 'finalizedBlockNumber', 'startMissingTransactionHashes', 'startReplacementTransactionHashes',
+            'startSubmissionFrom', 'startSubmissionNonce', 'startSubmissionStartedAt', 'startSubmissionOwner',
+            'startRetryFrom', 'startRetryNonce', 'startRetryOperationId', 'startRetrySavedAt',
+            'supersededStartSubmissionClaims', 'ambiguousStartReplacements', 'ambiguousReplacements',
+            'ambiguousSubmissions', 'replacementOf', 'finalizeAttempts', 'finalizeTransactionAttempts',
+            'resolvedStartClaims', 'startResolutionBlock', 'startRecoveryResolvedAt']) delete next[key];
+        return next;
+    });
+}
+
+export async function saveBrowserBackgroundWithdrawalPlan(identity, expectedRecord, plan) {
+    return mutateBackgroundWithdrawal(identity, (record, runtime) => {
+        assertBrowserBackgroundWithdrawalAvailable(record, runtime, identity);
+        // Polling may advance display/finality metadata during a long proof.
+        // Only the captured private state/plan and submission eligibility own it.
+        if (JSON.stringify(record.state) !== JSON.stringify(expectedRecord?.state)
+            || JSON.stringify(record.preparedWithdrawal) !== JSON.stringify(expectedRecord?.preparedWithdrawal)) {
+            throw new Error('The saved withdrawal changed while its proof was being prepared. Try again.');
+        }
+        if (!plan?.operationId || plan.mode !== 'mutual' || !plan.proof || !plan.public_inputs
+            || Number(plan.public_inputs.note_id) !== Number(record.noteId)
+            || String(plan.destination).toLowerCase() !== record.destination.toLowerCase()) {
+            throw new Error('The saved withdrawal proof has the wrong identity.');
+        }
+        return { ...record, phase: 'parked', preparedWithdrawal: plan, independentWithdrawal: true,
+            withdrawalNullifier: plan.withdrawalNullifier, error: null };
+    });
+}
+
+export async function claimBrowserBackgroundWithdrawalSubmission(identity, expectedOperationId, ownerId) {
+    const submissionId = crypto.randomUUID();
+    const record = await mutateBackgroundWithdrawal(identity, (current, runtime) => {
+        assertBrowserBackgroundWithdrawalAvailable(current, runtime, identity);
+        const plan = current.preparedWithdrawal;
+        if (!expectedOperationId || plan?.operationId !== expectedOperationId
+            || !plan.proof || !plan.public_inputs || plan.phase !== 'prepared') {
+            throw new Error('The saved withdrawal proof changed before its wallet request.');
+        }
+        const now = Date.now();
+        return { ...current, phase: 'submitted_unconfirmed', startRecoveryPending: true,
+            startOperationId: plan.operationId, startSubmissionId: submissionId,
+            startSubmissionOwner: ownerId, startSubmissionStartedAt: now,
+            startSubmissionOutcome: 'awaiting_wallet',
+            preparedWithdrawal: { ...plan, phase: 'awaiting_wallet', submissionId,
+                submissionOwner: ownerId, submissionStartedAt: now,
+                submissionOutcome: 'awaiting_wallet', submissionNonceJournalRequired: true } };
+    });
+    const plan = record.preparedWithdrawal;
+    return { ...identity, status: 'claimed', submissionId, transactionHash: null,
+        operationId: plan.operationId, finalBalance: Number(plan.public_inputs.final_balance),
+        clearanceReserved: true, withdrawalNullifier: plan.withdrawalNullifier,
+        plan: structuredClone(plan) };
+}
+
+function assertBackgroundClaim(record, submission) {
+    if (record.startSubmissionId !== submission.submissionId
+        || record.startOperationId !== submission.operationId
+        || record.preparedWithdrawal?.submissionId !== submission.submissionId
+        || record.preparedWithdrawal?.operationId !== submission.operationId) {
+        throw new Error('The saved withdrawal wallet claim changed.');
+    }
+}
+
+export async function rememberBrowserBackgroundWithdrawalMetadata(submission, metadata) {
+    const { from, nonce } = metadata || {};
+    if (!/^0x[0-9a-fA-F]{40}$/.test(from || '') || !Number.isSafeInteger(nonce) || nonce < 0) {
+        throw new Error('The withdrawal transaction metadata is invalid.');
+    }
+    return mutateBackgroundWithdrawal(submission, record => {
+        assertBackgroundClaim(record, submission);
+        if (record.startSubmissionFrom && (record.startSubmissionFrom !== from.toLowerCase()
+            || record.startSubmissionNonce !== nonce)) throw new Error('The saved wallet nonce changed.');
+        return { ...record, startSubmissionFrom: from.toLowerCase(), startSubmissionNonce: nonce,
+            preparedWithdrawal: { ...record.preparedWithdrawal, submissionFrom: from.toLowerCase(), submissionNonce: nonce } };
+    });
+}
+
+export async function markBrowserBackgroundWithdrawalAmbiguous(submission, message) {
+    return mutateBackgroundWithdrawal(submission, record => {
+        assertBackgroundClaim(record, submission);
+        return { ...record, startSubmissionOutcome: 'ambiguous',
+            startSubmissionError: message || 'MetaMask did not return a transaction ID.',
+            preparedWithdrawal: { ...record.preparedWithdrawal, phase: 'ambiguous',
+                submissionOutcome: 'ambiguous', submissionError: message || 'MetaMask did not return a transaction ID.' } };
+    });
+}
+
+export async function releaseBrowserBackgroundWithdrawalSubmission(submission, { requireNoNonce = false } = {}) {
+    return mutateBackgroundWithdrawal(submission, (record, runtime) => {
+        assertBackgroundClaim(record, submission);
+        if (requireNoNonce && !isBrowserBackgroundWithdrawalPreparationCancelable(record, runtime, submission)) {
+            throw new Error('This withdrawal may already have reached MetaMask. Check its status instead of canceling its preparation.');
+        }
+        const next = { ...record, preparedWithdrawal: { ...record.preparedWithdrawal },
+            dismissedStartSubmissionClaims: [...(record.dismissedStartSubmissionClaims || []), {
+                submissionId: submission.submissionId, operationId: submission.operationId,
+                from: record.startSubmissionFrom, nonce: record.startSubmissionNonce,
+                reason: 'rejected_before_broadcast', dismissedAt: Date.now()
+            }].slice(-8) };
+        for (const key of ['submissionId', 'submissionOwner', 'submissionStartedAt', 'submissionFrom',
+            'submissionNonce', 'submissionNonceJournalRequired', 'submissionError']) delete next.preparedWithdrawal[key];
+        for (const key of ['startSubmissionId', 'startOperationId', 'startSubmissionOwner',
+            'startSubmissionStartedAt', 'startSubmissionFrom', 'startSubmissionNonce', 'startSubmissionError']) delete next[key];
+        next.startSubmissionOutcome = 'rejected_before_broadcast';
+        const unresolved = backgroundHasTransactions({ ...next, startRecoveryPending: false });
+        next.startRecoveryPending = unresolved;
+        next.phase = unresolved ? 'submitted_unconfirmed' : 'parked';
+        next.preparedWithdrawal.phase = unresolved ? 'submitted' : 'prepared';
+        next.preparedWithdrawal.submissionOutcome = 'rejected_before_broadcast';
+        return next;
+    });
+}
+
+export async function rememberBrowserBackgroundWithdrawalTransaction(hash, submission, metadata = null) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hash || '')) throw new Error('MetaMask returned an invalid withdrawal transaction hash.');
+    return mutateBackgroundWithdrawal(submission, record => {
+        const archives = record.resolvedStartTransactionHistory || [];
+        const archivedIndex = archives.findIndex(entry => [
+            ...(entry.resolvedClaims || []), ...(entry.transactionAttempts || []), ...(entry.preparedTransactionAttempts || [])
+        ].some(claim => claim.operationId === submission.operationId && claim.submissionId === submission.submissionId));
+        if (archivedIndex >= 0) {
+            const archived = archives[archivedIndex];
+            const claim = [...(archived.resolvedClaims || []), ...(archived.transactionAttempts || []),
+                ...(archived.preparedTransactionAttempts || [])].find(value =>
+                value.operationId === submission.operationId && value.submissionId === submission.submissionId);
+            if (!/^0x[0-9a-fA-F]{40}$/.test(claim.from || '') || !Number.isSafeInteger(claim.nonce)
+                || claim.nonce < 0 || (metadata?.from && metadata.from.toLowerCase() !== claim.from.toLowerCase())
+                || (metadata?.nonce != null && metadata.nonce !== claim.nonce)) {
+                throw new Error('The late transaction does not match its finalized wallet nonce.');
+            }
+            if ([...(archived.transactionHashes || []), ...(archived.lateObservedHashes || [])].includes(hash.toLowerCase())) {
+                return record;
+            }
+            const history = [...archives];
+            history[archivedIndex] = { ...archived, lateObservedHashes: [...(archived.lateObservedHashes || []), hash.toLowerCase()] };
+            // Even a previously unseen hash cannot revive this finalized,
+            // consumed sender nonce. Preserve only its audit, not a live WAL.
+            return { ...record, resolvedStartTransactionHistory: history };
+        }
+        const activeClaim = record.startSubmissionId === submission.submissionId
+            && record.startOperationId === submission.operationId;
+        const priorClaims = [...(record.dismissedStartSubmissionClaims || []),
+            ...(record.supersededStartSubmissionClaims || []), ...(record.ambiguousStartReplacements || []),
+            ...(record.transactionAttempts || [])];
+        const knownClaim = activeClaim || priorClaims.some(claim =>
+            claim.submissionId === submission.submissionId && claim.operationId === submission.operationId);
+        if (!knownClaim) throw new Error('The transaction does not belong to a saved withdrawal claim.');
+        const saved = activeClaim ? { from: record.startSubmissionFrom, nonce: record.startSubmissionNonce }
+            : priorClaims.find(claim =>
+                claim.submissionId === submission.submissionId && claim.operationId === submission.operationId);
+        const from = metadata?.from || saved?.from;
+        const nonce = metadata?.nonce ?? saved?.nonce;
+        if (!/^0x[0-9a-fA-F]{40}$/.test(from || '') || !Number.isSafeInteger(nonce) || nonce < 0
+            || (saved?.from && saved.from.toLowerCase() !== from.toLowerCase())
+            || (Number.isSafeInteger(saved?.nonce) && saved.nonce !== nonce)) {
+            throw new Error('The transaction does not match its saved wallet nonce.');
+        }
+        const normalized = hash.toLowerCase();
+        const hashes = [...new Set([...(record.transactionHashes || []), ...(record.transactionHash ? [record.transactionHash] : []), normalized])];
+        const attempts = [...(record.transactionAttempts || []).filter(attempt => attempt.hash !== normalized), {
+            hash: normalized, submissionId: submission.submissionId, operationId: submission.operationId,
+            from: from.toLowerCase(), nonce, observedAt: Date.now()
+        }];
+        const next = { ...record, transactionHash: hashes[0], transactionHashes: hashes, transactionAttempts: attempts,
+            phase: ['closed', 'closed_unconfirmed'].includes(record.phase) ? record.phase : 'submitted_unconfirmed',
+            startRecoveryPending: record.phase !== 'closed' };
+        if (record.preparedWithdrawal?.operationId === submission.operationId) {
+            next.preparedWithdrawal = { ...record.preparedWithdrawal, transactionHash: hashes[0], transactionHashes: hashes,
+                transactionAttempts: attempts, phase: 'submitted', submissionOutcome: 'submitted' };
+        }
+        if (activeClaim) {
+            for (const key of ['startSubmissionId', 'startOperationId', 'startSubmissionOwner', 'startSubmissionStartedAt',
+                'startSubmissionFrom', 'startSubmissionNonce', 'startSubmissionError']) delete next[key];
+            if (next.preparedWithdrawal) {
+                for (const key of ['submissionId', 'submissionOwner', 'submissionStartedAt', 'submissionFrom',
+                    'submissionNonce', 'submissionNonceJournalRequired', 'submissionError']) delete next.preparedWithdrawal[key];
+            }
+            next.startSubmissionOutcome = 'submitted';
+        }
+        return next;
+    });
+}
+
 export async function claimBrowserWithdrawalStartReplacement(
     recordId,
     ownerId,
@@ -1229,6 +1585,37 @@ export async function updateBrowserWithdrawal(recordId, changes = {}, {
         updatedAt: Date.now()
     };
     if (sanitize) {
+        if (next.phase === 'closed') {
+            // Terminal chain finality releases the UI's live wallet claims.
+            // Keep their minimal identities for callbacks from old wallet tabs,
+            // without retaining any proof, clearance, or private note material.
+            const prepared = next.preparedWithdrawal || {};
+            const claims = [
+                { submissionId: next.startSubmissionId, operationId: next.startOperationId,
+                    from: next.startSubmissionFrom, nonce: next.startSubmissionNonce },
+                { submissionId: prepared.submissionId, operationId: prepared.operationId,
+                    from: prepared.submissionFrom, nonce: prepared.submissionNonce },
+                ...(next.resolvedStartClaims || []), ...(next.dismissedStartSubmissionClaims || []),
+                ...(next.supersededStartSubmissionClaims || []), ...(next.ambiguousStartReplacements || [])
+            ].filter(claim => claim.submissionId && claim.operationId).map(claim => ({
+                submissionId: claim.submissionId, operationId: claim.operationId,
+                from: claim.from, nonce: claim.nonce
+            }));
+            next.resolvedStartTransactionHistory = [...(next.resolvedStartTransactionHistory || []), {
+                resolution: 'closed_finalized', finalizedBlock: next.finalizedBlockNumber || null,
+                transactionHashes: [...new Set([...(next.transactionHashes || []),
+                    ...(next.transactionHash ? [next.transactionHash] : [])])],
+                transactionAttempts: next.transactionAttempts || [],
+                preparedTransactionAttempts: prepared.transactionAttempts || [],
+                resolvedClaims: claims
+            }];
+            next.startRecoveryPending = false;
+            for (const key of ['startSubmissionId', 'startOperationId', 'startSubmissionOwner',
+                'startSubmissionStartedAt', 'startSubmissionFrom', 'startSubmissionNonce', 'startSubmissionError',
+                'startSubmissionOutcome', 'startRetryFrom', 'startRetryNonce', 'startRetryOperationId',
+                'startRetrySavedAt', 'startMissingTransactionHashes', 'startReplacementTransactionHashes',
+                'supersededStartSubmissionClaims', 'ambiguousStartReplacements', 'resolvedStartClaims']) delete next[key];
+        }
         delete next.state;
         delete next.preparedWithdrawal;
         delete next.proof;

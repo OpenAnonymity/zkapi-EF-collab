@@ -152,3 +152,48 @@ one-line prompt through the UI. Once the streamed response completes, evaluate
 announcements, their screen-reader semantics, clipping, and unchanged composer
 height. Repeat after reloading in light/dark themes and a narrow viewport. This
 test helper is not a production asset and does not use a real wallet or model.
+
+### Set-aside mutual-close recovery
+
+A mutual-close authorization reserves the old balance for withdrawal even if
+the user rejects MetaMask. **Set aside** retains that note and its authorization
+atomically in the withdrawal store; a new deposit occupies a separate selected
+wallet slot. **Withdraw** in history now reproves the old note against the
+current vault root and pays its original destination, without restoring it into
+the selected slot or settling the new chat key.
+
+An Active on-chain note with no broadcast or ambiguous wallet evidence remains
+**Ready to withdraw**. Polling must not invent an escape challenge or require
+block finality for a transaction that never existed. The same check repairs
+older incorrectly labeled records. Unknown wallet responses retain their
+claims and exact nonce across reloads; only canonical finalized resolution of
+every attempt permits a fresh proof. Successful returns retain private recovery
+material until finality, then remove it while preserving a metadata-only audit.
+If a page closes during the new driver's preflight, before any wallet nonce has
+been saved, history exposes **Cancel preparation**. That action atomically
+invalidates the original claim, so its delayed nonce callback cannot broadcast.
+It is never offered for a nonce-journaled request or an older driver that could
+have submitted without journaling its nonce first.
+
+For deterministic browser verification of these transitions, run:
+
+```sh
+npm run build:browser
+node scripts/browser-withdrawal-recovery-server.mjs dist/browser 8878
+```
+
+Open `http://127.0.0.1:8878/funding/?zkapiMode=browser` in a fresh isolated browser
+profile **without MetaMask**. This localhost-only harness installs synthetic
+EIP-1193 and proof-worker boundaries before the real app loads; it keeps the
+real IndexedDB, wallet state machine, transaction encoder, receipt decoder and
+UI. It refuses real wallet providers and non-fixture notes, blocks external
+connections, and is excluded from deployment artifacts.
+
+Test mutual close → wallet rejection → Set aside → new balance → historical
+withdrawal; hold/cancel the wallet request, close the modal and type, reload
+during the request, and retry with the original nonce. Compare the current
+note, pending deposit, chat lease and journal before/after every transition.
+The history row must advance in place from preparing to waiting for MetaMask
+to confirming, then show Returned. Repeat in light/dark themes. These tests
+exercise recovery and UX with simulated transactions, not real-chain payments
+or cryptographic proof verification.

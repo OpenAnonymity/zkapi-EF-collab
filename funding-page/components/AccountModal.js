@@ -168,6 +168,8 @@ export default class AccountModal {
     async run(action, activityDetails = null) {
         if (this.busy) return;
         this.busy = true;
+        this.backgroundProgress = activityDetails?.withdrawalRecordId
+            ? { recordId: activityDetails.withdrawalRecordId, phase: 'preparing' } : null;
         this.render();
         const activityId = activityDetails
             ? zkapiClient.beginActivity(activityDetails.kind, {
@@ -177,6 +179,10 @@ export default class AccountModal {
             : null;
         const report = (message, phase = null) => {
             this.setStatus(message);
+            if (this.backgroundProgress && phase) {
+                this.backgroundProgress.phase = phase;
+                this.updateBackgroundProgress();
+            }
             if (activityId) zkapiClient.updateActivity(activityId, {
                 message,
                 ...(phase ? { phase } : {})
@@ -214,8 +220,24 @@ export default class AccountModal {
             this.app.showToast?.(this.status, confirmationPending ? 'info' : rejected ? 'success' : 'error', 6000);
         } finally {
             this.busy = false;
+            this.backgroundProgress = null;
             this.render();
         }
+    }
+
+    backgroundProgressLabel(recordId) {
+        if (!this.busy || this.backgroundProgress?.recordId !== recordId) return null;
+        return this.backgroundProgress.phase === 'wallet' ? 'Waiting for MetaMask'
+            : this.backgroundProgress.phase === 'confirming' ? 'Confirming transaction' : 'Preparing withdrawal';
+    }
+
+    updateBackgroundProgress() {
+        // Update just the busy row: never rebuild the modal or restart its
+        // animation while a wallet request is open.
+        this.overlay?.querySelectorAll('[data-background-progress]')?.forEach(element => {
+            const label = this.backgroundProgressLabel(element.dataset.backgroundProgress);
+            if (label && element.textContent !== label) element.textContent = label;
+        });
     }
 
     progressPercent(note) {
@@ -240,19 +262,25 @@ export default class AccountModal {
     }
 
     withdrawalRecordLabel(record) {
-        if (record.chainStatus === 'active'
+        if (['closed', 'closed_unconfirmed'].includes(record.phase)) return 'Returned';
+        if (record.backgroundPreparationCancelable) return 'Preparation incomplete';
+        if (record.mode === 'escape' && record.chainStatus === 'active'
             && (record.finalizeTransactionHash || record.finalizeSubmissionId)) {
             return 'Escape challenged';
         }
         if (record.phase === 'closed_unconfirmed') return 'Returned';
+        if (record.startSubmissionId) return record.startSubmissionOutcome === 'ambiguous'
+            ? 'Status unknown' : 'Waiting for MetaMask';
         if (record.phase === 'submitted_unconfirmed') return 'Transaction · checking';
-        if (record.phase === 'challenged_unconfirmed') return 'Challenge · confirming';
+        if (record.phase === 'recovery_unconfirmed') return 'Checking balance';
+        if (record.phase === 'challenged_unconfirmed') return record.mode === 'escape'
+            ? 'Challenge · confirming' : 'Checking balance';
         if (record.finalizeTransactionHash) return 'Transaction submitted';
         if (record.finalizeSubmissionId && record.phase === 'ambiguous') return 'Status unknown';
         if (record.finalizeSubmissionId) return 'Waiting for MetaMask';
         if (record.phase === 'closed') return 'Returned';
         if (record.phase === 'restored') return 'Balance restored';
-        if (record.phase === 'parked') return 'Ready to finish';
+        if (record.phase === 'parked') return 'Ready to withdraw';
         if (record.phase === 'finalizing') return 'Transaction submitted';
         if (record.phase === 'awaiting_wallet') return 'Waiting for MetaMask';
         if (record.phase === 'ambiguous') return 'Status unknown';
@@ -362,32 +390,44 @@ export default class AccountModal {
                             || record.clearanceReserved === true;
                         const unresolvedFinalization = Boolean(record.finalizeTransactionHash
                             || record.finalizeSubmissionId);
-                        const challengedFinalization = record.chainStatus === 'active'
+                        const backgroundReady = record.mode === 'mutual'
+                            && ['parked', 'restored'].includes(record.phase)
+                            && !unresolvedFinalization && !record.startSubmissionId
+                            && record.startRecoveryPending !== true
+                            && record.backgroundWithdrawalReady !== false
+                            && !record.transactionHash && !record.transactionHashes?.length
+                            && !record.transactionAttempts?.length && !record.resolvedStartClaims?.length
+                            && !record.startResolutionBlock;
+                        const parkedNeedsCheck = record.mode === 'mutual' && !backgroundReady
+                            && ['parked', 'restored'].includes(record.phase);
+                        const challengedFinalization = record.mode === 'escape' && record.chainStatus === 'active'
                             && unresolvedFinalization;
                         const finalizationReplacement = this.finalizationReplacementAvailable(record);
                         const backgroundStartReplacement = this
                             .backgroundStartReplacementAvailable(record);
+                        const progressLabel = this.backgroundProgressLabel(record.recordId);
                         return `
                             <section class="rounded-lg border border-border bg-muted/20 p-3" data-withdrawal-record="${this.escapeHtml(record.recordId)}">
                                 <div class="flex items-start justify-between gap-3">
                                     <div>
                                         <p class="text-xs font-medium text-foreground">${record.mode === 'escape' ? 'Escape hatch' : 'Mutual close'}</p>
-                                        <p class="mt-0.5 text-[11px] text-muted-foreground">${zkapiClient.formatMoney(record.finalBalance)} ${returned ? 'returned' : 'returning'} to ${record.destination ? zkapiClient.compact(record.destination, 6) : 'your saved destination'}</p>
+                                        <p class="mt-0.5 text-[11px] text-muted-foreground">${zkapiClient.formatMoney(record.finalBalance)} ${returned ? 'returned to' : ['parked', 'restored'].includes(record.phase) ? 'set aside · to' : '· to'} ${record.destination ? zkapiClient.compact(record.destination, 6) : 'your saved destination'}</p>
                                     </div>
-                                    <span class="rounded-full ${returned ? 'badge-status-success' : 'bg-muted text-muted-foreground'} px-2 py-1 text-[10px]" ${record.mode === 'escape' && open && deadline && record.phase === 'pending' ? `data-zkapi-withdrawal-countdown="${deadline}" data-record-id="${this.escapeHtml(record.recordId)}" data-record-phase="pending"` : ''}>${this.escapeHtml(this.withdrawalRecordLabel(record))}</span>
+                                    <span class="rounded-full ${returned ? 'badge-status-success' : 'bg-muted text-muted-foreground'} px-2 py-1 text-[10px]" ${record.mode === 'escape' && open && deadline && record.phase === 'pending' ? `data-zkapi-withdrawal-countdown="${deadline}" data-record-id="${this.escapeHtml(record.recordId)}" data-record-phase="pending"` : ''}>${progressLabel ? '<span class="mr-1 inline-block size-2 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true"></span>' : ''}<span data-background-progress="${this.escapeHtml(record.recordId)}" ${progressLabel ? 'role="status"' : ''}>${this.escapeHtml(progressLabel || (parkedNeedsCheck ? 'Checking balance' : this.withdrawalRecordLabel(record)))}</span></span>
                                 </div>
                                 ${record.phase === 'closed_unconfirmed' ? '<p class="mt-2 text-[11px] text-muted-foreground">Funds are in your wallet. Network confirmation continues automatically; no action is needed.</p>' : ''}
                                 ${returned && transactionUrl ? `<a class="mt-2 inline-flex text-[11px] text-muted-foreground underline underline-offset-2" href="${this.escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer">View transaction</a>` : ''}
-                                ${record.phase === 'submitted_unconfirmed' ? '<p class="mt-2 text-[11px] text-muted-foreground">This transaction is being checked in the background. It does not block a new private balance.</p>' : record.phase === 'challenged_unconfirmed' ? '<p class="mt-2 text-[11px] text-muted-foreground">The challenge is being confirmed in the background. You can keep using OA Chat with another private balance.</p>' : challengedFinalization ? '<p class="mt-2 text-[11px] text-muted-foreground">The escape was challenged. Do not retry finalization. Check any submitted transaction, or close the old MetaMask prompt before restoring this balance.</p>' : record.error ? `<p class="mt-2 text-[11px] text-destructive">${this.escapeHtml(record.error)}</p>` : ''}
+                                ${record.phase === 'submitted_unconfirmed' ? '<p class="mt-2 text-[11px] text-muted-foreground">This withdrawal is being checked in the background. Your current balance is unchanged.</p>' : ['challenged_unconfirmed', 'recovery_unconfirmed'].includes(record.phase) ? `<p class="mt-2 text-[11px] text-muted-foreground">${record.mode === 'escape' ? 'The challenge is being confirmed in the background.' : 'Checking the previous withdrawal’s on-chain status.'} Your current balance is unchanged.</p>` : challengedFinalization ? '<p class="mt-2 text-[11px] text-muted-foreground">The escape was challenged. Do not retry finalization. Check any submitted transaction, or close the old MetaMask prompt before restoring this balance.</p>' : record.error ? `<p class="mt-2 text-[11px] text-destructive">${this.escapeHtml(record.error)}</p>` : ''}
                                 ${open ? `<div class="mt-3 flex gap-2">
                                     ${record.mode === 'escape' && record.phase === 'pending' ? `<button data-finalize-withdrawal="${this.escapeHtml(record.recordId)}" class="zkapi-primary-button flex-1" type="button" ${!ready || this.busy ? 'disabled' : ''}>${ready ? 'Finalize' : `Ready in ${zkapiClient.formatExpiry(deadline)}`}</button>` : ''}
-                                    ${(record.mode === 'escape' && (unresolvedFinalization || ['submitted_unconfirmed', 'challenged_unconfirmed', 'finalizing', 'awaiting_wallet', 'ambiguous'].includes(record.phase))) || ['submitted_unconfirmed', 'closed_unconfirmed'].includes(record.phase) ? `<button data-sync-withdrawal="${this.escapeHtml(record.recordId)}" class="zkapi-primary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Check status</button>` : ''}
+                                    ${parkedNeedsCheck || (record.mode === 'escape' && (unresolvedFinalization || ['finalizing', 'awaiting_wallet', 'ambiguous'].includes(record.phase))) || ['submitted_unconfirmed', 'challenged_unconfirmed', 'recovery_unconfirmed', 'closed_unconfirmed'].includes(record.phase) ? `<button data-sync-withdrawal="${this.escapeHtml(record.recordId)}" class="zkapi-primary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Check status</button>` : ''}
                                     ${record.mode === 'escape' && record.phase === 'awaiting_wallet' && !challengedFinalization ? `<button data-recover-finalization="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Prompt closed</button>` : ''}
                                     ${record.mode === 'escape' && record.phase === 'ambiguous' && !challengedFinalization ? `<button data-retry-finalization="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Retry transaction</button>` : ''}
                                     ${record.mode === 'escape' && finalizationReplacement && !challengedFinalization ? `<button data-retry-dropped-finalization="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Replace transaction</button>` : ''}
                                     ${backgroundStartReplacement ? `<button data-retry-dropped-background-withdrawal="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Replace transaction</button>` : ''}
+                                    ${record.backgroundPreparationCancelable ? `<button data-cancel-background-preparation="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Cancel preparation</button>` : ''}
                                     ${record.mode === 'escape' && challengedFinalization && record.finalizeSubmissionId && !record.finalizeTransactionHash ? `<button data-resolve-challenged-finalization="${this.escapeHtml(record.recordId)}" class="zkapi-secondary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>I closed MetaMask</button>` : ''}
-                                    ${['restored', 'parked'].includes(record.phase) && !unresolvedFinalization ? `<button data-restore-withdrawal="${this.escapeHtml(record.recordId)}" data-withdrawal-only="${withdrawalOnly}" class="zkapi-primary-button flex-1" type="button" ${hasSelectedNote || hasPendingDeposit || this.busy ? 'disabled' : ''}>${withdrawalOnly ? 'Finish withdrawal' : 'Use this balance'}</button>` : ''}
+                                    ${backgroundReady ? `<button data-withdraw-background="${this.escapeHtml(record.recordId)}" class="zkapi-primary-button flex-1" type="button" ${this.busy ? 'disabled' : ''}>Withdraw ${zkapiClient.formatMoney(record.finalBalance)}</button>` : record.mode !== 'mutual' && ['restored', 'parked'].includes(record.phase) && !unresolvedFinalization ? `<button data-restore-withdrawal="${this.escapeHtml(record.recordId)}" data-withdrawal-only="${withdrawalOnly}" class="zkapi-primary-button flex-1" type="button" ${hasSelectedNote || hasPendingDeposit || this.busy ? 'disabled' : ''}>${withdrawalOnly ? 'Finish withdrawal' : 'Use this balance'}</button>` : ''}
                                 </div>` : ''}
                             </section>`;
                     }).join('')}
@@ -857,6 +897,17 @@ export default class AccountModal {
                     phase: 'wallet'
                 });
             });
+        });
+        this.overlay.querySelectorAll('[data-withdraw-background]').forEach(button => {
+            button.addEventListener('click', () => this.run(async (report) => {
+                await zkapiClient.withdrawBackground(button.dataset.withdrawBackground, report);
+            }, { kind: 'withdraw', title: 'Withdrawing set-aside balance', phase: 'preparing', blocksSend: false,
+                withdrawalRecordId: button.dataset.withdrawBackground }));
+        });
+        this.overlay.querySelectorAll('[data-cancel-background-preparation]').forEach(button => {
+            button.addEventListener('click', () => this.run(async report => {
+                await zkapiClient.cancelBackgroundWithdrawalPreparation(button.dataset.cancelBackgroundPreparation, report);
+            }, { kind: 'withdraw-sync', title: 'Canceling preparation', phase: 'syncing', blocksSend: false }));
         });
         this.overlay.querySelectorAll('[data-restore-withdrawal]').forEach(button => {
             button.addEventListener('click', () => this.run(async (report) => {

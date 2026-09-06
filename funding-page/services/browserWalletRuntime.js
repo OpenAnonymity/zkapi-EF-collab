@@ -1,31 +1,42 @@
 import networkProxy from './networkProxy.js';
 import { sameFelt, waitForExpectedActiveRoot } from './zkapiWithdrawalRoot.mjs';
+import { isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
 import {
     CHAT_SPENDING_TIER_USD,
     selectLeaseSpendingLimitCredits
 } from './zkapiRequestCompat.mjs';
 import {
     archiveBrowserWallet,
+    assertBrowserBackgroundWithdrawalAvailable,
     authorizeBrowserWithdrawalFinalizationRetry,
     claimBrowserWithdrawalStartReplacement,
+    claimBrowserBackgroundWithdrawalSubmission,
     claimBrowserWithdrawalFinalization,
     claimBrowserWithdrawalFinalizationReplacement,
     createWalletChannel,
     detachBrowserClosedWithdrawal,
     detachBrowserEscapeWithdrawal,
     listBrowserWithdrawals,
+    isBrowserBackgroundWithdrawalPreparationCancelable,
     markBrowserWithdrawalFinalizationAmbiguous,
+    markBrowserBackgroundWithdrawalAmbiguous,
     markBrowserWithdrawalFinalizationMissingReceipts,
     parkBrowserWithdrawal,
     readBrowserWalletSnapshot,
     releaseBrowserWithdrawalFinalization,
     releaseBrowserWithdrawalFinalizationReplacementClaim,
     releaseBrowserWithdrawalStartSubmission,
+    releaseBrowserBackgroundWithdrawalSubmission,
+    rememberBrowserBackgroundWithdrawalMetadata,
+    rememberBrowserBackgroundWithdrawalTransaction,
     rememberBrowserWithdrawalFinalization,
     rememberBrowserWithdrawalFinalizationSubmissionMetadata,
     requestPersistentStorage,
+    repairBrowserUnsubmittedBackgroundWithdrawal,
+    resolveBrowserBackgroundWithdrawalForRetry,
     resolveBrowserChallengedFinalization,
     restoreBrowserWithdrawal,
+    saveBrowserBackgroundWithdrawalPlan,
     transferBrowserLateWithdrawalAttempt,
     updateBrowserWithdrawal,
     withBrowserWalletLock,
@@ -597,7 +608,12 @@ class BrowserWalletRuntime extends EventTarget {
                     withdrawalNullifier: _nullifier,
                     ...summary
                 } = record;
-                return summary;
+                return { ...summary, backgroundWithdrawalReady: isUnsubmittedParkedMutualWithdrawal(
+                    record, this.runtime?.lateWithdrawalAttempts || []
+                ), backgroundPreparationCancelable: Boolean(this.config && this.manifest)
+                    && isBrowserBackgroundWithdrawalPreparationCancelable(
+                        record, this.runtime, this.backgroundWithdrawalIdentity(record)
+                    ) };
             })
         };
     }
@@ -2537,6 +2553,9 @@ class BrowserWalletRuntime extends EventTarget {
         await this.init();
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
             await this.reload();
+            const detachesSelectedNote = this.runtime.deploymentId === attempt.deploymentId
+                && this.runtime.state
+                && Number(this.runtime.state.note_id) === Number(attempt.noteId);
             const result = await transferBrowserLateWithdrawalAttempt({
                 operationId: attempt.operationId,
                 transactionHash: attempt.transactionHash,
@@ -2547,7 +2566,7 @@ class BrowserWalletRuntime extends EventTarget {
             }, record);
             this.runtime = result.runtime;
             this.withdrawals = await listBrowserWithdrawals(this.manifest.deployment_id);
-            this.activeLease = null;
+            if (detachesSelectedNote) this.activeLease = null;
             this.notify();
             return result;
         });
@@ -3039,6 +3058,140 @@ class BrowserWalletRuntime extends EventTarget {
             this.notify();
             return result.withdrawal;
         });
+    }
+
+    backgroundWithdrawalIdentity(record) {
+        return { recordId: record?.recordId, deploymentId: this.manifest.deployment_id,
+            chainId: Number(this.config.funding.chain_id), contractAddress: this.config.funding.contract_address,
+            noteId: Number(record?.noteId), mode: record?.mode, destination: record?.destination };
+    }
+
+    async repairUnsubmittedBackgroundWithdrawal(recordId, observedBlock, expectedRevision) {
+        await this.init();
+        await this.reload();
+        const record = this.withdrawals.find(entry => entry.recordId === recordId);
+        if (!record) return null;
+        const result = await repairBrowserUnsubmittedBackgroundWithdrawal(
+            this.backgroundWithdrawalIdentity(record), Number(observedBlock), expectedRevision);
+        await this.reload();
+        if (result && Number(result.revision) !== Number(expectedRevision)) this.notify();
+        return result;
+    }
+
+    async resolveBackgroundWithdrawalForRetry(recordId, evidence) {
+        await this.init();
+        await this.reload();
+        const record = this.withdrawals.find(entry => entry.recordId === recordId);
+        const result = await resolveBrowserBackgroundWithdrawalForRetry(
+            this.backgroundWithdrawalIdentity(record), evidence);
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async prepareBackgroundWithdrawal(recordId, { expectedActiveRoot } = {}) {
+        await this.init();
+        await this.reload();
+        const record = structuredClone(this.withdrawals.find(entry => entry.recordId === recordId));
+        const identity = this.backgroundWithdrawalIdentity(record);
+        assertBrowserBackgroundWithdrawalAvailable(record, this.runtime, identity);
+        if (expectedActiveRoot == null) throw new Error('A current vault root is required to prepare this withdrawal.');
+        const state = record.state;
+        const config = this.config;
+        if (Number(state.chain_id) !== identity.chainId || !sameFelt(state.contract_address, identity.contractAddress)) {
+            throw new Error('The saved private state belongs to a different vault.');
+        }
+        const nullifier = await this.worker.call('withdrawalNullifier', { state });
+        const savedNullifiers = [record.withdrawalNullifier, record.preparedWithdrawal?.withdrawalNullifier,
+            record.preparedWithdrawal?.public_inputs?.withdrawal_nullifier].filter(value => value != null);
+        if (savedNullifiers.some(value => !sameFelt(value, nullifier))) {
+            throw new Error('The saved withdrawal authorization does not match its private balance.');
+        }
+        // Deliberately outside the global wallet lock: a proof or indexer wait
+        // must not stall unrelated deposits, requests, or settlement in another tab.
+        const path = await this.treePath(identity.noteId, true, expectedActiveRoot);
+        const clearance = await this.remoteJson(`${config.funding.protocol_server_url}/v2/withdraw/clearance`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ withdrawal_nullifier: nullifier })
+        });
+        const plan = await this.worker.call('prepareWithdrawal', {
+            config: config.wallet_core, state,
+            args: { mode: 'mutual', destination: identity.destination, active_root: path.active_root,
+                merkle_siblings: path.siblings, clearance }, provingKey: config.proving_keys.withdrawal
+        });
+        const inputs = plan.public_inputs;
+        const encodedDestination = Array.isArray(inputs?.destination)
+            ? `0x${inputs.destination.map(value => Number(value).toString(16).padStart(2, '0')).join('')}`
+            : inputs?.destination;
+        if (!plan.proof || Number(inputs?.note_id) !== identity.noteId
+            || Number(inputs?.chain_id) !== identity.chainId
+            || !sameFelt(inputs?.contract_address, identity.contractAddress)
+            || !sameFelt(inputs?.active_root, expectedActiveRoot)
+            || !sameFelt(inputs?.withdrawal_nullifier, nullifier)
+            || !sameFelt(inputs?.final_balance, state.current_balance)
+            || String(encodedDestination || '').toLowerCase() !== identity.destination.toLowerCase()
+            || inputs?.has_clearance !== true) {
+            throw new Error('The generated withdrawal proof does not match its saved balance and vault.');
+        }
+        Object.assign(plan, { destination: identity.destination, mode: 'mutual', phase: 'prepared',
+            operationId: uuid(), noteId: identity.noteId, withdrawalNullifier: nullifier,
+            clearanceReserved: true, createdAt: Number(record.createdAt || Date.now()) });
+        await saveBrowserBackgroundWithdrawalPlan(identity, record, plan);
+        await this.reload();
+        this.notify();
+        return plan;
+    }
+
+    async claimBackgroundWithdrawalSubmission(recordId, expectedOperationId) {
+        await this.init();
+        await this.reload();
+        const record = this.withdrawals.find(entry => entry.recordId === recordId);
+        const result = await claimBrowserBackgroundWithdrawalSubmission(
+            this.backgroundWithdrawalIdentity(record), expectedOperationId, this.ownerId);
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async rememberBackgroundWithdrawalSubmissionMetadata(submission, metadata) {
+        const result = await rememberBrowserBackgroundWithdrawalMetadata(submission, metadata);
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async markBackgroundWithdrawalAmbiguous(submission, message) {
+        const result = await markBrowserBackgroundWithdrawalAmbiguous(submission, message);
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async releaseBackgroundWithdrawalSubmission(submission) {
+        const result = await releaseBrowserBackgroundWithdrawalSubmission(submission);
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async cancelBackgroundWithdrawalPreparation(recordId) {
+        await this.init();
+        await this.reload();
+        const record = this.withdrawals.find(entry => entry.recordId === recordId);
+        if (!record) throw new Error('This saved withdrawal is no longer available.');
+        const submission = { ...this.backgroundWithdrawalIdentity(record),
+            submissionId: record.startSubmissionId, operationId: record.startOperationId };
+        const result = await releaseBrowserBackgroundWithdrawalSubmission(submission, { requireNoNonce: true });
+        await this.reload();
+        this.notify();
+        return result;
+    }
+
+    async rememberBackgroundWithdrawalTransaction(hash, submission, metadata = null) {
+        const result = await rememberBrowserBackgroundWithdrawalTransaction(hash, submission, metadata);
+        await this.reload();
+        this.notify();
+        return result;
     }
 
     async parkPreparedWithdrawal() {

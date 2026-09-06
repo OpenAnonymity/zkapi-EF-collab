@@ -87,7 +87,7 @@ globalThis.window = Object.assign(new EventTarget(), { location: { hostname: 'lo
 globalThis.localStorage = { getItem: () => null, removeItem() {}, setItem() {} };
 globalThis.zkapiWallet = createRequire(import.meta.url)('./wallet.js');
 
-const { writeBrowserWallet, listBrowserWithdrawals } = await import('./services/browserWalletStore.js');
+const { writeBrowserWallet, listBrowserWithdrawals, readBrowserWalletSnapshot } = await import('./services/browserWalletStore.js');
 const { default: runtime } = await import('./services/browserWalletRuntime.js');
 const { ZkapiClient } = await import('./services/zkapiClient.js');
 
@@ -115,7 +115,7 @@ const RECEIPT = {
     }]
 };
 
-async function scenario({ finalitySupported = true, selected = false } = {}) {
+async function scenario({ finalitySupported = true, selected = false, parked = false } = {}) {
     indexedDB.clear();
     const config = { funding: { chain_id: 1, contract_address: VAULT } };
     runtime.manifest = { deployment_id: DEPLOYMENT_ID };
@@ -130,14 +130,18 @@ async function scenario({ finalitySupported = true, selected = false } = {}) {
         state,
         preparedWithdrawal: {
             mode: 'mutual',
+            phase: 'prepared',
+            noteId: state.note_id,
+            operationId: 'retained-close-authorization',
             clearanceReserved: true,
-            transactionHash: TX_HASH,
+            ...(parked ? { submissionOutcome: 'rejected_before_broadcast' } : { transactionHash: TX_HASH }),
             destination: returned.destination,
             public_inputs: { note_id: state.note_id, final_balance: state.current_balance }
         }
     });
     await runtime.reload();
-    if (!selected) await runtime.detachClosedWithdrawal({
+    if (parked) await runtime.parkPreparedWithdrawal();
+    else if (!selected) await runtime.detachClosedWithdrawal({
         mode: 'mutual',
         noteId: state.note_id,
         destination: returned.destination,
@@ -149,7 +153,7 @@ async function scenario({ finalitySupported = true, selected = false } = {}) {
     const chain = {
         finalized: CLOSE_BLOCK - 19,
         head: CLOSE_BLOCK + 1,
-        status: 3,
+        status: parked ? 1 : 3,
         receipt: structuredClone(RECEIPT),
         historicalReads: [],
         methods: []
@@ -193,6 +197,52 @@ async function scenario({ finalitySupported = true, selected = false } = {}) {
     const record = async () => (await listBrowserWithdrawals(DEPLOYMENT_ID))[0];
     return { chain, state, reloadClient, record };
 }
+
+test('canceled mutual close stays set aside through polls, reloads and funding a newer balance', async () => {
+    const { chain, state, reloadClient, record } = await scenario({ parked: true });
+    const beforeOld = structuredClone(await record());
+    await writeBrowserWallet({
+        deploymentId: DEPLOYMENT_ID,
+        state: { note_id: 19, current_balance: 5_000_000, secret: 'new-note-test-secret' },
+        lease: { session_id: 'new-chat', testSentinel: true },
+        journal: { testSentinel: 'new-note-journal' }
+    });
+    const beforeCurrent = (await readBrowserWalletSnapshot(DEPLOYMENT_ID)).runtime;
+    for (let poll = 0; poll < 3; poll += 1) {
+        chain.head += 10;
+        const client = await reloadClient();
+        await client.syncEscapeWithdrawals();
+        const old = await record();
+        assert.equal(old.phase, 'parked');
+        assert.equal(old.error, null);
+        assert.deepEqual(old.state, state);
+        assert.deepEqual(old.preparedWithdrawal, beforeOld.preparedWithdrawal);
+        assert.deepEqual((await readBrowserWalletSnapshot(DEPLOYMENT_ID)).runtime, beforeCurrent);
+    }
+    assert.ok(!chain.methods.includes('eth_getBlockByNumber'), 'no finality wait for a transaction that never existed');
+    assert.ok(!chain.methods.includes('eth_sendTransaction'));
+});
+
+test('already-misclassified canceled mutual close repairs on reload without erasing recovery', async () => {
+    const { chain, state, reloadClient, record } = await scenario({ parked: true });
+    const original = await record();
+    await runtime.updateWithdrawal(original.recordId, {
+        phase: 'challenged_unconfirmed', chainStatus: 'active',
+        challengeObservedBlock: chain.head, lastObservedBlock: chain.head,
+        finalityCheckedBlock: chain.finalized, finalizedBlockNumber: chain.finalized,
+        error: 'The escape was challenged.'
+    });
+    const client = await reloadClient();
+    await client.reconcileBrowserWithdrawalsOnLoad();
+    const repaired = await record();
+    assert.equal(repaired.phase, 'parked');
+    assert.equal(repaired.chainStatus, 'active');
+    assert.equal(repaired.error, null);
+    assert.ok(!repaired.challengeObservedBlock);
+    assert.deepEqual(repaired.state, state);
+    assert.deepEqual(repaired.preparedWithdrawal, original.preparedWithdrawal);
+    assert.ok(!chain.methods.includes('eth_getBlockByNumber'));
+});
 
 test('successful mainnet return survives reload and finishes at the finalized boundary', async () => {
     const { chain, state, reloadClient, record } = await scenario();
@@ -243,7 +293,7 @@ test('a pre-finality reorg preserves the mutual-close authorization for recovery
     const client = await reloadClient();
     assert.equal(await client.reconcileBrowserWalletInBackground(), true);
     const pending = await record();
-    assert.equal(pending.phase, 'challenged_unconfirmed');
+    assert.equal(pending.phase, 'recovery_unconfirmed');
     assert.deepEqual(pending.state, state);
     assert.equal(pending.preparedWithdrawal.clearanceReserved, true);
     chain.finalized = chain.head;
@@ -252,7 +302,7 @@ test('a pre-finality reorg preserves the mutual-close authorization for recovery
     assert.equal(restored.phase, 'parked');
     assert.deepEqual(restored.state, state);
     assert.equal(restored.clearanceReserved, true);
-    assert.match(restored.error, /withdrawal-only/i);
+    assert.equal(restored.error, null, 'a mutual-close recovery is not an escape challenge');
 });
 
 test('reopening an already-finalized mainnet return uses its matching receipt block', async () => {

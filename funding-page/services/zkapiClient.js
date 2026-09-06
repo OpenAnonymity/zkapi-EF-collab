@@ -2,6 +2,7 @@ import browserWalletRuntime from './browserWalletRuntime.js';
 import { contractEstimateError, contractRevertSelector } from './zkapiContractError.mjs';
 import { bufferedGasLimit } from './zkapiGas.mjs';
 import { normalizeWalletError, walletErrorMessage } from './zkapiWalletError.mjs';
+import { backgroundWithdrawalClaims, isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
 const SESSION_HEADER = 'x-zkapi-session-id';
@@ -2111,6 +2112,134 @@ class ZkapiClient extends EventTarget {
         return this.syncWithdrawal(onStatus);
     }
 
+    async withdrawBackground(recordId, onStatus = () => {}) {
+        if (!this.browserMode) throw new Error('Background withdrawals require the browser wallet.');
+        this.backgroundWithdrawalPromises ||= new Map();
+        if (this.backgroundWithdrawalPromises.has(recordId)) {
+            return this.backgroundWithdrawalPromises.get(recordId);
+        }
+        const operation = this.performBackgroundWithdrawal(recordId, onStatus);
+        this.backgroundWithdrawalPromises.set(recordId, operation);
+        try {
+            return await operation;
+        } finally {
+            if (this.backgroundWithdrawalPromises.get(recordId) === operation) {
+                this.backgroundWithdrawalPromises.delete(recordId);
+            }
+        }
+    }
+
+    async cancelBackgroundWithdrawalPreparation(recordId, onStatus = () => {}) {
+        if (!this.browserMode) throw new Error('This recovery belongs to the browser wallet.');
+        await browserWalletRuntime.cancelBackgroundWithdrawalPreparation(recordId);
+        await this.refresh({ quiet: true });
+        onStatus('Preparation canceled. The set-aside balance is ready to withdraw again.');
+    }
+
+    async performBackgroundWithdrawal(recordId, onStatus) {
+        onStatus('Checking the set-aside balance…', 'preparing');
+        await this.syncEscapeWithdrawals(() => {}, recordId);
+        const record = await browserWalletRuntime.currentWithdrawal(recordId);
+        if (!record || record.mode !== 'mutual'
+            || !['parked', 'restored'].includes(record.phase)) {
+            throw new Error('Check this withdrawal’s status before trying to finish it.');
+        }
+        // This path deliberately never selects the old note or settles the
+        // current chat. The retained destination receives the old balance;
+        // the connected account only authorizes and pays for this transaction.
+        const noteId = Number(record.noteId);
+        const destination = record.destination;
+        onStatus('Connecting to MetaMask for the set-aside balance…');
+        const from = await this.connectWallet();
+        let receipt;
+        let plan;
+        let submittedHash = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            let submission = null;
+            let metadata = null;
+            try {
+                const canonical = await this.readBrowserWithdrawalStatus(noteId);
+                if (canonical.status !== 'active' || Number(canonical.observed_block || 0)
+                    < Math.max(Number(record.startBlockNumber || 0), Number(record.lastObservedBlock || 0))) {
+                    await this.syncEscapeWithdrawals(() => {}, recordId);
+                    throw new Error('The vault state changed. Check this withdrawal’s status before retrying.');
+                }
+                onStatus(attempt === 0
+                    ? 'Preparing the old balance’s withdrawal proof…'
+                    : 'The vault changed. Updating the old balance’s proof…', 'preparing');
+                const expectedActiveRoot = await this.readContractUint(
+                    this.config.funding.contract_address, `0x${ABI.currentRoot}`
+                );
+                plan = await browserWalletRuntime.prepareBackgroundWithdrawal(recordId, { expectedActiveRoot });
+                if (plan.mode !== 'mutual' || Number(plan.public_inputs?.note_id) !== noteId
+                    || plan.destination?.toLowerCase() !== destination?.toLowerCase()
+                    || Number(plan.public_inputs?.final_balance) !== Number(record.finalBalance)) {
+                    throw new Error('The withdrawal proof does not match this set-aside balance.');
+                }
+                const calldata = encodeWithdrawal(plan, 'mutual', destination, this.config.funding.contract_address);
+                submission = await browserWalletRuntime.claimBackgroundWithdrawalSubmission(recordId, plan.operationId);
+                onStatus('Confirm the set-aside withdrawal in MetaMask. Your current balance is unchanged.', 'wallet');
+                receipt = await this.sendContractTransaction(
+                    from, this.config.funding.contract_address, calldata,
+                    async hash => {
+                        submittedHash = hash;
+                        await browserWalletRuntime.rememberBackgroundWithdrawalTransaction(hash, submission, metadata);
+                        onStatus('Withdrawal submitted. Checking confirmation…', 'confirming');
+                    },
+                    async value => {
+                        metadata = value;
+                        await browserWalletRuntime.rememberBackgroundWithdrawalSubmissionMetadata(submission, value);
+                    }
+                );
+                break;
+            } catch (failure) {
+                const error = normalizeWalletError(failure);
+                submittedHash = submittedHash || error.transactionHash || null;
+                if (submission && submittedHash) {
+                    // A returned hash owns recovery even if its first journal
+                    // write or the receipt poll failed. Never prepare a new
+                    // proof/nonce after this boundary.
+                    try {
+                        await browserWalletRuntime.rememberBackgroundWithdrawalTransaction(submittedHash, submission, metadata);
+                    } catch (journalError) {
+                        error.journalRecoveryError = journalError;
+                    }
+                    error.shortMessage = 'The submitted withdrawal is saved for recovery. Check its status; your current balance is unchanged.';
+                } else if (submission && (error.broadcastPossible === false || isWalletRejection(error))) {
+                    await browserWalletRuntime.releaseBackgroundWithdrawalSubmission(submission);
+                    if (error.code === 'stale_root' && attempt < 2) continue;
+                    if (isWalletRejection(error)) {
+                        error.shortMessage = 'Canceled. The old balance is still set aside and can be withdrawn later.';
+                    }
+                } else if (submission) {
+                    await browserWalletRuntime.markBackgroundWithdrawalAmbiguous(submission, error.message);
+                    error.shortMessage = 'MetaMask did not return a transaction ID. Check this withdrawal’s status before retrying; your current balance is unchanged.';
+                }
+                await this.refresh({ quiet: true });
+                throw error;
+            }
+        }
+        const event = parseWithdrawalReceipt(receipt, this.config.funding.contract_address, 'mutual');
+        if (!event || event.noteId !== BigInt(noteId)
+            || event.destination.toLowerCase() !== destination.toLowerCase()
+            || event.finalBalance !== BigInt(plan.public_inputs.final_balance)) {
+            throw new Error('The transaction receipt did not match the set-aside withdrawal. Its transaction remains saved for checking.');
+        }
+        const confirmed = await this.confirmMinedWithdrawalStatus(noteId, receipt);
+        if (confirmed.status !== 'closed'
+            || Number(confirmed.observed_block || 0) < Number(BigInt(receipt.blockNumber || '0x0'))) {
+            const error = new Error('The withdrawal transaction was mined. Its current vault status is still being checked.');
+            error.withdrawalConfirmationPending = true;
+            throw error;
+        }
+        // Reconciliation validates the same receipt and updates only the
+        // background record. Recovery material is retained until finality.
+        await this.syncEscapeWithdrawals(() => {}, recordId);
+        await this.refresh({ quiet: true });
+        onStatus(`${this.formatMoney(event.finalBalance)} returned. Your current balance is unchanged.`);
+        return { status: 'closed', event, receipt, recordId };
+    }
+
     async retryDroppedBackgroundWithdrawal(recordId, onStatus = () => {}) {
         if (!this.browserMode) {
             throw new Error('Background transaction replacement is available in the browser wallet.');
@@ -3246,7 +3375,7 @@ class ZkapiClient extends EventTarget {
             ? expectedStatus
             : [expectedStatus];
         if (!/^0x[0-9a-fA-F]{40}$/.test(from || '')
-            || !Number.isSafeInteger(nonce) || nonce < 0
+            || transactionAttempt?.nonce == null || !Number.isSafeInteger(nonce) || nonce < 0
             || !expectedStatuses.length
             || expectedStatuses.some(status =>
                 !['active', 'pending_withdrawal'].includes(status))) {
@@ -3443,22 +3572,41 @@ class ZkapiClient extends EventTarget {
                     Number(record.startBlockNumber || 0),
                     Number(record.lastObservedBlock || 0)
                 );
+                const savedStartHashes = [...new Set([record, record.preparedWithdrawal].flatMap(value => value ? [
+                    ...(value.transactionHash ? [value.transactionHash] : []), ...(value.transactionHashes || []),
+                    ...(value.transactionAttempts || []).map(attempt => attempt.hash)
+                ] : []).filter(Boolean).map(hash => String(hash).toLowerCase()))];
+                const startClaims = backgroundWithdrawalClaims(record);
                 const tracksStartRecovery = record.startRecoveryPending === true
                     || record.phase === 'submitted_unconfirmed'
-                    || Boolean(record.startSubmissionId);
+                    || Boolean(record.startSubmissionId) || savedStartHashes.length > 0
+                    || startClaims.length > 0
+                    || (record.startSubmissionOutcome === 'resolved'
+                        && (record.resolvedStartClaims?.length > 0 || record.startResolutionBlock > 0));
                 let unresolvedStart = false;
                 let unresolvedStartHashCount = 0;
+                const resolvedStartHashes = new Set();
+                const resolvedStartClaims = [...(record.resolvedStartClaims || [])];
+                let resolvedStartBlock = Number(record.startResolutionBlock || 0);
+                const startNonceChecks = new Map();
+                const checkStartNonce = async attempt => {
+                    const key = `${String(attempt?.from || '').toLowerCase()}:${attempt?.nonce}`;
+                    if (!startNonceChecks.has(key)) startNonceChecks.set(key,
+                        this.browserTransactionNonceConsumed(attempt, record.noteId,
+                            'active', Number(status.observed_block || 0)));
+                    return startNonceChecks.get(key);
+                };
+                const rememberResolvedStart = (hash, resolution) => {
+                    if (hash) resolvedStartHashes.add(hash.toLowerCase());
+                    resolvedStartBlock = Math.max(resolvedStartBlock, Number(resolution.checkedBlock || 0));
+                };
                 const missingStartHashes = [];
                 // A canonical Pending observation does not make concurrently
                 // submitted starts disappear. Keep checking every migrated WAL
                 // hash even after the display phase advances, so a later
                 // challenge cannot restore/delete a note while a distinct start
                 // proof or MetaMask prompt can still execute.
-                const startHashes = tracksStartRecovery
-                    ? (Array.isArray(record.transactionHashes)
-                        ? record.transactionHashes
-                        : record.transactionHash ? [record.transactionHash] : [])
-                    : [];
+                const startHashes = tracksStartRecovery ? savedStartHashes : [];
                 for (const startHash of startHashes) {
                     let startReceipt = null;
                     try {
@@ -3477,17 +3625,12 @@ class ZkapiClient extends EventTarget {
                         ].find(attempt =>
                             String(attempt.hash || '').toLowerCase()
                                 === String(startHash).toLowerCase());
-                        const nonceStatus = await this.browserTransactionNonceConsumed(
-                            transactionAttempt,
-                            record.noteId,
-                            'active',
-                            Number(status.observed_block || 0)
-                        );
+                        const nonceStatus = await checkStartNonce(transactionAttempt);
                         if (!nonceStatus.consumed) {
                             unresolvedStart = true;
                             unresolvedStartHashCount += 1;
                             missingStartHashes.push(startHash);
-                        }
+                        } else rememberResolvedStart(startHash, nonceStatus);
                     } else if (startReceipt && BigInt(startReceipt.status || '0x0') === 1n) {
                         const event = parseWithdrawalReceipt(
                             startReceipt,
@@ -3505,16 +3648,11 @@ class ZkapiClient extends EventTarget {
                                 ...(record.preparedWithdrawal?.transactionAttempts || [])
                             ].find(attempt => String(attempt.hash || '').toLowerCase()
                                 === String(startHash).toLowerCase());
-                            const nonceStatus = await this.browserTransactionNonceConsumed(
-                                transactionAttempt,
-                                record.noteId,
-                                'active',
-                                Number(status.observed_block || 0)
-                            );
+                            const nonceStatus = await checkStartNonce(transactionAttempt);
                             if (!nonceStatus.consumed) {
                                 unresolvedStart = true;
                                 unresolvedStartHashCount += 1;
-                            }
+                            } else rememberResolvedStart(startHash, nonceStatus);
                         } else {
                             minimumObservedBlock = Math.max(
                                 minimumObservedBlock,
@@ -3529,17 +3667,26 @@ class ZkapiClient extends EventTarget {
                         if (!finality.finalized) {
                             unresolvedStart = true;
                             unresolvedStartHashCount += 1;
-                        }
+                        } else rememberResolvedStart(startHash, finality);
                     }
                 }
-                if (tracksStartRecovery && record.startSubmissionId) {
-                    if (/^0x[0-9a-fA-F]{40}$/.test(record.startSubmissionFrom || '')
-                        && Number.isSafeInteger(Number(record.startSubmissionNonce))) {
-                        const nonceStatus = await this.browserTransactionNonceConsumed({
-                            from: record.startSubmissionFrom,
-                            nonce: Number(record.startSubmissionNonce)
-                        }, record.noteId, 'active', Number(status.observed_block || 0));
+                for (const claim of startClaims) {
+                    if (/^0x[0-9a-fA-F]{40}$/.test(claim.from || '')
+                        && claim.nonce != null && Number.isSafeInteger(Number(claim.nonce))
+                        && Number(claim.nonce) >= 0) {
+                        const nonceStatus = await checkStartNonce({
+                            from: claim.from,
+                            nonce: Number(claim.nonce)
+                        });
                         if (!nonceStatus.consumed) unresolvedStart = true;
+                        else {
+                            rememberResolvedStart(null, nonceStatus);
+                            if (claim.submissionId && !resolvedStartClaims.some(saved =>
+                                saved.submissionId === claim.submissionId && saved.operationId === claim.operationId)) {
+                                resolvedStartClaims.push({ submissionId: claim.submissionId,
+                                    operationId: claim.operationId, from: claim.from.toLowerCase(), nonce: Number(claim.nonce) });
+                            }
+                        }
                     } else {
                         // Another tab may still have a hashless MetaMask prompt
                         // for this note. Keeping it in the background is safe;
@@ -3547,26 +3694,15 @@ class ZkapiClient extends EventTarget {
                         unresolvedStart = true;
                     }
                 }
-                if (tracksStartRecovery && !record.startSubmissionId
-                    && /^0x[0-9a-fA-F]{40}$/.test(record.startRetryFrom || '')
-                    && Number.isSafeInteger(Number(record.startRetryNonce))
-                    && Number(record.startRetryNonce) >= 0) {
-                    const retryNonceStatus = await this.browserTransactionNonceConsumed({
-                        from: record.startRetryFrom,
-                        nonce: Number(record.startRetryNonce)
-                    }, record.noteId, 'active', Number(status.observed_block || 0));
-                    // A released exact-nonce replacement can still have an
-                    // older superseded prompt, or an ambiguously accepted send,
-                    // alive in MetaMask. Keep the old note parked until that
-                    // nonce is finalized or another tracked hash resolves it.
-                    if (!retryNonceStatus.consumed) unresolvedStart = true;
-                }
                 if (tracksStartRecovery && !unresolvedStart
-                    && (record.startRecoveryPending !== false || record.startSubmissionId)) {
+                    && (record.startRecoveryPending !== false || record.startSubmissionId || startClaims.length
+                        || record.chainStatus !== status.status)) {
                     const resolvedPrepared = record.preparedWithdrawal
                         ? { ...record.preparedWithdrawal }
                         : null;
-                    if (resolvedPrepared?.submissionId === record.startSubmissionId) {
+                    if (resolvedPrepared && (resolvedPrepared.submissionId === record.startSubmissionId
+                        || resolvedStartClaims.some(claim => claim.submissionId === resolvedPrepared?.submissionId
+                            && claim.operationId === resolvedPrepared?.operationId))) {
                         delete resolvedPrepared.submissionId;
                         delete resolvedPrepared.submissionOwner;
                         delete resolvedPrepared.submissionStartedAt;
@@ -3577,6 +3713,7 @@ class ZkapiClient extends EventTarget {
                     }
                     const patch = {
                         startRecoveryPending: false,
+                        chainStatus: status.status,
                         startSubmissionId: null,
                         startOperationId: null,
                         startSubmissionOwner: null,
@@ -3590,6 +3727,8 @@ class ZkapiClient extends EventTarget {
                         startRetryNonce: null,
                         startRetryOperationId: null,
                         startRecoveryResolvedAt: Date.now(),
+                        resolvedStartClaims,
+                        startResolutionBlock: resolvedStartBlock,
                         ...(resolvedPrepared ? { preparedWithdrawal: resolvedPrepared } : {})
                     };
                     await browserWalletRuntime.updateWithdrawal(record.recordId, patch, {
@@ -3871,6 +4010,7 @@ class ZkapiClient extends EventTarget {
                                     'pending',
                                     'submitted_unconfirmed',
                                     'challenged_unconfirmed',
+                                    'recovery_unconfirmed',
                                     'finalizing',
                                     'awaiting_wallet',
                                     'ambiguous',
@@ -3885,6 +4025,23 @@ class ZkapiClient extends EventTarget {
                         }
                     }
                 } else if (status.status === 'active') {
+                    if (isUnsubmittedParkedMutualWithdrawal(
+                        record, await browserWalletRuntime.currentLateWithdrawalAttempts()
+                    )) {
+                        // Cancel + Set Aside never started a chain transition.
+                        // Repair records mislabeled by earlier clients without
+                        // delaying the retry until an unrelated head finalizes.
+                        const repaired = await browserWalletRuntime.repairUnsubmittedBackgroundWithdrawal(
+                            record.recordId, Number(status.observed_block || 0), record.revision
+                        );
+                        if (repaired) {
+                            changed ||= repaired.revision !== record.revision;
+                            continue;
+                        }
+                        // A wallet claim/late hash raced the public read. Do
+                        // not classify the stale record; the next pass owns it.
+                        continue;
+                    }
                     const unresolvedFinalization = Boolean(record.finalizeTransactionHash
                         || record.finalizeSubmissionId);
                     if (unresolvedFinalization) {
@@ -3916,13 +4073,14 @@ class ZkapiClient extends EventTarget {
                             'active',
                             Math.max(
                                 Number(record.startBlockNumber || 0),
-                                challengeObservedBlock
+                                challengeObservedBlock,
+                                resolvedStartBlock
                             ),
                             Number(status.observed_block || 0)
                         );
                         if (!finality.finalized) {
                             const patch = {
-                                phase: 'challenged_unconfirmed',
+                                phase: record.mode === 'escape' ? 'challenged_unconfirmed' : 'recovery_unconfirmed',
                                 chainStatus: 'active',
                                 challengeObservedBlock,
                                 lastObservedBlock: Math.max(
@@ -3941,6 +4099,35 @@ class ZkapiClient extends EventTarget {
                             }
                             continue;
                         }
+                        if (record.mode === 'mutual' && tracksStartRecovery
+                            && !unresolvedStart && resolvedStartHashes.size === startHashes.length
+                            && record.startSubmissionOutcome === 'resolved') {
+                            // A reverted receipt alone cannot establish that
+                            // the wallet's originally journaled nonce is spent
+                            // (a provider might have returned an unrelated
+                            // hash). Check every saved sender/nonce too.
+                            for (const hash of startHashes) {
+                                const attempt = [
+                                    ...(record.transactionAttempts || []),
+                                    ...(record.preparedWithdrawal?.transactionAttempts || [])
+                                ].find(entry => String(entry.hash || '').toLowerCase() === hash);
+                                const nonce = await checkStartNonce(attempt);
+                                if (!nonce.consumed) {
+                                    throw new Error('The saved wallet nonce is not finalized yet. Keep this withdrawal saved and check its status again.');
+                                }
+                                if (Number(nonce.checkedBlock) > Number(finality.checkedBlock)) {
+                                    throw new Error('The vault checkpoint advanced while checking this withdrawal. Check its status again.');
+                                }
+                            }
+                            await browserWalletRuntime.resolveBackgroundWithdrawalForRetry(record.recordId, {
+                                expectedRevision: record.revision,
+                                resolvedTransactionHashes: [...resolvedStartHashes],
+                                finalizedBlock: Number(finality.checkedBlock),
+                                observedBlock: Number(status.observed_block || 0)
+                            });
+                            changed = true;
+                            continue;
+                        }
                         const phase = withdrawalOnly ? 'parked' : 'restored';
                         if (record.phase !== phase || record.chainStatus !== 'active') {
                             try {
@@ -3954,7 +4141,7 @@ class ZkapiClient extends EventTarget {
                                         minimumObservedBlock,
                                         Number(status.observed_block || 0)
                                     ),
-                                    error: withdrawalOnly
+                                    error: withdrawalOnly && record.mode === 'escape'
                                         ? 'The escape was challenged. This balance remains withdrawal-only because its close authorization was already reserved.'
                                         : null
                                 }, { expectedRevision: record.revision });

@@ -779,6 +779,57 @@ test('a returned withdrawal is a success while network finality runs without use
     }
 });
 
+test('set-aside mutual balances stay independently withdrawable alongside a new note or deposit', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config, withdrawals: zkapiClient.withdrawals };
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    const record = { recordId: 'old-note', noteId: 7, mode: 'mutual', phase: 'parked', finalBalance: 1_900_000 };
+    zkapiClient.wallet = { has_note: true, note: { note_id: 8, current_balance: 5_000_000 } };
+    zkapiClient.config = { funding: { chain_id: 1 }, pending_deposit: { phase: 'prepared' } };
+    zkapiClient.withdrawals = [record];
+    try {
+        const html = modal.renderWithdrawalRecords();
+        assert.match(html, /Ready to withdraw/);
+        assert.match(html, /\$1\.90 set aside/);
+        assert.match(html, /data-withdraw-background="old-note"[^>]*>Withdraw \$1\.90/);
+        assert.doesNotMatch(html, /data-withdraw-background="old-note"[^>]*disabled|data-restore-withdrawal|returning|Challenge/);
+        for (const phase of ['challenged_unconfirmed', 'recovery_unconfirmed']) {
+            record.phase = phase;
+            const pending = modal.renderWithdrawalRecords();
+            assert.match(pending, /Checking balance/);
+            assert.match(pending, /data-sync-withdrawal="old-note"/);
+            assert.doesNotMatch(pending, /The challenge|Challenge ·|data-withdraw-background/);
+        }
+        for (const phase of ['closed', 'closed_unconfirmed']) {
+            assert.equal(modal.withdrawalRecordLabel({ ...record, phase, startSubmissionId: 'old-claim' }), 'Returned');
+        }
+        Object.assign(record, { phase: 'submitted_unconfirmed', startSubmissionId: 'before-preflight',
+            backgroundPreparationCancelable: true });
+        const interrupted = modal.renderWithdrawalRecords();
+        assert.match(interrupted, /Preparation incomplete/);
+        assert.match(interrupted, /data-cancel-background-preparation="old-note"/);
+        assert.doesNotMatch(interrupted, /data-withdraw-background/);
+        record.backgroundPreparationCancelable = false;
+        assert.doesNotMatch(modal.renderWithdrawalRecords(), /Cancel preparation/);
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('historical wallet progress changes in place without remounting the card', () => {
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = true;
+    modal.backgroundProgress = { recordId: 'old-note', phase: 'preparing' };
+    const label = { dataset: { backgroundProgress: 'old-note' }, textContent: 'Preparing withdrawal' };
+    modal.overlay = { querySelectorAll: () => [label] };
+    modal.render = () => assert.fail('progress must not rebuild the modal');
+    modal.backgroundProgress.phase = 'wallet';
+    modal.updateBackgroundProgress();
+    assert.equal(label.textContent, 'Waiting for MetaMask');
+    modal.backgroundProgress.phase = 'confirming';
+    modal.updateBackgroundProgress();
+    assert.equal(label.textContent, 'Confirming transaction');
+    assert.equal(modal.backgroundProgressLabel('new-note'), null);
+});
+
 test('mined withdrawals with a temporary status outage get neutral feedback instead of a failed-payment toast', async t => {
     const modal = Object.create(AccountModal.prototype);
     const toasts = [];

@@ -180,14 +180,15 @@ export default class RightPanel extends SharedRightPanel {
             }
             if (lateWithdrawals.length) return `${lateWithdrawals.length} checking`;
             const challengeChecks = openWithdrawals.filter(record =>
-                record.phase === 'challenged_unconfirmed').length;
+                ['challenged_unconfirmed', 'recovery_unconfirmed'].includes(record.phase)).length;
             if (challengeChecks) return `${challengeChecks} confirming`;
             const attention = openWithdrawals.filter(record => record.error
                 || record.phase === 'ambiguous'
                 || (record.chainStatus === 'active'
-                    && record.phase !== 'challenged_unconfirmed')).length;
+                    && !['challenged_unconfirmed', 'recovery_unconfirmed', 'parked', 'restored'].includes(record.phase))).length;
             if (attention) return `${attention} need${attention === 1 ? 's' : ''} attention`;
-            const ready = openWithdrawals.filter(record => record.mode === 'escape'
+            const ready = openWithdrawals.filter(record => ['parked', 'restored'].includes(record.phase)
+                || record.mode === 'escape'
                 && record.phase === 'pending'
                 && Number(record.challengeDeadline || 0) * 1000 <= Date.now()).length;
             if (ready) return `${ready} ready`;
