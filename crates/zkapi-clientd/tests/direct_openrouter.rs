@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use tokio::sync::Barrier;
 use zkapi_client::config::{ClientConfig, ClientProofMode};
 use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{AuthConfig, AuthService, CoreRequest, ModelDescriptor, RequestMode};
@@ -44,6 +45,8 @@ struct OpenRouterState {
     key_usage: Arc<Mutex<HashMap<String, usize>>>,
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+    successful_starts: Arc<AtomicUsize>,
+    first_pair_barrier: Option<Arc<Barrier>>,
 }
 
 #[derive(Clone, Default)]
@@ -165,7 +168,15 @@ fn openrouter_router(state: OpenRouterState) -> Router {
             .to_string();
         let active = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         state.max_in_flight.fetch_max(active, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        if state.successful_starts.fetch_add(1, Ordering::SeqCst) < 2 {
+            if let Some(barrier) = &state.first_pair_barrier {
+                // Keep the first request in flight until its same-session peer
+                // arrives, independent of scheduler speed or wallet reads.
+                tokio::time::timeout(Duration::from_secs(30), barrier.wait())
+                    .await
+                    .expect("the first two mock requests must run concurrently");
+            }
+        }
         state.prompts.lock().unwrap().push(prompt.clone());
         *state.key_usage.lock().unwrap().entry(api_key).or_default() += 1;
         if body.get("stream").and_then(Value::as_bool) == Some(true) {
@@ -532,7 +543,10 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
     let root = tree.read().unwrap().root();
     let indexer_url = spawn(indexer_router(tree.clone())).await;
 
-    let openrouter_state = OpenRouterState::default();
+    let openrouter_state = OpenRouterState {
+        first_pair_barrier: Some(Arc::new(Barrier::new(2))),
+        ..Default::default()
+    };
     let live_management_key = std::env::var("ZKAPI_LIVE_OPENROUTER_MANAGEMENT_KEY")
         .ok()
         .filter(|key| !key.is_empty());
