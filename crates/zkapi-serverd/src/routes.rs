@@ -18,6 +18,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::Stream;
@@ -40,7 +41,14 @@ use crate::provider::build_provider;
 /// Shared application state.
 type AppState = Arc<RequestProcessor>;
 
-type ErrorHttpResponse = (StatusCode, HeaderMap, Json<ErrorResponse>);
+// Keep handler error variants small without changing their status, headers or body.
+struct ErrorHttpResponse(Box<(StatusCode, HeaderMap, Json<ErrorResponse>)>);
+
+impl IntoResponse for ErrorHttpResponse {
+    fn into_response(self) -> Response {
+        (*self.0).into_response()
+    }
+}
 
 // Compact proofs are small; leave headroom for ordinary API payloads.
 const PROTOCOL_BODY_LIMIT_BYTES: usize = 1024 * 1024;
@@ -376,7 +384,7 @@ async fn handle_dashboard_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// Convert a ServerError into an HTTP error response tuple.
+/// Convert a ServerError into an HTTP error response.
 fn error_to_response(
     err: &ServerError,
     client_request_id: &str,
@@ -387,14 +395,18 @@ fn error_to_response(
     } else {
         None
     };
-    build_error_response(err, client_request_id, latest_root)
+    ErrorHttpResponse(Box::new(build_error_response(
+        err,
+        client_request_id,
+        latest_root,
+    )))
 }
 
 fn build_error_response(
     err: &ServerError,
     client_request_id: &str,
     latest_root: Option<Felt252>,
-) -> ErrorHttpResponse {
+) -> (StatusCode, HeaderMap, Json<ErrorResponse>) {
     let status_code = match err {
         ServerError::InvalidProof(_)
         | ServerError::InvalidRequest(_)
@@ -496,6 +508,39 @@ async fn fetch_indexer_root(indexer_url: &str) -> anyhow::Result<Felt252> {
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compact_http_errors_preserve_status_headers_and_json() {
+        for error in [
+            ServerError::OaRateLimited {
+                reason: "oa_hourly_issuance_budget".to_string(),
+                retry_after_seconds: 37,
+            },
+            ServerError::LeaseSettlementPending {
+                retry_after_seconds: 15,
+            },
+            ServerError::InvalidRequest("invalid request".to_string()),
+        ] {
+            let (status, headers, Json(body)) =
+                build_error_response(&error, "lease-request-123", None);
+            let expected_headers = headers.clone();
+            let expected_body = serde_json::to_value(&body).unwrap();
+            let response =
+                ErrorHttpResponse(Box::new((status, headers, Json(body)))).into_response();
+
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers().get(RETRY_AFTER),
+                expected_headers.get(RETRY_AFTER)
+            );
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let actual_body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(actual_body, expected_body);
+        }
+    }
 
     #[test]
     fn oa_rate_limit_maps_to_retriable_429_with_retry_metadata() {

@@ -842,26 +842,58 @@ mod tests {
             assert_eq!(asset.headers()["x-content-type-options"], "nosniff");
         }
 
-        let manifest_response = router.clone().oneshot(
-            axum::http::Request::builder().uri("/funding/build.json").body(Body::empty()).unwrap(),
-        ).await.unwrap();
-        let manifest_body = manifest_response.into_body().collect().await.unwrap().to_bytes();
+        let manifest_response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/funding/build.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let manifest_body = manifest_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
         let manifest: Value = serde_json::from_slice(&manifest_body).unwrap();
         assert_eq!(manifest["builder"], "oa-zkapi-composition");
         let inputs = manifest["sourceInputs"].as_array().unwrap();
-        assert!(inputs.iter().any(|input| input == "oa-chat/chat/publicApi.js"));
+        assert!(inputs
+            .iter()
+            .any(|input| input == "oa-chat/chat/publicApi.js"));
         assert!(!inputs.iter().any(|input| input == "funding-page/app.js"));
         let app_path = format!("/funding/{}", manifest["app"].as_str().unwrap());
-        let app_bundle = router.clone().oneshot(
-            axum::http::Request::builder().uri(&app_path).body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let app_bundle = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&app_path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(app_bundle.status(), StatusCode::OK);
         // Source trees, test fixtures and alternate uncomposed entry points are
         // not part of the daemon's public static surface.
-        for path in ["/funding/components/ChatInput.js", "/funding/services/zkapiClient.js", "/funding/ui.test.mjs"] {
-            let response = router.clone().oneshot(
-                axum::http::Request::builder().uri(path).body(Body::empty()).unwrap(),
-            ).await.unwrap();
+        for path in [
+            "/funding/components/ChatInput.js",
+            "/funding/services/zkapiClient.js",
+            "/funding/ui.test.mjs",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
 

@@ -78,6 +78,27 @@ their previous deployments. Ordinary later commits are not skipped. Browser
 release builds use their explicit browser/mainnet configuration, not these
 upstream-site configurations.
 
+The new production projects are `oa-zkapi-composed-sepolia` and
+`oa-zkapi-composed-mainnet` in the `mingyech1` team:
+
+- https://oa-zkapi-composed-sepolia.vercel.app/funding/
+- https://oa-zkapi-composed-mainnet.vercel.app/funding/
+
+They are explicitly deployed static artifacts, not Git-linked copies of the old
+projects. Build both networks from the committed source pins. For each release,
+use a fresh staging directory, copy that network's `dist` output into `public/`,
+and copy its `vercel.browser.json` or `vercel.mainnet.json` configuration with
+`installCommand` and `buildCommand` empty and `outputDirectory` set to `public`.
+Keep the network-specific rewrites, redirects and headers unchanged. Explicitly
+link the matching **new** project, run `vercel pull --environment=production`,
+`vercel build --prod`, then `vercel deploy --prebuilt --prod`. Do not copy a
+working checkout's `.vercel` link or environment files into published assets.
+
+Verify `/funding/build.json`, every asset digest, network/contract configuration,
+same-origin API rewrites and the browser UI after deployment. The new origins
+have independent browser storage; existing notes and chat history remain on the
+old origins and are not automatically migrated.
+
 ## OA commercial compatibility check (2026-09-05)
 
 The standalone OA production build succeeds with the composition changes and

@@ -639,14 +639,23 @@ async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
             .lock()
             .unwrap() = 1;
         let first_service = service.clone();
-        let first_task = tokio::spawn(async move {
+        let mut first_task = tokio::spawn(async move {
             first_service
                 .execute_request_in_session(first_request, Some("chat-one"))
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(60), async {
+        // This readiness wait includes the first Groth16 proof in an unoptimized
+        // test build. Parallel proofs can exceed a minute on CI runners; the
+        // transport/streaming latency assertions below remain independently tight.
+        tokio::time::timeout(Duration::from_secs(180), async {
             while openrouter_state.in_flight.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
+                if first_task.is_finished() {
+                    panic!(
+                        "first same-session request ended before inference: {:?}",
+                        (&mut first_task).await
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await

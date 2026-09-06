@@ -2374,7 +2374,9 @@ fn abi_words(value: &str) -> Result<Vec<&str>, AuthError> {
     }
     encoded
         .as_bytes()
-        .chunks_exact(64)
+        .as_chunks::<64>()
+        .0
+        .iter()
         .map(|chunk| {
             std::str::from_utf8(chunk)
                 .map_err(|_| AuthError::Wallet("RPC returned malformed ABI data".to_string()))
@@ -2837,6 +2839,10 @@ mod security_tests {
         assert_eq!(abi_word_u64(words[0]).unwrap(), 1);
         assert_eq!(abi_word_u64(words[1]).unwrap(), u64::MAX);
         assert!(abi_words("0x1234").is_err());
+        assert!(abi_words("0x").is_err());
+        assert!(abi_words(&"0".repeat(63)).is_err());
+        assert!(abi_words(&"0".repeat(65)).is_err());
+        assert!(abi_words(&format!("{}é", "0".repeat(62))).is_err());
         assert!(abi_word_u64(&format!("1{:063x}", 0)).is_err());
     }
 
