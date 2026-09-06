@@ -1,0 +1,19 @@
+{
+  "name": "oa-zkapi-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OA Chat composed with the zkAPI browser and daemon payment runtime",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "npm run build:browser",
+    "build:browser": "node scripts/compose-browser-client.mjs",
+    "build:mainnet": "node scripts/compose-browser-client.mjs --network mainnet --out-dir dist/browser-mainnet",
+    "test": "npm run test:client && npm run test:build",
+    "test:client": "node --test funding-page/*.test.cjs funding-page/*.test.mjs",
+    "test:build": "node --test scripts/compose-browser-client.test.mjs",
+    "lock:sources": "node scripts/lock-browser-sources.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.2"
+  }
+}

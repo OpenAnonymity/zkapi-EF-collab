@@ -14,7 +14,6 @@ use zkapi_client::wallet::Wallet;
 use zkapi_clientd::{
     run, AuthConfig, AuthService, ConfirmDepositRequest, CoreRequest, FundingConfig,
     ModelDescriptor, RequestMode, WalletStatus, WithdrawalMode, WithdrawalPlan,
-    DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
 };
 use zkapi_serverd::config::{
     MeteredConfig, OpenRouterLeaseConfig, OpenRouterLeaseSourceConfig, ProviderKind, ServerConfig,
@@ -55,8 +54,6 @@ struct Cli {
     #[arg(long)]
     demo_billing_token_address: Option<String>,
     #[arg(long)]
-    demo_private_key: Option<String>,
-    #[arg(long)]
     demo_note_ttl_seconds: Option<u64>,
     /// JSON file containing an array of on-chain-verified epoch root records.
     #[arg(long, value_name = "JSON_PATH")]
@@ -92,14 +89,6 @@ struct Cli {
     /// Require verifier-backed OA-org keys and reject direct/legacy leases.
     #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
     require_oa_org_key_source: bool,
-    /// Maximum local LLM requests sent through one ephemeral OpenRouter key.
-    #[arg(
-        long,
-        env = "ZKAPI_OPENROUTER_REQUESTS_PER_KEY",
-        default_value_t = DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    openrouter_requests_per_key: u32,
     #[command(subcommand)]
     command: Commands,
 }
@@ -132,8 +121,8 @@ enum Commands {
     /// Start a ready-to-use local OpenAI/Ollama-compatible client.
     ///
     /// By default this loads the experimental Ethereum Mainnet deployment,
-    /// manages low-balance notes, funds a new real-USDC note when needed, then
-    /// listens on 127.0.0.1:11434.
+    /// reuses an existing local note or serves the MetaMask funding UI for a
+    /// new one, then listens on 127.0.0.1:11434.
     Client {
         /// Deployment manifest URL or local JSON path.
         #[arg(long, default_value = PUBLIC_MAINNET_MANIFEST)]
@@ -150,9 +139,14 @@ enum Commands {
         /// Billing-token base units to deposit when the client needs a fresh note.
         #[arg(long, default_value_t = 2_000_000)]
         initial_credits: u128,
-        /// Start without automatic funding or low-balance note rotation.
-        #[arg(long)]
+        /// Start without automatic cast funding or low-balance note rotation.
+        #[arg(long, hide = true)]
         no_fund: bool,
+        /// Use the legacy interactive cast funding flow before starting. By
+        /// default the daemon starts immediately and the bundled UI funds with
+        /// MetaMask.
+        #[arg(long)]
+        fund_with_cast: bool,
         /// Do not call a test deployment's optional faucet-style mint method.
         #[arg(long)]
         skip_mint: bool,
@@ -385,6 +379,7 @@ async fn main() -> anyhow::Result<()> {
             state_dir,
             initial_credits,
             no_fund,
+            fund_with_cast,
             skip_mint,
             mode,
         } => {
@@ -395,13 +390,12 @@ async fn main() -> anyhow::Result<()> {
                 listen: &listen,
                 requested_state_dir: state_dir,
                 initial_credits,
-                no_fund,
+                no_fund: no_fund || !fund_with_cast,
                 skip_mint,
                 request_mode: mode.into(),
                 oa_verifier_url: cli.oa_verifier_url.clone(),
                 openrouter_inference_base: cli.openrouter_inference_base.clone(),
                 require_oa_org_key_source: cli.require_oa_org_key_source,
-                openrouter_requests_per_key: cli.openrouter_requests_per_key,
             })
             .await?
         }
@@ -672,9 +666,10 @@ fn build_auth_service_with_mode(
             .cloned()
             .map(ModelDescriptor::new)
             .collect(),
+        suggested_deposit_amount: cli.request_charge_cap.saturating_mul(2),
         demo_rpc_url: cli.demo_rpc_url.clone(),
         demo_billing_token_address: cli.demo_billing_token_address.clone(),
-        demo_private_key: cli.demo_private_key.clone(),
+        demo_mint_enabled: false,
         demo_note_ttl_seconds: cli.demo_note_ttl_seconds,
         proof_mode: "groth16_bn254".to_string(),
         cairo_dir: String::new(),
@@ -694,7 +689,6 @@ fn build_auth_service_with_mode(
         oa_verifier_url: cli.oa_verifier_url.clone(),
         openrouter_inference_base: cli.openrouter_inference_base.clone(),
         require_oa_org_key_source: cli.require_oa_org_key_source,
-        openrouter_requests_per_key: cli.openrouter_requests_per_key,
     })
     .map_err(Into::into)
 }
@@ -714,15 +708,15 @@ struct OneCommandClientOptions<'a> {
     oa_verifier_url: String,
     openrouter_inference_base: String,
     require_oa_org_key_source: bool,
-    openrouter_requests_per_key: u32,
 }
 
 struct LocalClientPolicy {
     request_mode: RequestMode,
+    suggested_deposit_amount: u128,
+    allow_demo_mint: bool,
     oa_verifier_url: String,
     openrouter_inference_base: String,
     require_oa_org_key_source: bool,
-    openrouter_requests_per_key: u32,
 }
 
 async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow::Result<()> {
@@ -738,7 +732,6 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
         oa_verifier_url,
         openrouter_inference_base,
         require_oa_org_key_source,
-        openrouter_requests_per_key,
     } = options;
     let manifest = load_deployment_manifest(deployment).await?;
     validate_deployment_manifest(&manifest)?;
@@ -752,10 +745,11 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
         listen,
         LocalClientPolicy {
             request_mode,
+            suggested_deposit_amount: initial_credits,
+            allow_demo_mint: manifest.demo_mint_enabled && !skip_mint,
             oa_verifier_url,
             openrouter_inference_base,
             require_oa_org_key_source,
-            openrouter_requests_per_key,
         },
     )?;
     service.ensure_request_mode_available().await?;
@@ -819,6 +813,7 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
     }
 
     println!("zkAPI local gateway: http://{listen}");
+    println!("  Chat + MetaMask funding:  http://{listen}/");
     println!("  OpenAI Chat Completions: http://{listen}/v1/chat/completions");
     println!("  OpenAI Responses:        http://{listen}/v1/responses");
     println!("  Ollama Chat:              http://{listen}/api/chat");
@@ -887,13 +882,14 @@ fn auth_service_from_manifest(
 ) -> anyhow::Result<Arc<AuthService>> {
     let LocalClientPolicy {
         request_mode,
+        suggested_deposit_amount,
+        allow_demo_mint,
         oa_verifier_url,
         openrouter_inference_base,
         require_oa_org_key_source,
-        openrouter_requests_per_key,
     } = policy;
     let models = if manifest.models.is_empty() {
-        vec![ModelDescriptor::new("openai/gpt-4o-mini")]
+        vec![ModelDescriptor::new("openai/gpt-5.6-sol")]
     } else {
         manifest.models.clone()
     };
@@ -910,9 +906,10 @@ fn auth_service_from_manifest(
         listen_addr: listen.to_string(),
         state_dir,
         models,
+        suggested_deposit_amount,
         demo_rpc_url: Some(manifest.rpc_url.clone()),
         demo_billing_token_address: manifest.billing_token_address.clone(),
-        demo_private_key: None,
+        demo_mint_enabled: manifest.demo_mint_enabled && allow_demo_mint,
         demo_note_ttl_seconds: None,
         proof_mode: "groth16_bn254".to_string(),
         cairo_dir: String::new(),
@@ -932,7 +929,6 @@ fn auth_service_from_manifest(
         oa_verifier_url,
         openrouter_inference_base,
         require_oa_org_key_source,
-        openrouter_requests_per_key,
     })
     .map_err(Into::into)
 }
@@ -2022,6 +2018,7 @@ mod tests {
                 listen,
                 initial_credits,
                 no_fund,
+                fund_with_cast,
                 skip_mint,
                 mode,
             } => {
@@ -2034,6 +2031,7 @@ mod tests {
                 assert_eq!(listen, "127.0.0.1:11499");
                 assert_eq!(initial_credits, 42);
                 assert!(!no_fund);
+                assert!(!fund_with_cast);
                 assert!(skip_mint);
                 assert!(matches!(mode, ClientModeArg::Proxy));
             }
@@ -2049,21 +2047,34 @@ mod tests {
             Commands::Client {
                 deployment,
                 initial_credits,
+                fund_with_cast,
                 ..
             } => {
                 assert_eq!(deployment, PUBLIC_MAINNET_MANIFEST);
                 assert_eq!(initial_credits, 2_000_000);
+                assert!(!fund_with_cast);
             }
             other => panic!("expected client command, got {other:?}"),
         }
     }
 
     #[test]
+    fn headless_cast_funding_is_explicit_opt_in() {
+        let cli = Cli::try_parse_from(["zkapi", "client", "--fund-with-cast"])
+            .expect("cast funding flag parses");
+        assert!(matches!(
+            cli.command,
+            Commands::Client {
+                fund_with_cast: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn client_accepts_prompt_private_openrouter_mode() {
         let cli = Cli::try_parse_from([
             "zkapi",
-            "--openrouter-requests-per-key",
-            "3",
             "client",
             "--mode",
             "direct-openrouter",
@@ -2077,17 +2088,6 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(cli.openrouter_requests_per_key, 3);
-    }
-
-    #[test]
-    fn client_defaults_to_five_requests_per_ephemeral_key() {
-        let cli = Cli::try_parse_from(["zkapi", "client", "--no-fund"]).unwrap();
-        assert_eq!(
-            cli.openrouter_requests_per_key,
-            DEFAULT_OPENROUTER_REQUESTS_PER_KEY
-        );
-        assert_eq!(cli.openrouter_requests_per_key, 5);
     }
 
     #[test]

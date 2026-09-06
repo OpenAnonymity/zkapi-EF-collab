@@ -94,7 +94,7 @@ export ZKAPI_CLEAR_SEED='0x...'
   --contract-address "$VAULT" \
   --request-charge-cap 1000000 \
   --proof-setup-dir "$PWD/protocol/setup/v2" \
-  serverd --listen 0.0.0.0:3000 --provider metered \
+  serverd --listen 127.0.0.1:3000 --provider metered \
   --indexer-url http://127.0.0.1:3001 \
   --openrouter-lease-ttl-seconds 300 \
   --openrouter-settlement-grace-seconds 5 \
@@ -109,10 +109,14 @@ proxy provider continues to run. Both `/v2/requests` and
 `/v2/openrouter/leases` are served by the same process when it is present.
 
 Put TLS/reverse-proxy routing in front of the services. Route `/v2/*`,
-`/health`, `/v1/attestation`, and dashboard requests to serverd; route
-`/v1/tree/*` to indexerd. Do not expose the OpenRouter key or signing seeds in
-the client manifest, image, shell history, or repository. The management key
-must have permission to create, list, inspect, and delete OpenRouter API keys.
+`/health`, `/v1/attestation`, and at most `/v1/dashboard/summary` to serverd;
+route `/v1/tree/*` to indexerd. Never expose `/v1/dashboard/recent` or
+`/v1/dashboard/events` through a public proxy: those operator-only routes hold
+decoded prompts and responses in memory. Keep them reachable only from a
+loopback-bound local daemon. Do not expose the OpenRouter key or signing seeds
+in the client manifest, image, shell history, or repository. The management
+key must have permission to create, list, inspect, and delete OpenRouter API
+keys.
 
 As a verifier-backed alternative, configure a dedicated credential on an OA
 org and start serverd with the org source instead of
@@ -127,7 +131,7 @@ export ZKAPI_OA_ORG_SHARED_SECRET='...'
   --contract-address "$VAULT" \
   --request-charge-cap 1000000 \
   --proof-setup-dir "$PWD/protocol/setup/v2" \
-  serverd --listen 0.0.0.0:3000 \
+  serverd --listen 127.0.0.1:3000 \
   --oa-org-url https://org.example \
   --openrouter-lease-ttl-seconds 300 \
   --openrouter-settlement-grace-seconds 5 \

@@ -3,10 +3,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use zkapi_types::wire::OpenRouterLeaseResponse;
 
 use crate::error::ServerError;
+
+const DEFAULT_OA_RETRY_AFTER_SECONDS: u64 = 60;
+const OA_RATE_LIMITED: &str = "oa_rate_limited";
+const OA_HOURLY_ISSUANCE_BUDGET: &str = "oa_hourly_issuance_budget";
+const OA_MINUTE_REQUEST_LIMIT: &str = "oa_minute_request_limit";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OaKeyVerificationEvidence {
@@ -38,7 +43,7 @@ pub struct OaOrgCreatedKey {
 
 #[derive(Debug, Clone)]
 pub enum OaOrgUsage {
-    Pending,
+    Pending { retry_after_seconds: u64 },
     Finalized(OaOrgFinalUsage),
 }
 
@@ -51,6 +56,15 @@ pub struct OaOrgFinalUsage {
     pub station_id: String,
     pub station_signature: String,
     pub org_signature: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OaOrgUsageExpectation {
+    pub credit_limit_usd: f64,
+    pub duration_minutes: u64,
+    pub limit_credits: u128,
+    pub minimum_expires_at: u64,
+    pub maximum_expires_at: u64,
 }
 
 pub struct OaOrgProvisioner {
@@ -83,6 +97,7 @@ struct OaOrgUsageResponse {
     client_request_id: String,
     station_request_id: String,
     key_hash: String,
+    retry_after_seconds: Option<u64>,
     usage_credits: Option<u128>,
     credit_limit_credits: Option<u128>,
     expires_at_unix: Option<u64>,
@@ -126,6 +141,7 @@ impl OaOrgProvisioner {
         &self,
         client_request_id: &str,
         limit_usd: f64,
+        limit_credits: u128,
         ttl_seconds: u64,
     ) -> Result<OaOrgCreatedKey, ServerError> {
         if ttl_seconds == 0 || !ttl_seconds.is_multiple_of(60) {
@@ -141,6 +157,7 @@ impl OaOrgProvisioner {
             .json(&json!({
                 "client_request_id": client_request_id,
                 "credit_limit": limit_usd,
+                "credit_limit_credits": limit_credits,
                 "duration_minutes": duration_minutes,
             }))
             .send()
@@ -149,7 +166,15 @@ impl OaOrgProvisioner {
                 ServerError::Internal(format!("OA org key request failed: {error}"))
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| {
+        let headers = response.headers().clone();
+        let text_result = response.text().await;
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(parse_oa_rate_limit(
+                &headers,
+                text_result.as_deref().unwrap_or_default(),
+            ));
+        }
+        let text = text_result.map_err(|error| {
             ServerError::Internal(format!("OA org key response failed: {error}"))
         })?;
         if !status.is_success() {
@@ -177,13 +202,11 @@ impl OaOrgProvisioner {
         })
     }
 
-    pub async fn get_key_usage(
+    pub(crate) async fn get_key_usage(
         &self,
         client_request_id: &str,
         key_hash: &str,
-        expected_limit_credits: u128,
-        minimum_expires_at: u64,
-        maximum_expires_at: u64,
+        expectation: OaOrgUsageExpectation,
     ) -> Result<OaOrgUsage, ServerError> {
         let response = self
             .http
@@ -192,6 +215,14 @@ impl OaOrgProvisioner {
             .json(&json!({
                 "client_request_id": client_request_id,
                 "key_hash": key_hash,
+                // The org persists this metadata for new leases. Supplying it
+                // here also lets the authenticated relay settle leases issued
+                // before that metadata existed; the station independently
+                // checks both values against its signed issuance binding.
+                "credit_limit": expectation.credit_limit_usd,
+                "credit_limit_credits": expectation.limit_credits,
+                "duration_minutes": expectation.duration_minutes,
+                "expires_at_unix": expectation.maximum_expires_at,
             }))
             .send()
             .await
@@ -199,7 +230,15 @@ impl OaOrgProvisioner {
                 ServerError::Internal(format!("OA org usage request failed: {error}"))
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| {
+        let headers = response.headers().clone();
+        let text_result = response.text().await;
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(parse_oa_rate_limit(
+                &headers,
+                text_result.as_deref().unwrap_or_default(),
+            ));
+        }
+        let text = text_result.map_err(|error| {
             ServerError::Internal(format!("OA org usage response failed: {error}"))
         })?;
         if !status.is_success() {
@@ -210,14 +249,181 @@ impl OaOrgProvisioner {
         let response: OaOrgUsageResponse = serde_json::from_str(&text).map_err(|error| {
             ServerError::Internal(format!("invalid OA org usage response: {error}"))
         })?;
+        let pending_retry_after_seconds = retry_after_header(&headers)
+            .or(response.retry_after_seconds)
+            .unwrap_or(1)
+            .max(1);
         validate_usage_response(
             response,
             client_request_id,
             key_hash,
-            expected_limit_credits,
-            minimum_expires_at,
-            maximum_expires_at,
+            expectation.limit_credits,
+            expectation.minimum_expires_at,
+            expectation.maximum_expires_at,
+            pending_retry_after_seconds,
         )
+    }
+}
+
+fn parse_oa_rate_limit(headers: &reqwest::header::HeaderMap, body: &str) -> ServerError {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let reason = parsed
+        .as_ref()
+        .and_then(machine_rate_limit_reason)
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(classify_rate_limit_value)
+                .map(str::to_string)
+        })
+        .or_else(|| classify_rate_limit_text(body).map(str::to_string))
+        .unwrap_or_else(|| OA_RATE_LIMITED.to_string());
+    let retry_after_seconds = retry_after_header(headers)
+        .or_else(|| parsed.as_ref().and_then(retry_after_value))
+        .unwrap_or(DEFAULT_OA_RETRY_AFTER_SECONDS);
+
+    ServerError::OaRateLimited {
+        reason,
+        retry_after_seconds,
+    }
+}
+
+fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn retry_after_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Object(values) => {
+            for key in [
+                "retry_after_seconds",
+                "retryAfterSeconds",
+                "retry_after",
+                "retryAfter",
+            ] {
+                if let Some(retry_after) = values.get(key).and_then(retry_after_scalar) {
+                    return Some(retry_after);
+                }
+            }
+            values.get("detail").and_then(retry_after_value)
+        }
+        _ => None,
+    }
+}
+
+fn retry_after_scalar(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn classify_rate_limit_value(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(value) => classify_rate_limit_text(value),
+        Value::Object(values) => {
+            for key in [
+                "reason",
+                "code",
+                "error_code",
+                "type",
+                "message",
+                "error",
+                "detail",
+            ] {
+                if let Some(reason) = values.get(key).and_then(classify_rate_limit_value) {
+                    return Some(reason);
+                }
+            }
+            None
+        }
+        Value::Array(values) => values.iter().find_map(classify_rate_limit_value),
+        _ => None,
+    }
+}
+
+fn classify_rate_limit_text(value: &str) -> Option<&'static str> {
+    let value = value.to_ascii_lowercase();
+    let hourly = value.contains("hourly")
+        || value.contains("per hour")
+        || value.contains("per_hour")
+        || value.contains("hour_limit");
+    if hourly
+        && (value.contains("issuance")
+            || value.contains("budget")
+            || value.contains("credit")
+            || value.contains("limit"))
+    {
+        return Some(OA_HOURLY_ISSUANCE_BUDGET);
+    }
+    if value.contains("requests per minute")
+        || value.contains("requests_per_minute")
+        || value.contains("per-minute request")
+        || value.contains("request rate")
+    {
+        return Some(OA_MINUTE_REQUEST_LIMIT);
+    }
+    None
+}
+
+fn machine_rate_limit_reason(value: &Value) -> Option<String> {
+    let values = value.as_object()?;
+    if let Some(reason) = values
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(normalize_machine_reason)
+    {
+        return Some(reason);
+    }
+    if let Some(reason) = values.get("detail").and_then(machine_rate_limit_reason) {
+        return Some(reason);
+    }
+    for key in ["code", "error_code", "type"] {
+        if let Some(code) = values
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(normalize_machine_reason)
+        {
+            return Some(code);
+        }
+    }
+    None
+}
+
+fn normalize_machine_reason(value: &str) -> Option<String> {
+    let mut normalized = String::with_capacity(value.len().min(80));
+    let mut separator_pending = false;
+    for character in value.chars().take(160) {
+        if character.is_ascii_alphanumeric() {
+            if separator_pending && !normalized.is_empty() {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+            separator_pending = false;
+        } else if !normalized.is_empty() {
+            separator_pending = true;
+        }
+        if normalized.len() >= 80 {
+            break;
+        }
+    }
+    let normalized = normalized.trim_end_matches('_');
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized {
+        "minute_request_limit"
+        | "oa_minute_request_limit"
+        | "requests_per_minute_exceeded"
+        | "request_rate_exceeded" => Some(OA_MINUTE_REQUEST_LIMIT.to_string()),
+        "hourly_issuance_budget"
+        | "oa_hourly_issuance_budget"
+        | "hourly_issuance_budget_exceeded" => Some(OA_HOURLY_ISSUANCE_BUDGET.to_string()),
+        _ => Some(OA_RATE_LIMITED.to_string()),
     }
 }
 
@@ -263,6 +469,7 @@ fn validate_usage_response(
     expected_limit_credits: u128,
     minimum_expires_at: u64,
     maximum_expires_at: u64,
+    pending_retry_after_seconds: u64,
 ) -> Result<OaOrgUsage, ServerError> {
     let common_matches = response.source == "oa_org"
         && response.version == 1
@@ -279,7 +486,9 @@ fn validate_usage_response(
         ));
     }
     if response.status == "pending" {
-        return Ok(OaOrgUsage::Pending);
+        return Ok(OaOrgUsage::Pending {
+            retry_after_seconds: pending_retry_after_seconds.max(1),
+        });
     }
     let (
         Some(usage_credits),
@@ -352,6 +561,181 @@ fn current_timestamp() -> u64 {
 mod tests {
     use super::*;
 
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    #[test]
+    fn string_detail_identifies_the_hourly_issuance_guard() {
+        let error = parse_oa_rate_limit(
+            &reqwest::header::HeaderMap::new(),
+            r#"{"detail":"zkAPI hourly issuance budget exceeded"}"#,
+        );
+
+        assert!(matches!(
+            error,
+            ServerError::OaRateLimited {
+                ref reason,
+                retry_after_seconds: DEFAULT_OA_RETRY_AFTER_SECONDS,
+            } if reason == OA_HOURLY_ISSUANCE_BUDGET
+        ));
+    }
+
+    #[test]
+    fn object_detail_prefers_explicit_reason_and_retry_after_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("42"),
+        );
+        let error = parse_oa_rate_limit(
+            &headers,
+            r#"{
+                "detail": {
+                    "code": "zkapi_rate_limited",
+                    "reason": "minute_request_limit",
+                    "message": "hourly issuance budget text must not override reason",
+                    "retry_after_seconds": "17"
+                }
+            }"#,
+        );
+
+        assert!(matches!(
+            error,
+            ServerError::OaRateLimited {
+                ref reason,
+                retry_after_seconds: 42,
+            } if reason == OA_MINUTE_REQUEST_LIMIT
+        ));
+    }
+
+    #[test]
+    fn unknown_object_reason_uses_the_stable_generic_fallback() {
+        let error = parse_oa_rate_limit(
+            &reqwest::header::HeaderMap::new(),
+            r#"{
+                "detail": {
+                    "code": "Concurrent Lease Limit",
+                    "retryAfterSeconds": 9
+                }
+            }"#,
+        );
+
+        assert!(matches!(
+            error,
+            ServerError::OaRateLimited {
+                ref reason,
+                retry_after_seconds: 9,
+            } if reason == OA_RATE_LIMITED
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_key_turns_an_oa_429_into_a_typed_retriable_error() {
+        async fn rate_limited() -> (
+            StatusCode,
+            [(axum::http::HeaderName, &'static str); 1],
+            Json<Value>,
+        ) {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "23")],
+                Json(json!({
+                    "detail": {
+                        "code": "zkapi_rate_limited",
+                        "reason": "hourly_issuance_budget",
+                        "retry_after_seconds": 11
+                    }
+                })),
+            )
+        }
+
+        let app = Router::new().route("/api/zkapi/request_key", post(rate_limited));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provisioner = OaOrgProvisioner::new(
+            format!("http://127.0.0.1:{}", address.port()),
+            "shared-secret".to_string(),
+        )
+        .unwrap();
+
+        let error = provisioner
+            .create_key("request-12345678", 3.0, 3_000_000, 300)
+            .await
+            .unwrap_err();
+        server.abort();
+
+        assert!(matches!(
+            &error,
+            ServerError::OaRateLimited {
+                reason,
+                retry_after_seconds: 23,
+            } if reason == OA_HOURLY_ISSUANCE_BUDGET
+        ));
+        assert!(error.is_retriable());
+    }
+
+    #[tokio::test]
+    async fn get_key_usage_preserves_pending_retry_after_header() {
+        async fn pending() -> (
+            StatusCode,
+            [(axum::http::HeaderName, &'static str); 1],
+            Json<Value>,
+        ) {
+            (
+                StatusCode::OK,
+                [(axum::http::header::RETRY_AFTER, "15")],
+                Json(json!({
+                    "source": "oa_org",
+                    "version": 1,
+                    "status": "pending",
+                    "client_request_id": "request-12345678",
+                    "station_request_id": "ab".repeat(32),
+                    "key_hash": "provider-hash",
+                    "retry_after_seconds": 7
+                })),
+            )
+        }
+
+        let app = Router::new().route("/api/zkapi/key_usage", post(pending));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let provisioner = OaOrgProvisioner::new(
+            format!("http://127.0.0.1:{}", address.port()),
+            "shared-secret".to_string(),
+        )
+        .unwrap();
+
+        let usage = provisioner
+            .get_key_usage(
+                "request-12345678",
+                "provider-hash",
+                OaOrgUsageExpectation {
+                    credit_limit_usd: 10.0,
+                    duration_minutes: 5,
+                    limit_credits: 10_000_000,
+                    minimum_expires_at: 1_000,
+                    maximum_expires_at: 1_030,
+                },
+            )
+            .await
+            .unwrap();
+        server.abort();
+
+        assert!(matches!(
+            usage,
+            OaOrgUsage::Pending {
+                retry_after_seconds: 15
+            }
+        ));
+    }
+
     #[test]
     fn signatures_require_exact_ed25519_hex_encoding() {
         assert!(is_hex_signature(&"ab".repeat(64)));
@@ -386,6 +770,7 @@ mod tests {
             client_request_id: "request-12345678".to_string(),
             station_request_id: "ab".repeat(32),
             key_hash: "provider-hash".to_string(),
+            retry_after_seconds: None,
             usage_credits: Some(123),
             credit_limit_credits: Some(10_000),
             expires_at_unix: Some(1_000),
@@ -402,8 +787,48 @@ mod tests {
             10_000,
             970,
             1_000,
+            1,
         )
         .unwrap();
         assert!(matches!(usage, OaOrgUsage::Finalized(_)));
+    }
+
+    #[test]
+    fn pending_usage_preserves_the_oa_retry_boundary() {
+        let response = OaOrgUsageResponse {
+            source: "oa_org".to_string(),
+            version: 1,
+            status: "pending".to_string(),
+            client_request_id: "request-12345678".to_string(),
+            station_request_id: "ab".repeat(32),
+            key_hash: "provider-hash".to_string(),
+            retry_after_seconds: Some(7),
+            usage_credits: None,
+            credit_limit_credits: None,
+            expires_at_unix: None,
+            closed_at_unix: None,
+            finalized_at_unix: None,
+            station_id: None,
+            station_signature: None,
+            org_signature: None,
+        };
+
+        let usage = validate_usage_response(
+            response,
+            "request-12345678",
+            "provider-hash",
+            10_000,
+            970,
+            1_000,
+            15,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            usage,
+            OaOrgUsage::Pending {
+                retry_after_seconds: 15
+            }
+        ));
     }
 }

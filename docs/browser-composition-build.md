@@ -1,0 +1,125 @@
+# Composed browser and daemon assets
+
+OA Chat is a pinned `oa-chat` submodule. The zkAPI entry point lives in
+`funding-page/zkapi-entry.js` and imports `oa-chat/chat/publicApi.js`. Shared chat
+source files are not overlaid, copied back, or rewritten during a build.
+
+## Local builds
+
+Node.js 24+ is required for the JavaScript build. Initialize the committed
+submodule revisions and install the exact build dependency lockfile:
+
+```sh
+git submodule update --init --recursive
+npm ci
+npm run test:build
+npm run build:browser
+npm run build:mainnet
+```
+
+Outputs are `dist/browser/funding/` and `dist/browser-mainnet/funding/`. The
+existing `scripts/package-browser-client*.sh` commands call this same composer.
+`scripts/build-browser-client.sh` first regenerates the Rust/WASM module and then
+runs the composer. The UX proposal wrapper supplies a build-time configuration
+choice; it does not mutate the generated configuration after its hash is taken.
+
+`cargo build -p zkapi-clientd` invokes this same composer from `build.rs` and
+embeds its output from Cargo's `OUT_DIR`. It requires the Node/npm prerequisites
+above, and never falls back to embedding a separate vendored application. The
+Docker build installs Node only in its build stage; the final image contains the
+Rust executables and their embedded assets, not Node or npm.
+
+## Source pins and uploaded archives
+
+The Git submodule pointers are authoritative. `browser-sources.lock.json` records
+the same revisions for Vercel/source archives, where `.git` metadata is absent.
+After deliberately updating and committing a submodule revision, run:
+
+```sh
+npm run lock:sources
+```
+
+Review and commit this lock together with the updated submodule pointer. Builds
+inside a checkout reject a mismatch instead of reporting the wrong source
+revision. Builds do not pull a floating branch or automatically update pins.
+
+## Asset and persistence boundaries
+
+The composer bundles the public entry, shared prelude, and zkAPI worker, and
+copies an explicit set of static runtime assets. It excludes source trees, test
+fixtures, dotfiles, dependency directories, and source maps. The two proof keys
+must match the SHA-256 hashes in the selected deployment configuration.
+
+`build.json` records the pinned sources, bundled input graph, selected network,
+and SHA-256 hashes of every published asset. Its hash is content-derived with no
+timestamp, so repeated builds of the same inputs are reproducible.
+
+All deployments continue to use `/funding/`. Browser configuration remains at
+`/funding/browser-config.json`, proof keys at `/funding/proofs/`, and WASM at
+`/funding/wasm/`. App bundles and the worker are one level below that root under
+`assets/`, preserving the wallet runtime's relative `import.meta.url` paths.
+The composer does not change IndexedDB names, browser storage, wallet journals,
+or deployed origins. The daemon keeps the legacy `/funding/app.js` endpoint as
+a loader for the same composed app, not another copy of ChatApp.
+
+Existing Vercel configurations use `npm ci` and their corresponding packaging
+wrapper. Git deployments must include the pinned public submodules; source
+uploads must include their initialized contents. No private wallet or account
+state is a build input.
+
+## Isolated release deployments
+
+The 2026-09-05 composition release uses new Vercel projects. Do not relink or
+deploy from an existing project's `.vercel` directory. The docs site's Git
+integration honors `[preserve-deployments]` in a commit message through
+`ignoreCommand`; the shared OA app has the same opt-in guard. Use this marker
+for the initial clean-history merge so existing Git-connected sites remain on
+their previous deployments. Ordinary later commits are not skipped. Browser
+release builds use their explicit browser/mainnet configuration, not these
+upstream-site configurations.
+
+## OA commercial compatibility check (2026-09-05)
+
+The standalone OA production build succeeds with the composition changes and
+Node 24.20.0. The ordinary ticket/account defaults remain enabled, and the
+commercial extension API remains version 2.
+
+A disposable checkout of `oa-commercial` at
+`9c95a09d5be1bfb6fb8ec4f714260f97d1efd1a8` was built with both the modified OA
+source and an independent unmodified worktree of OA main
+`feb7ad9735816224196909cfe2ec367044f9243c`. Both commercial builds succeeded and
+both produced exactly the same test results: 283/287 unit tests and 10/12
+artifact tests passed. The identical failures cover account-footer spacing,
+username/Google identity handoff, the username account surface, and a
+content-derived CSS cache version. Those changes are present in the commercial
+project's pinned OA fork (`7874936e0004f54111f768171cfd4422d4406cea`) but not in
+the chosen main baseline; they are not introduced by this composition diff.
+
+Do not repoint the commercial project to this OA main revision without first
+reconciling its existing fork-only changes. The check confirms build and
+extension-boundary compatibility, not a live billing, OAuth, or passkey test.
+It made no deployment, authentication, or payment changes.
+
+## Verification
+
+`npm test` runs the downstream wallet/recovery, runtime, UI, transport and build
+tests. The controller migration gate executes behavioral tests against the
+actual `oa-chat` controller, rather than regex-checking an unused copied app.
+Run `npm --prefix oa-chat ci && npm --prefix oa-chat test` for the complete
+standalone OA suite and `cargo test -p zkapi-clientd --lib` for embedded routes.
+
+For a browser smoke test, serve `dist/browser` on localhost and use an isolated
+browser profile without MetaMask. The optional
+`scripts/browser-composition-fixture.js` can be evaluated through browser
+automation after startup. It refuses non-localhost origins and wallet-enabled
+profiles. It replaces only the wallet/provider boundaries with simulated
+responses; the composed controller, product runtime, request construction, SSE
+parser, IndexedDB and UI remain real. It is excluded from published assets.
+
+Verify streamed chunks, simultaneous title/response requests, New Chat during
+settlement, accepted queued prompt + Stop, revisiting a chat with full context,
+and a progress disclosure staying open across clock updates. The fixture's
+`holdSettlement` flag provides a deterministic waiting state. These are not
+on-chain deposit/withdrawal tests; never treat the simulated note or token as
+real payment evidence. Existing wallet journals, withdrawal state machines and
+contracts are unchanged by this composition refactor.

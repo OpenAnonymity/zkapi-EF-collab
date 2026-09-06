@@ -22,10 +22,78 @@ The current protocol uses:
 git clone git@github.com:OpenAnonymity/zkapi-ef.git
 cd zkapi-ef
 git submodule update --init --recursive
+npm ci # Node.js 24+; builds the shared browser UI embedded in the daemon
 cargo build --release --bin zkapi
 cargo test --workspace
+node --test funding-page/wallet.test.cjs
+node --test funding-page/browser-wallet.test.cjs
 (cd protocol/contracts && forge test)
 ```
+
+### Use OA Chat directly from a website
+
+The chat renderer and static assets come from the pinned `oa-chat` submodule.
+`funding-page/` contains only zkAPI payment/runtime customizations, not another
+copy of OA Chat. Both hosted variants and the daemon use the same composed
+build; see [composition and source-update instructions](docs/browser-composition-build.md).
+
+The OA Chat client can also run the zkAPI v2 wallet and Groth16 prover entirely
+in the browser, with no local daemon. Build a deployable static directory with:
+
+```bash
+npm ci
+cargo install wasm-bindgen-cli --version 0.2.117 --locked
+./scripts/build-browser-client.sh
+python3 -m http.server 4173 --directory dist/browser
+```
+
+Open `http://127.0.0.1:4173/funding/`. The checked-in browser configuration
+uses the public Sepolia demo by default. A deployment can replace
+`funding/browser-config.json`. A manifest selected with `?zkapiDeployment=` is
+accepted only when its exact URL is also listed in that file's
+`allowed_deployment_manifest_urls`, preventing a shared link from silently
+substituting a different deployment. The manifest's vault, chain, billing
+token, server and indexer origins, signing keys, proving-key hashes, charge cap,
+OpenRouter origin, and OA verifier must also match `trusted_deployment`.
+
+The initial static payload includes a 2.2 MB WASM module. The 5.4 MB request
+and 7.2 MB withdrawal proving keys are downloaded and integrity-checked only
+when the corresponding proof is needed, then cached by the browser. Proofs run
+in a Web Worker. Private note state and the write-ahead recovery journal are
+stored atomically in IndexedDB, mutations are serialized with Web Locks across
+tabs, and the site requests persistent browser storage. Clearing site data can
+still make an active note unrecoverable, so users should withdraw before
+clearing the OA Chat origin. Production hosting should use HTTPS, a strict CSP,
+no third-party scripts, and immutable integrity-pinned WASM/proving-key assets.
+
+The daemon remains supported. On a daemon-served OA Chat page it is selected
+automatically; `?zkapiMode=browser` forces the WebAssembly wallet and
+`?zkapiMode=daemon` disables browser fallback.
+
+The checked-in WASM bundle can also be packaged and deployed to Vercel without
+installing Rust in the remote builder:
+
+```bash
+./scripts/package-browser-client.sh
+vercel --prod --yes --local-config vercel.browser.json
+```
+
+The Vercel configuration redirects `/` to `/funding/` and serves the same OA Chat
+client with the browser wallet selected automatically when no local daemon is
+available.
+
+A separate Ethereum Mainnet build is pinned to the existing zkAPI mainnet
+deployment and Circle's Ethereum USDC contract. It disables the test-token
+faucet, defaults to a 2 USDC deposit, labels the billing token as USDC, and
+shows a real-funds warning before funding:
+
+```bash
+./scripts/package-browser-client-mainnet.sh
+vercel --prod --yes --local-config vercel.mainnet.json
+```
+
+The mainnet vault and proving system are experimental and unaudited. Deposits
+use real USDC and all wallet transactions use real ETH for gas.
 
 The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,
@@ -47,20 +115,20 @@ After building, start a ready-to-use local gateway with one command:
 ```
 
 It loads the experimental Ethereum Mainnet manifest, stores private state
-outside the repository, reuses an existing note, and otherwise asks `cast` to
-securely derive the wallet address and sign the real-USDC approval and deposit.
-The default deposit is 2 USDC. The address must already hold that USDC and
-enough ETH for gas. It then serves standard APIs on `127.0.0.1:11434`:
+outside the repository, reuses an existing note, and serves the chat and
+MetaMask funding UI at `http://127.0.0.1:11434/`. No wallet key is pasted into
+the daemon or browser page. A new note defaults to 2 USDC and the selected
+MetaMask account needs that USDC plus ETH for gas. The same process serves
+standard APIs on `127.0.0.1:11434`:
 
 - OpenAI Chat Completions: `/v1/chat/completions`
 - OpenAI Responses: `/v1/responses`
 - Ollama chat: `/api/chat`
 
-Choose an address with `--address` (the first key prompt verifies it), use a
-different deployment manifest with `--deployment`, or start without funding via
-`--no-fund`. The configured vault accepts its configured ERC-20 billing token.
-The default Mainnet vault uses real USDC; native ETH is used for transaction
-gas, not request credits.
+Use a different deployment manifest with `--deployment`. The configured vault
+accepts its configured ERC-20 billing token. The default Mainnet vault uses real
+USDC; native ETH is used for transaction gas, not request credits. The former
+terminal flow remains available as `--fund-with-cast` for headless setups.
 
 The default `--mode proxy` sends each request through `zkapi-serverd`. On a
 deployment that advertises `direct_openrouter`, opt into the prompt-private
@@ -70,13 +138,14 @@ mode with:
 ./target/release/zkapi client --mode direct-openrouter
 ```
 
-Each Groth16 authorization receives one short-lived OpenRouter runtime key. By
-default the local daemon sends at most five sequential LLM requests through
-that key, then disables it, settles its aggregate usage, and obtains a new key.
-Set `--openrouter-requests-per-key 1` before the `client` subcommand for one key
-per request, or choose another positive limit to trade fewer proofs and
-settlement pauses for greater cross-request linkability. OpenRouter still sees
-the LLM traffic; the zkAPI server does not. Runtime keys are held only in local
+The first local LLM call creates one Groth16 authorization and receives a
+short-lived OpenRouter runtime key. The bundled UI assigns a stable local
+session ID to each conversation. Requests with that ID—including concurrent
+answer and title generation and later follow-ups—reuse that key and can run in
+parallel for the lifetime of that chat's lease. A different conversation cannot
+silently inherit an active key. The key is replaced only on expiry, explicit
+settlement, provider rejection, or credit exhaustion. OpenRouter still sees the
+LLM traffic; the zkAPI server does not. Runtime keys are held only in local
 process memory and are never stored by the server.
 
 When the server is configured with `--oa-org-url`, the response also contains
@@ -84,8 +153,8 @@ the station ID, expiry, station signature, org signature, and verifier URL used
 by oa-chat. The local daemon submits that evidence to its independently
 configured `--oa-verifier-url` and refuses to send a prompt unless the verifier
 accepts the key. Because the station owns the OpenRouter management account,
-the station disables each key when zkAPI retires it after the configured
-request count (or at its provider-enforced expiry), waits for usage to
+the station disables each key when zkAPI explicitly retires it (or at its
+provider-enforced expiry), waits for usage to
 stabilize, and persists a signed aggregate-usage receipt before deleting the
 key. The org verifies and
 countersigns that receipt, and zkAPI charges the reported micro-dollar usage
@@ -100,13 +169,23 @@ For example, with `zkapi client` running:
 ```bash
 curl -fsS http://127.0.0.1:11434/v1/chat/completions \
   -H 'content-type: application/json' \
+  -H 'x-zkapi-session-id: chat-example' \
   -d '{"model":"openai/gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":"explain HTTPS briefly"}]}' | jq .
 ```
 
 The local gateway also exposes equivalent OpenAI Responses and Ollama routes.
-OpenAI chat streams use SSE. Ollama `/api/chat` streams use newline-delimited
-JSON and stream by default, so either OpenWebUI connection type receives tokens
-as OpenRouter produces them.
+Clients that omit `X-ZkAPI-Session-Id` use the compatibility session named
+`default`. OpenAI chat streams use SSE. Ollama `/api/chat` streams use
+newline-delimited JSON and stream by default, so either OpenWebUI connection
+type receives tokens as OpenRouter produces them.
+
+The bundled balance panel also closes notes without exposing the note secret.
+Mutual close returns the remaining token balance in one MetaMask transaction.
+If server clearance is unavailable, the escape hatch starts a challengeable
+withdrawal using the vault's configured safety window (24 hours by default),
+preserves the local note across daemon restarts, and
+enables finalization after the on-chain deadline. Inference is blocked while a
+withdrawal proof is prepared or an escape is pending.
 
 ## Components
 

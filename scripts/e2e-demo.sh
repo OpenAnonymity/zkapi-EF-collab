@@ -239,7 +239,6 @@ ZKAPI_PROOF_MODE=dev_witness_envelope "$ROOT_DIR/target/debug/zkapi-clientd" \
   --policy-charge-cap "$POLICY_CHARGE_CAP" \
   --demo-rpc-url "$RPC_URL" \
   --demo-billing-token-address "$TOKEN_ADDRESS" \
-  --demo-private-key "$PRIVATE_KEY" \
   --demo-note-ttl-seconds "$NOTE_TTL" \
   --trusted-epoch-roots "$TRUSTED_ROOTS_JSON" \
   --model "$MODEL_ID" >"$LOG_DIR/auth.log" 2>&1 &

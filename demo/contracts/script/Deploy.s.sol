@@ -39,6 +39,7 @@ contract DemoBillingToken is ERC20 {
 ///           STATE_SIGNING_KEY_X/Y – deployment-pinned Baby-JubJub key.
 ///           CLEARANCE_SIGNING_KEY_X/Y – deployment-pinned Baby-JubJub key.
 ///           BILLING_TOKEN – existing 6-decimal token; required on Mainnet.
+///           CHALLENGE_PERIOD_SECONDS – escape delay; defaults to 24 hours.
 contract DeployScript is Script {
     uint64 internal constant NOTE_TTL = 30 days;
     uint128 internal constant REQUEST_CHARGE_CAP = 1_000_000;
@@ -53,6 +54,7 @@ contract DeployScript is Script {
         uint256 clearanceKeyX = vm.envUint("CLEARANCE_SIGNING_KEY_X");
         uint256 clearanceKeyY = vm.envUint("CLEARANCE_SIGNING_KEY_Y");
         address billingTokenAddress = vm.envOr("BILLING_TOKEN", address(0));
+        uint64 challengePeriod = uint64(vm.envOr("CHALLENGE_PERIOD_SECONDS", uint256(24 hours)));
         address poseidonLibrary = vm.envOr("POSEIDON_ADDRESS", address(0));
         // Treasury receives the operator's consumed amount on settlement. Keep
         // it separate from the depositor so consumption is visible in the demo.
@@ -77,6 +79,7 @@ contract DeployScript is Script {
             billingTokenAddress,
             treasury,
             NOTE_TTL,
+            challengePeriod,
             REQUEST_CHARGE_CAP,
             address(proofAdapter),
             stateKeyX,
@@ -95,6 +98,7 @@ contract DeployScript is Script {
         vm.serializeAddress(manifest, "poseidonLibrary", poseidonLibrary);
         vm.serializeAddress(manifest, "treasury", treasury);
         vm.serializeUint(manifest, "requestChargeCap", REQUEST_CHARGE_CAP);
+        vm.serializeUint(manifest, "challengePeriod", challengePeriod);
         vm.serializeUint(manifest, "stateSigningKeyX", stateKeyX);
         vm.serializeUint(manifest, "stateSigningKeyY", stateKeyY);
         vm.serializeUint(manifest, "clearanceSigningKeyX", clearanceKeyX);

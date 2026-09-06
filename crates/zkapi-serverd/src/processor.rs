@@ -494,6 +494,7 @@ impl RequestProcessor {
             policy_evidence_hash: provider_response.policy_evidence_hash,
             proof_blob: Some(proof_bytes.clone()),
             request_inputs_json: serde_json::to_string(&pi).ok(),
+            api_request_binding: None,
             created_at: current_timestamp(),
             finalized_at: Some(current_timestamp()),
         };
@@ -840,6 +841,7 @@ mod tests {
                     policy_evidence_hash: None,
                     proof_blob: None,
                     request_inputs_json: None,
+                    api_request_binding: None,
                     created_at: 0,
                     finalized_at: None,
                 },

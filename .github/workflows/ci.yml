@@ -18,6 +18,22 @@ jobs:
 
       - uses: ./.github/actions/checkout-protocol
 
+      - uses: ./.github/actions/checkout-oa-chat
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install composed UI build dependencies
+        run: npm ci
+
+      - name: Test and build both browser configurations
+        run: |
+          npm test
+          npm run build:browser
+          npm run build:mainnet
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -119,6 +135,8 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
+
+      - uses: ./.github/actions/checkout-oa-chat
 
       - name: Build Docker image
         run: docker build -f docker/Dockerfile -t zkapi/ef-collaboration:ci .

@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -38,6 +39,8 @@ use crate::provider::build_provider;
 
 /// Shared application state.
 type AppState = Arc<RequestProcessor>;
+
+type ErrorHttpResponse = (StatusCode, HeaderMap, Json<ErrorResponse>);
 
 // Compact proofs are small; leave headroom for ordinary API payloads.
 const PROTOCOL_BODY_LIMIT_BYTES: usize = 1024 * 1024;
@@ -188,7 +191,7 @@ async fn handle_attestation(State(processor): State<AppState>) -> Json<Attestati
 async fn handle_request(
     State(processor): State<AppState>,
     Json(api_request): Json<ApiRequestV2>,
-) -> Result<Json<RequestResponseV2>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RequestResponseV2>, ErrorHttpResponse> {
     processor
         .process_request(&api_request)
         .await
@@ -199,7 +202,7 @@ async fn handle_request(
 async fn handle_openrouter_lease(
     State(processor): State<AppState>,
     Json(api_request): Json<ApiRequestV2>,
-) -> Result<(StatusCode, Json<IssuedOpenRouterLease>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<IssuedOpenRouterLease>), ErrorHttpResponse> {
     processor
         .issue_openrouter_lease(&api_request)
         .await
@@ -221,7 +224,7 @@ async fn handle_openrouter_lease_retirement(
     State(processor): State<AppState>,
     Path(client_request_id): Path<String>,
     Json(api_request): Json<ApiRequestV2>,
-) -> Result<Json<OpenRouterLeaseStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<OpenRouterLeaseStatusResponse>, ErrorHttpResponse> {
     processor
         .retire_openrouter_lease(&client_request_id, &api_request)
         .await
@@ -233,7 +236,7 @@ async fn handle_openrouter_lease_retirement(
 async fn handle_clearance(
     State(processor): State<AppState>,
     Json(clearance_req): Json<ClearanceRequest>,
-) -> Result<Json<ClearanceResponseV2>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ClearanceResponseV2>, ErrorHttpResponse> {
     processor
         .process_clearance(&clearance_req)
         .map(Json)
@@ -246,7 +249,7 @@ async fn handle_clearance(
 async fn handle_recovery_by_id(
     State(processor): State<AppState>,
     Path(client_request_id): Path<String>,
-) -> Result<Json<RecoveryResponseV2>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RecoveryResponseV2>, ErrorHttpResponse> {
     processor
         .recover_by_client_id(&client_request_id)
         .map(Json)
@@ -257,7 +260,7 @@ async fn handle_recovery_by_id(
 async fn handle_recovery_by_nullifier(
     State(processor): State<AppState>,
     Path(nullifier_hex): Path<String>,
-) -> Result<Json<RecoveryResponseV2>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<RecoveryResponseV2>, ErrorHttpResponse> {
     let nullifier = Felt252::from_hex(&nullifier_hex).map_err(|e| {
         let err = ServerError::InvalidRequest(format!("invalid nullifier hex: {}", e));
         error_to_response(&err, &nullifier_hex, &processor)
@@ -378,24 +381,51 @@ fn error_to_response(
     err: &ServerError,
     client_request_id: &str,
     processor: &RequestProcessor,
-) -> (StatusCode, Json<ErrorResponse>) {
+) -> ErrorHttpResponse {
+    let latest_root = if matches!(err, ServerError::StaleRoot { .. }) {
+        Some(processor.current_root())
+    } else {
+        None
+    };
+    build_error_response(err, client_request_id, latest_root)
+}
+
+fn build_error_response(
+    err: &ServerError,
+    client_request_id: &str,
+    latest_root: Option<Felt252>,
+) -> ErrorHttpResponse {
     let status_code = match err {
         ServerError::InvalidProof(_)
         | ServerError::InvalidRequest(_)
         | ServerError::ProtocolMismatch(_) => StatusCode::BAD_REQUEST,
         ServerError::StaleRoot { .. } => StatusCode::CONFLICT,
         ServerError::Replay | ServerError::NullifierUsed => StatusCode::CONFLICT,
-        ServerError::LeasePending => StatusCode::CONFLICT,
+        ServerError::LeasePending | ServerError::LeaseSettlementPending { .. } => {
+            StatusCode::CONFLICT
+        }
         ServerError::NoteExpired => StatusCode::GONE,
         ServerError::CapacityExhausted => StatusCode::SERVICE_UNAVAILABLE,
         ServerError::Internal(_) | ServerError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ServerError::OaRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
     };
 
-    let latest_root = if matches!(err, ServerError::StaleRoot { .. }) {
-        Some(processor.current_root())
-    } else {
-        None
+    let retry_after_seconds = match err {
+        ServerError::OaRateLimited {
+            retry_after_seconds,
+            ..
+        }
+        | ServerError::LeaseSettlementPending {
+            retry_after_seconds,
+        } => Some(*retry_after_seconds),
+        _ => None,
     };
+    let mut headers = HeaderMap::new();
+    if let Some(retry_after_seconds) = retry_after_seconds {
+        let retry_after = HeaderValue::from_str(&retry_after_seconds.to_string())
+            .expect("a decimal u64 is always a valid Retry-After header");
+        headers.insert(RETRY_AFTER, retry_after);
+    }
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -410,9 +440,10 @@ fn error_to_response(
         retriable: err.is_retriable(),
         latest_root,
         server_time_ms: Some(now_ms),
+        retry_after_seconds,
     };
 
-    (status_code, Json(body))
+    (status_code, headers, Json(body))
 }
 
 fn spawn_openrouter_lease_settler(processor: Arc<RequestProcessor>, interval: Duration) {
@@ -460,6 +491,48 @@ async fn fetch_indexer_root(indexer_url: &str) -> anyhow::Result<Felt252> {
     let response = reqwest::get(&url).await?;
     let response = response.error_for_status()?;
     Ok(response.json::<RootResponse>().await?.root)
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn oa_rate_limit_maps_to_retriable_429_with_retry_metadata() {
+        let error = ServerError::OaRateLimited {
+            reason: "oa_hourly_issuance_budget".to_string(),
+            retry_after_seconds: 37,
+        };
+
+        let (status, headers, Json(response)) =
+            build_error_response(&error, "lease-request-123", None);
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers.get(RETRY_AFTER).unwrap(), "37");
+        assert_eq!(response.error_code, "oa_hourly_issuance_budget");
+        assert!(response.retriable);
+        assert_eq!(response.retry_after_seconds, Some(37));
+
+        let serialized = serde_json::to_value(response).unwrap();
+        assert_eq!(serialized["retry_after_seconds"], 37);
+        assert_eq!(serialized["error_code"], "oa_hourly_issuance_budget");
+    }
+
+    #[test]
+    fn lease_settlement_pending_maps_to_retriable_409_with_retry_metadata() {
+        let error = ServerError::LeaseSettlementPending {
+            retry_after_seconds: 15,
+        };
+
+        let (status, headers, Json(response)) =
+            build_error_response(&error, "lease-request-123", None);
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(headers.get(RETRY_AFTER).unwrap(), "15");
+        assert_eq!(response.error_code, "lease_settlement_pending");
+        assert!(response.retriable);
+        assert_eq!(response.retry_after_seconds, Some(15));
+    }
 }
 
 #[cfg(any())]

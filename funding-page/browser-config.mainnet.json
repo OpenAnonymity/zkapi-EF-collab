@@ -1,0 +1,34 @@
+{
+  "deployment_manifest_url": "https://d27v1dvkaxfc09.cloudfront.net/config.json",
+  "allowed_deployment_manifest_urls": [
+    "https://d27v1dvkaxfc09.cloudfront.net/config.json"
+  ],
+  "deployment_api_proxy_path": "/zkapi-deployment/",
+  "trusted_deployment": {
+    "deployment_id": "zkapi-ef-mainnet-groth16-v2-20260812",
+    "chain_id": 1,
+    "contract_address": "0xef88012d1A7F9d44e5f5afB8bC5e611Dc3283709",
+    "billing_token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "protocol_server_url": "https://d27v1dvkaxfc09.cloudfront.net",
+    "indexer_url": "https://d27v1dvkaxfc09.cloudfront.net",
+    "request_charge_cap": 50000,
+    "state_signing_key": {
+      "x": "0x68b03dd2caf06ee9496c41808866d50eebc6499dc6de33cc043a657bf852751",
+      "y": "0xa093a54ed79f4e88652b6bbe9bf4fc3794a0779e513045ed2a75699564792cb"
+    },
+    "clearance_signing_key": {
+      "x": "0x1bec3c118854b4ffcde1fb6dead674808c0c38e4f45b54c33984460bb0fb8d2b",
+      "y": "0x239f4e558d7dfde57e0c23066e6cf94e628d7b6b49e728a5ce0b2d0ab0992898"
+    },
+    "request_proving_key_sha256": "faa0e68954ade5e9709fa74baca3380cf0ff0d325ff06742385f33036123928e",
+    "withdrawal_proving_key_sha256": "92a90139c87ae0e331fddc92a36e231047e1b4ae95474521d9a75f9b5a7bd0ab",
+    "openrouter_inference_base": "https://openrouter.ai/api/v1",
+    "verifier_url": "https://verifier2.openanonymity.ai"
+  },
+  "proving_keys_base_url": "./proofs/",
+  "credits_per_usd": 1000000,
+  "suggested_deposit_amount": 2000000,
+  "billing_token_symbol": "USDC",
+  "billing_token_decimals": 6,
+  "require_oa_key_source": true
+}

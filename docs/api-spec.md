@@ -12,7 +12,21 @@ details to application code:
 | GET | `/v1/models` | OpenAI-compatible model list |
 | POST | `/api/chat` | Ollama-compatible chat |
 | GET | `/health` | daemon and wallet status |
-| GET | `/funding` | bundled testnet funding UI |
+| GET | `/` or `/funding` | bundled chat and MetaMask funding UI |
+| POST | `/wallet/withdraw` | prepare an idempotent `mutual` or `escape` withdrawal proof |
+| POST | `/wallet/withdraw/confirm` | reconcile the prepared withdrawal with canonical vault state |
+
+The withdrawal routes are also available under `/funding/api/withdraw` and
+`/funding/api/withdraw/confirm`. Preparing either mode persists the proof and
+blocks inference with `409 withdrawal_pending`. Confirmation archives the local
+note only after the vault reports it closed; a pending escape instead returns
+its challenge deadline while retaining the note secret for finalization.
+
+Applications may send `X-ZkAPI-Session-Id` on the three inference routes. In
+direct OpenRouter mode, the daemon binds the active ephemeral key to that ID,
+allows same-ID calls to run in parallel, and returns `409
+lease_session_conflict` for a different ID until the lease expires. Omitting the
+header uses the compatibility ID `default`.
 
 The CLI `request --path ... --json ...` operation invokes the same wallet flow
 without running a long-lived local daemon.
@@ -77,22 +91,38 @@ payload is only:
 
 Unknown fields are rejected, so a prompt cannot accidentally enter this
 protocol message. After verifying the proof and reserving its nullifier, the
-server creates an OpenRouter child key whose USD limit equals the deployment's
-request charge cap and whose `expires_at` equals the returned UNIX expiry. A
+server creates an OpenRouter child key whose cumulative USD limit equals the
+request proof's public `solvency_bound`. That bound must be at least the
+deployment's minimum request charge cap, and the proof shows the private note
+can cover it. Browser clients choose a coarse balance tier so they do not
+reveal the note's exact balance. The key's `expires_at` equals the returned
+UNIX expiry. A
 successful `201` response contains `api_key`, `openrouter_api_base`,
 `issued_at`, `expires_at`, `valid_for_seconds`, `settle_after`, and
 `spending_limit_usd`, plus `key_source`. An OA-org lease also contains a
 `verification` object with `verifier_url`, `station_id`,
 `station_recently_attested`, `key_valid_till`, `station_signature`, and
 `org_signature`. The client requires that URL to match its independently
-configured OA verifier and submits the same `/submit_key` payload as oa-chat
-before using the key. The plaintext key is returned once and is not persisted.
+configured OA verifier, requires the signed validity window to cover the whole
+lease with at most 60 seconds of later-expiry skew, and submits the same
+`/submit_key` payload as oa-chat before using the key. Signature encoding and
+cryptographic validity are decided by that pinned verifier. The plaintext key
+is returned once and is not persisted.
 
-The client may send several sequential inference calls through a lease, up to
-its locally configured request-count limit (five by default). Calls sharing a
-key are linkable to OpenRouter, so privacy-sensitive clients can select a limit
-of one. At the limit, provider rejection, or expiry, the client posts a
-retirement. For a directly managed key, the server disables the key, reads
+If the OA org temporarily cannot allocate another child key, zkAPI returns
+HTTP `429` instead of converting the condition into a generic server error.
+The response is explicitly retriable, includes `Retry-After` and matching
+`retry_after_seconds`, and uses `oa_minute_request_limit`,
+`oa_hourly_issuance_budget`, or the generic `oa_rate_limited` machine code.
+Clients must retry the exact prepared request so its proof and nullifier remain
+idempotent; they should not create another proof merely to evade the limit.
+
+The client may send parallel title and completion calls plus follow-ups through
+the same chat lease. There is no request-count or small token quota; the child
+key's cumulative USD limit is the boundary. Calls sharing a key are linkable to
+OpenRouter. At dollar-limit exhaustion, provider rejection, explicit close, or
+expiry, the client posts a retirement. For a directly managed key, the server
+disables the key, reads
 aggregate `usage` through OpenRouter's Management API, converts USD to credits,
 finalizes the original lease, and deletes the key. Expiry plus the configured
 usage-propagation grace period remains a crash-recovery fallback. The existing

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,6 +42,8 @@ struct OpenRouterState {
     inference_attempts: Arc<Mutex<usize>>,
     inference_failures_remaining: Arc<Mutex<usize>>,
     key_usage: Arc<Mutex<HashMap<String, usize>>>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Default)]
@@ -127,34 +130,42 @@ fn openrouter_router(state: OpenRouterState) -> Router {
         let api_key = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if !api_key.is_some_and(|key| key.starts_with("sk-or-v1-runtime-test-")) {
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        if !api_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("sk-or-v1-runtime-test-"))
+        {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": { "message": "invalid key" } })),
             ));
         }
         *state.inference_attempts.lock().unwrap() += 1;
-        let mut failures = state.inference_failures_remaining.lock().unwrap();
-        if *failures > 0 {
-            *failures -= 1;
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "code": 502,
-                        "message": "provider temporarily unavailable",
-                        "metadata": { "error_type": "provider_unavailable" }
-                    }
-                })),
-            ));
+        {
+            let mut failures = state.inference_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": {
+                            "code": 502,
+                            "message": "provider temporarily unavailable",
+                            "metadata": { "error_type": "provider_unavailable" }
+                        }
+                    })),
+                ));
+            }
         }
-        drop(failures);
-        let api_key = api_key.unwrap().to_string();
+        let api_key = api_key.unwrap();
         let prompt = body["messages"][0]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string();
+        let active = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.max_in_flight.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
         state.prompts.lock().unwrap().push(prompt.clone());
         *state.key_usage.lock().unwrap().entry(api_key).or_default() += 1;
         if body.get("stream").and_then(Value::as_bool) == Some(true) {
@@ -180,8 +191,10 @@ fn openrouter_router(state: OpenRouterState) -> Router {
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
             );
+            state.in_flight.fetch_sub(1, Ordering::SeqCst);
             return Ok(response);
         }
+        state.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(Json(json!({
             "id": "chatcmpl-direct",
             "object": "chat.completion",
@@ -343,7 +356,10 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
         {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        if body["credit_limit"] != 0.001 || body["duration_minutes"] != 1 {
+        if body["credit_limit"] != 0.005
+            || body["credit_limit_credits"] != 5_000
+            || body["duration_minutes"] != 1
+        {
             return Err(StatusCode::BAD_REQUEST);
         }
         state.flow.events.lock().unwrap().push("issued".to_string());
@@ -362,7 +378,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             "source": "oa_org",
             "key": format!("sk-or-v1-oa-test-{issuance}"),
             "key_hash": key_hash,
-            "credit_limit": 0.001,
+            "credit_limit": 0.005,
             "duration_minutes": 1,
             "expires_at": "future",
             "expires_at_unix": expires_at,
@@ -389,6 +405,12 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             return Err(StatusCode::UNAUTHORIZED);
         }
         let key_hash = body["key_hash"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+        if body["credit_limit"] != 0.005
+            || body["credit_limit_credits"] != 5_000
+            || body["duration_minutes"] != 1
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let (client_request_id, expires_at) = state
             .flow
             .leases
@@ -397,7 +419,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             .get(key_hash)
             .cloned()
             .ok_or(StatusCode::NOT_FOUND)?;
-        if body["client_request_id"] != client_request_id {
+        if body["client_request_id"] != client_request_id || body["expires_at_unix"] != expires_at {
             return Err(StatusCode::CONFLICT);
         }
         let poll = {
@@ -426,7 +448,7 @@ fn oa_org_router(state: OaFlowState, verifier_url: String, inference_url: String
             "station_request_id": "ef".repeat(32),
             "key_hash": key_hash,
             "usage_credits": 7,
-            "credit_limit_credits": 1000,
+            "credit_limit_credits": 5000,
             "expires_at_unix": expires_at,
             "closed_at_unix": closed_at,
             "finalized_at_unix": closed_at,
@@ -466,12 +488,13 @@ fn setup_directory() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bounded_lease_rotates_after_the_configured_request_count() {
+async fn one_lease_is_reused_for_the_chat_until_explicit_settlement() {
     let directory = test_directory();
     let wallet_directory = directory.join("wallet");
     let contract = Felt252::from_u64(0xdeadbeef);
     let deposit = 10_000u128;
     let request_cap = 1_000u128;
+    let lease_cap = 5_000u128;
     let expiry = 4_000_000_000u64;
     let setup_directory = setup_directory();
 
@@ -485,8 +508,8 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         server_url: "http://127.0.0.1:1".to_string(),
         state_dir: wallet_directory.to_string_lossy().to_string(),
@@ -542,7 +565,9 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
                             .unwrap_or_else(|| "management-test-key".to_string()),
                         api_base: format!("{openrouter_url}/api"),
                     },
-                    ttl_seconds: if live_openrouter { 30 } else { 3 },
+                    // Keep the mock lease alive long enough to prove that all
+                    // chat, title/response, SSE, and Ollama calls reuse it.
+                    ttl_seconds: if live_openrouter { 30 } else { 120 },
                     settlement_grace_seconds: if live_openrouter { 20 } else { 0 },
                     settlement_poll_seconds: 1,
                 }),
@@ -560,8 +585,8 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         protocol_server_url: protocol_server_url.clone(),
         indexer_url,
@@ -572,7 +597,6 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         clearance_signing_key: clearance_key.clone(),
         request_mode: RequestMode::DirectOpenrouter,
         openrouter_inference_base: format!("{openrouter_url}/api/v1"),
-        openrouter_requests_per_key: 2,
         ..Default::default()
     })
     .unwrap();
@@ -588,17 +612,25 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         json!(["proxy", "direct_openrouter"])
     );
 
-    let first = service
-        .execute_request(CoreRequest::post_json(
-            "/v1/chat/completions",
-            json!({
-                "model": "openai/gpt-4o-mini",
-                "messages": [{"role": "user", "content": "private prompt one"}]
-            }),
-        ))
-        .await
-        .unwrap();
-    if !live_openrouter {
+    let first_request = CoreRequest::post_json(
+        "/v1/chat/completions",
+        json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "private prompt one"}]
+        }),
+    );
+    let second_request = CoreRequest::post_json(
+        "/v1/responses",
+        json!({
+            "model": "openai/gpt-4o-mini",
+            "input": "private prompt two"
+        }),
+    );
+    let (first, second) = if live_openrouter {
+        let first = service.execute_request(first_request).await.unwrap();
+        let second = service.execute_request(second_request).await.unwrap();
+        (first, second)
+    } else {
         // Reproduce OpenRouter's intermittent provider_unavailable response.
         // The client should absorb the 502 and retry the exact inference on
         // the still-valid lease key.
@@ -606,22 +638,56 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .inference_failures_remaining
             .lock()
             .unwrap() = 1;
-    }
-    let second = service
-        .execute_request(CoreRequest::post_json(
-            "/v1/responses",
-            json!({
-                "model": "openai/gpt-4o-mini",
-                "input": "private prompt two"
-            }),
-        ))
+        let first_service = service.clone();
+        let first_task = tokio::spawn(async move {
+            first_service
+                .execute_request_in_session(first_request, Some("chat-one"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while openrouter_state.in_flight.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .unwrap();
+        .expect("first same-session request should reach inference");
+
+        let active_lease = service.zkapi_config().await.active_lease.unwrap();
+        assert_eq!(active_lease.session_id, "chat-one");
+        assert!(!serde_json::to_string(&active_lease)
+            .unwrap()
+            .contains("sk-or-v1-"));
+
+        let cross_chat = service
+            .execute_request_in_session(
+                CoreRequest::post_json(
+                    "/v1/chat/completions",
+                    json!({
+                        "model": "openai/gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "must not share a key"}]
+                    }),
+                ),
+                Some("chat-two"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(cross_chat.status_code(), StatusCode::CONFLICT);
+        assert_eq!(cross_chat.code(), "lease_session_conflict");
+
+        let second = service
+            .execute_request_in_session(second_request, Some("chat-one"))
+            .await
+            .unwrap();
+        let first = first_task.await.unwrap().unwrap();
+        assert_eq!(openrouter_state.max_in_flight.load(Ordering::SeqCst), 2);
+        (first, second)
+    };
 
     if !live_openrouter {
         let local_client_url = spawn(zkapi_clientd::build_router(service.clone())).await;
         let response = reqwest::Client::new()
             .post(format!("{local_client_url}/v1/chat/completions"))
+            .header("x-zkapi-session-id", "chat-one")
             .json(&json!({
                 "model": "openai/gpt-4o-mini",
                 "stream": true,
@@ -656,12 +722,14 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&second_chunk).contains("stream prompt"));
+        drop(chunks);
 
         // OpenWebUI often connects to port 11434 as an Ollama backend rather
         // than as an OpenAI-compatible backend. Ollama streaming is NDJSON,
         // not SSE, and must also reach the caller one chunk at a time.
         let response = reqwest::Client::new()
             .post(format!("{local_client_url}/api/chat"))
+            .header("x-zkapi-session-id", "chat-one")
             .json(&json!({
                 "model": "openai/gpt-4o-mini",
                 "stream": true,
@@ -711,6 +779,18 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         drop(chunks);
     }
 
+    let active = service.zkapi_config().await.active_lease.unwrap();
+    assert_eq!(active.client_request_id, first.client_request_id);
+    assert_eq!(
+        active.session_id,
+        if live_openrouter {
+            "default"
+        } else {
+            "chat-one"
+        }
+    );
+    service.settle_for_withdrawal().await.unwrap();
+
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let wallet_settled = !service.status().await.unwrap().pending_request;
@@ -718,8 +798,8 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
                 .lookup_openrouter_lease(&first.client_request_id)
                 .is_some_and(|lease| lease.status == "finalized");
             let mock_keys_settled = live_openrouter
-                || (*openrouter_state.deletes.lock().unwrap() == 2
-                    && openrouter_state.create_bodies.lock().unwrap().len() == 2);
+                || (*openrouter_state.deletes.lock().unwrap() == 1
+                    && openrouter_state.create_bodies.lock().unwrap().len() == 1);
             if wallet_settled && first_settled && mock_keys_settled {
                 break;
             }
@@ -727,7 +807,7 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         }
     })
     .await
-    .expect("request-count key rotation should settle without waiting for key expiry");
+    .expect("explicit settlement should finish without waiting for key expiry");
 
     assert_eq!(first.client_request_id, second.client_request_id);
     if live_openrouter {
@@ -750,19 +830,18 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             second.payload.as_ref().unwrap()["choices"][0]["message"]["content"],
             "answer: private prompt two"
         );
+        let prompts = openrouter_state.prompts.lock().unwrap().clone();
+        let mut parallel_prompts = prompts[..2].to_vec();
+        parallel_prompts.sort();
         assert_eq!(
-            openrouter_state.prompts.lock().unwrap().as_slice(),
-            [
-                "private prompt one",
-                "private prompt two",
-                "stream prompt",
-                "ollama stream prompt",
-            ]
+            parallel_prompts,
+            ["private prompt one", "private prompt two"]
         );
+        assert_eq!(&prompts[2..], ["stream prompt", "ollama stream prompt"]);
         assert_eq!(*openrouter_state.inference_attempts.lock().unwrap(), 5);
-        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 2);
+        assert_eq!(openrouter_state.create_bodies.lock().unwrap().len(), 1);
         for create_body in openrouter_state.create_bodies.lock().unwrap().iter() {
-            assert_eq!(create_body["limit"], 0.001);
+            assert_eq!(create_body["limit"], 0.005);
             assert_eq!(create_body["include_byok_in_limit"], true);
             assert!(create_body["expires_at"].as_str().unwrap().ends_with('Z'));
         }
@@ -790,7 +869,6 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
             .status,
         zkapi_types::NullifierStatus::Finalized
     );
-    let expected_lease_charge = zkapi_serverd::pricing::usd_to_credits(2.0 * 0.000006);
     let expected_total_charge = zkapi_serverd::pricing::usd_to_credits(4.0 * 0.000006);
     let recovered_balance = service
         .status()
@@ -803,13 +881,13 @@ async fn bounded_lease_rotates_after_the_configured_request_count() {
         assert!(recovered_balance < deposit);
     } else {
         assert_eq!(recovered_balance, deposit - expected_total_charge);
-        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 2);
+        assert_eq!(*openrouter_state.deletes.lock().unwrap(), 1);
     }
     let transcript = store.lookup_by_client_id(&first.client_request_id).unwrap();
     if live_openrouter {
         assert!(transcript.charge_applied.is_some_and(|charge| charge > 0));
     } else {
-        assert_eq!(transcript.charge_applied, Some(expected_lease_charge));
+        assert_eq!(transcript.charge_applied, Some(expected_total_charge));
     }
     assert!(!transcript
         .response_payload
@@ -862,6 +940,7 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
     let contract = Felt252::from_u64(0x0a0a);
     let deposit = 10_000u128;
     let request_cap = 1_000u128;
+    let lease_cap = 5_000u128;
     let setup_directory = setup_directory();
     let expiry = 4_000_000_000u64;
 
@@ -875,8 +954,8 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         server_url: "http://127.0.0.1:1".to_string(),
         state_dir: wallet_directory.to_string_lossy().to_string(),
@@ -974,8 +1053,8 @@ async fn oa_org_lease_is_verified_before_prompt_goes_to_openrouter() {
         protocol_version: 2,
         chain_id: 1,
         contract_address: contract,
-        request_charge_cap: request_cap,
-        policy_charge_cap: request_cap,
+        request_charge_cap: lease_cap,
+        policy_charge_cap: lease_cap,
         policy_enabled: false,
         protocol_server_url: protocol_server_url.clone(),
         indexer_url: indexer_url.clone(),

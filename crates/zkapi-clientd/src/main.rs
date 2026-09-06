@@ -5,9 +5,7 @@
 //! [`AuthService`], and serves the HTTP API on the configured address.
 
 use clap::{Parser, ValueEnum};
-use zkapi_clientd::{
-    run, AuthConfig, AuthService, ModelDescriptor, RequestMode, DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
-};
+use zkapi_clientd::{run, AuthConfig, AuthService, ModelDescriptor, RequestMode};
 use zkapi_types::wire::CurvePointWire;
 use zkapi_types::Felt252;
 
@@ -48,8 +46,9 @@ struct Args {
     demo_rpc_url: Option<String>,
     #[arg(long)]
     demo_billing_token_address: Option<String>,
-    #[arg(long)]
-    demo_private_key: Option<String>,
+    /// Advertise the configured billing token as a faucet-enabled test token.
+    #[arg(long, default_value_t = false)]
+    demo_mint_enabled: bool,
     #[arg(long)]
     demo_note_ttl_seconds: Option<u64>,
     /// JSON file containing an array of on-chain-verified epoch root records.
@@ -84,14 +83,6 @@ struct Args {
     /// Require verifier-backed OA-org keys and reject direct/legacy leases.
     #[arg(long, env = "ZKAPI_REQUIRE_OA_ORG_KEY_SOURCE", default_value_t = false)]
     require_oa_org_key_source: bool,
-    /// Maximum local LLM requests sent through one ephemeral OpenRouter key.
-    #[arg(
-        long,
-        env = "ZKAPI_OPENROUTER_REQUESTS_PER_KEY",
-        default_value_t = DEFAULT_OPENROUTER_REQUESTS_PER_KEY,
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    openrouter_requests_per_key: u32,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -124,9 +115,10 @@ async fn main() -> anyhow::Result<()> {
         listen_addr: args.listen.clone(),
         state_dir: args.state_dir,
         models: args.models.into_iter().map(ModelDescriptor::new).collect(),
+        suggested_deposit_amount: args.request_charge_cap.saturating_mul(2),
         demo_rpc_url: args.demo_rpc_url,
         demo_billing_token_address: args.demo_billing_token_address,
-        demo_private_key: args.demo_private_key,
+        demo_mint_enabled: args.demo_mint_enabled,
         demo_note_ttl_seconds: args.demo_note_ttl_seconds,
         proof_mode: "groth16_bn254".to_string(),
         cairo_dir: String::new(),
@@ -165,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
         oa_verifier_url: args.oa_verifier_url,
         openrouter_inference_base: args.openrouter_inference_base,
         require_oa_org_key_source: args.require_oa_org_key_source,
-        openrouter_requests_per_key: args.openrouter_requests_per_key,
     })?;
 
     service.ensure_request_mode_available().await?;

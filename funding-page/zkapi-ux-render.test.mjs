@@ -1,0 +1,1234 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import test from 'node:test';
+
+// ZkapiStateExperience imports the browser client singleton even though the
+// panel renderer itself is pure. Supply the smallest browser shell needed to
+// import it so these tests exercise rendered markup rather than source text.
+const storage = {
+    getItem() { return null; },
+    setItem() {},
+    removeItem() {}
+};
+globalThis.localStorage = storage;
+globalThis.sessionStorage = storage;
+globalThis.window = globalThis;
+globalThis.location = { hostname: 'localhost', href: 'http://localhost/funding/' };
+globalThis.window.location = globalThis.location;
+globalThis.window.addEventListener = () => {};
+globalThis.window.dispatchEvent = () => {};
+globalThis.document = {
+    documentElement: { dataset: {} },
+    createElement() {
+        let textContent = '';
+        return {
+            set textContent(value) { textContent = String(value ?? ''); },
+            get textContent() { return textContent; },
+            get innerHTML() {
+                return textContent
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;')
+                    .replaceAll('"', '&quot;')
+                    .replaceAll("'", '&#39;');
+            }
+        };
+    }
+};
+
+// MessageTemplates loads the preference facade at module evaluation time.
+// Give it a tiny successful IndexedDB shell so this DOM-rendering test remains
+// deterministic and does not wait for the production database timeout.
+const settings = new Map();
+const request = (result) => {
+    const value = {};
+    queueMicrotask(() => {
+        value.result = typeof result === 'function' ? result() : result;
+        value.onsuccess?.({ target: value });
+    });
+    return value;
+};
+const settingsStore = {
+    get(key) { return request(() => settings.has(key) ? { key, value: settings.get(key) } : undefined); },
+    put(entry) { return request(() => { settings.set(entry.key, entry.value); return entry.key; }); },
+    delete(key) { return request(() => settings.delete(key)); }
+};
+const fakeDb = {
+    version: 4,
+    close() {},
+    transaction() { return { objectStore: () => settingsStore }; }
+};
+globalThis.indexedDB = {
+    open() { return request(fakeDb); }
+};
+globalThis.zkapiWallet = {
+    ABI: {},
+    abiWord() {},
+    addressWord() {},
+    callData() {},
+    encodeDeposit() {},
+    encodeFinalizeEscape() {},
+    encodeWithdrawal() {},
+    escapePeriodBadge() {},
+    escapePeriodLabel() {},
+    escapePeriodPhrase() {},
+    formatTokenAmount() {},
+    parseNoteDeposited() {},
+    parseTokenAmount() {},
+    parseWithdrawalReceipt() {}
+};
+
+const {
+    renderZkapiComposerStatus,
+    renderZkapiPanelExperience
+} = await import('./components/ZkapiStateExperience.js');
+const { createVanillaUiInterface } = await import('../oa-chat/chat/ui/appInterface.js');
+const { default: Sidebar } = await import('../oa-chat/chat/components/Sidebar.js');
+const { default: RightPanel } = await import('./components/RightPanel.js');
+const { default: AccountModal } = await import('./components/AccountModal.js');
+const { default: WelcomePanel } = await import('./components/WelcomePanel.js');
+const { default: zkapiClient, ZkapiClient } = await import('./services/zkapiClient.js');
+const {
+    buildMessageHTML,
+    buildTypingIndicator,
+    configureMessageTemplateServices
+} = await import('../oa-chat/chat/components/MessageTemplates.js');
+const { processMessagesForApi } = await import('../oa-chat/chat/domain/messageContent.js');
+const { createZkapiUi } = await import('./ui/createZkapiUi.js');
+configureMessageTemplateServices({ presentation: createZkapiUi({}).presentation });
+
+test('right-panel runtime completion advances once without clock-driven remounts', () => {
+    let transition = { phase: 'settling', sessionId: 'old-chat', message: 'Closing previous chat' };
+    const panel = Object.create(RightPanel.prototype);
+    panel.app = { integration: { getTransition: () => transition } };
+    const statuses = [];
+    panel.renderTopSectionOnly = () => statuses.push(panel.getMissingApiKeyStatus());
+    panel.onRuntimePresentationChange();
+    assert.match(statuses[0].label, /Closing previous chat key/);
+    transition = { ...transition, updatedAt: Date.now() + 1000 };
+    panel.onRuntimePresentationChange();
+    assert.equal(statuses.length, 1, 'clock-only updates must preserve open panel disclosures');
+    transition = { phase: 'ready', sessionId: 'old-chat', message: 'Previous chat settled' };
+    panel.onRuntimePresentationChange();
+    assert.equal(statuses.length, 2, 'completion must update the panel without a later wallet event');
+    assert.doesNotMatch(statuses[1].label, /Closing/);
+    transition = { phase: 'error', sessionId: 'old-chat', message: 'Try again' };
+    panel.onRuntimePresentationChange();
+    assert.equal(statuses.length, 3);
+    assert.equal(statuses[2].badge, 'Action needed');
+});
+
+function lowTextState(proposal, overrides = {}) {
+    const { primary: primaryOverrides = {}, ...stateOverrides } = overrides;
+    const primary = {
+        phase: 'queued',
+        tone: 'working',
+        title: 'Message queued',
+        detail: 'Accepted. Waiting for the previous private chat to finish.',
+        compact: 'Message queued',
+        busy: true,
+        blocksSend: true,
+        ...primaryOverrides
+    };
+    return {
+        proposal,
+        showComposer: true,
+        primary,
+        panelPrimary: primary,
+        activities: [],
+        runningActivities: [],
+        journey: [],
+        ...stateOverrides
+    };
+}
+
+function composerElement() {
+    const attributes = new Map();
+    let innerHTML = '';
+    let innerHTMLWrites = 0;
+    return {
+        className: '',
+        dataset: {},
+        set innerHTML(value) {
+            innerHTML = String(value);
+            innerHTMLWrites += 1;
+        },
+        get innerHTML() {
+            return innerHTML;
+        },
+        get innerHTMLWrites() {
+            return innerHTMLWrites;
+        },
+        setAttribute(name, value) {
+            attributes.set(name, String(value));
+        },
+        getAttribute(name) {
+            return attributes.get(name) ?? null;
+        },
+        removeAttribute(name) {
+            attributes.delete(name);
+        },
+        querySelector() {
+            return { addEventListener() {} };
+        }
+    };
+}
+
+test('low-text proposal panels render compact summaries with detail collapsed', () => {
+    for (const proposal of ['receipt', 'relay', 'ambient', 'capsule']) {
+        const html = renderZkapiPanelExperience(lowTextState(proposal));
+        const summary = html.match(/<summary>([\s\S]*?)<\/summary>/)?.[1] || '';
+
+        assert.match(html, /<details\b/);
+        assert.doesNotMatch(html, /<details\b[^>]*\sopen(?:\s|>)/);
+        assert.match(summary, />Queued</);
+        assert.doesNotMatch(summary, /Message queued/);
+        assert.doesNotMatch(summary, /Waiting for the previous private chat/);
+        assert.match(html, /<strong>Message queued<\/strong>/);
+        assert.match(html, /Waiting for the previous private chat/);
+    }
+});
+
+test('low-text panel escapes operation copy and stays hidden when idle', () => {
+    const unsafe = lowTextState('receipt', {
+        primary: {
+            phase: 'error',
+            tone: 'error',
+            title: '<script>bad()</script>',
+            detail: '<img src=x onerror=bad()>',
+            compact: 'Unsafe',
+            busy: false,
+            blocksSend: true
+        }
+    });
+    const html = renderZkapiPanelExperience(unsafe);
+    assert.doesNotMatch(html, /<script>|<img/);
+    assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+    assert.match(html, /&lt;img src=x onerror=bad\(\)&gt;/);
+
+    const idle = lowTextState('receipt', {
+        showComposer: false,
+        primary: {
+            phase: 'ready',
+            tone: 'success',
+            title: 'Ready',
+            detail: 'Ready.',
+            compact: 'Ready',
+            busy: false,
+            blocksSend: false
+        }
+    });
+    assert.equal(renderZkapiPanelExperience(idle), '');
+});
+
+test('passive unfunded state stays hidden even when the send gate requests composer visibility', () => {
+    for (const proposal of ['receipt', 'relay', 'ambient', 'capsule']) {
+        const state = lowTextState(proposal, {
+            showComposer: true,
+            primary: {
+                phase: 'unfunded',
+                tone: 'neutral',
+                title: 'Add funds to start chatting',
+                detail: 'Use MetaMask once.',
+                compact: 'Add funds',
+                busy: false,
+                blocksSend: true
+            }
+        });
+        const element = composerElement();
+
+        assert.equal(renderZkapiPanelExperience(state), '');
+        renderZkapiComposerStatus(element, null, state);
+        assert.equal(element.className, 'hidden');
+        assert.equal(element.innerHTML, '');
+        assert.equal(element.dataset.zkapiStateSignature, undefined);
+    }
+});
+
+test('passive state clears the visual signature so the same active phase renders again', () => {
+    const active = lowTextState('relay');
+    const passive = lowTextState('relay', {
+        showComposer: true,
+        primary: {
+            phase: 'ready',
+            tone: 'success',
+            title: 'Ready to chat',
+            detail: 'A private key will be created when you send.',
+            compact: 'Ready',
+            busy: false,
+            blocksSend: false
+        }
+    });
+    const element = composerElement();
+
+    renderZkapiComposerStatus(element, null, active);
+    const activeSignature = element.dataset.zkapiStateSignature;
+    assert.match(element.className, /zkapi-composer-state--relay/);
+    assert.match(element.innerHTML, />Queued</);
+
+    renderZkapiComposerStatus(element, null, passive);
+    assert.equal(element.className, 'hidden');
+    assert.equal(element.dataset.zkapiStateSignature, undefined);
+
+    renderZkapiComposerStatus(element, null, active);
+    assert.equal(element.dataset.zkapiStateSignature, activeSignature);
+    assert.match(element.className, /zkapi-composer-state--relay/);
+    assert.match(element.innerHTML, />Queued</);
+});
+
+test('unchanged clock renders retain composer descendants for every UX proposal', () => {
+    for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
+        const state = lowTextState(proposal, {
+            journey: [
+                { id: 'balance', label: 'Check balance', state: 'complete' },
+                { id: 'key', label: 'Create private key', state: 'active' }
+            ]
+        });
+        const element = composerElement();
+
+        renderZkapiComposerStatus(element, null, state);
+        const writesAfterFirstRender = element.innerHTMLWrites;
+        renderZkapiComposerStatus(element, null, state);
+
+        assert.equal(
+            element.innerHTMLWrites,
+            writesAfterFirstRender,
+            `${proposal} must not replace identical animated descendants`
+        );
+    }
+});
+
+test('composer memoization still renders changed labels and guided journey steps', () => {
+    const element = composerElement();
+    const activityState = lowTextState('receipt', {
+        primary: { phase: 'requesting', activity: { kind: 'settlement' } }
+    });
+    renderZkapiComposerStatus(element, null, activityState);
+    const firstWrites = element.innerHTMLWrites;
+    renderZkapiComposerStatus(element, null, lowTextState('receipt', {
+        primary: { phase: 'requesting', activity: { kind: 'access' } }
+    }));
+    assert.equal(element.innerHTMLWrites, firstWrites + 1);
+    assert.match(element.innerHTML, />Securing</);
+
+    const guided = composerElement();
+    const firstJourney = lowTextState('guided', {
+        journey: [{ id: 'balance', label: 'Check balance', state: 'active' }]
+    });
+    renderZkapiComposerStatus(guided, null, firstJourney);
+    const guidedWrites = guided.innerHTMLWrites;
+    renderZkapiComposerStatus(guided, null, {
+        ...firstJourney,
+        journey: [{ id: 'balance', label: 'Check balance', state: 'complete' }]
+    });
+    assert.equal(guided.innerHTMLWrites, guidedWrites + 1);
+    assert.match(guided.innerHTML, /data-state="complete"/);
+});
+
+test('same-phase lease retries refresh every proposal without adding low-text clutter', () => {
+    const retryMessage = 'Temporary-key service is busy. Retrying in 2 seconds…';
+    for (const proposal of ['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']) {
+        const activity = {
+            id: `access-${proposal}`,
+            kind: 'access',
+            phase: 'requesting',
+            status: 'running',
+            title: 'Starting private chat',
+            message: retryMessage,
+            blocksSend: true,
+            startedAt: 1,
+            updatedAt: 2
+        };
+        const initial = lowTextState(proposal, {
+            primary: {
+                phase: 'requesting',
+                title: activity.title,
+                detail: 'Creating a temporary key for this chat…',
+                compact: activity.title,
+                activity
+            },
+            activities: [{ ...activity, message: 'Creating a temporary key for this chat…' }],
+            runningActivities: [activity]
+        });
+        const retrying = lowTextState(proposal, {
+            primary: {
+                phase: 'requesting',
+                title: activity.title,
+                detail: retryMessage,
+                compact: activity.title,
+                activity
+            },
+            activities: [activity],
+            runningActivities: [activity]
+        });
+        const element = composerElement();
+
+        renderZkapiComposerStatus(element, null, initial);
+        const before = element.innerHTML;
+        renderZkapiComposerStatus(element, null, retrying);
+
+        assert.notEqual(element.className, 'hidden', `${proposal} must retain an active retry signal`);
+        assert.notEqual(element.innerHTML, before, `${proposal} must not memoize stale retry copy`);
+        assert.match(element.innerHTML, /Temporary-key service is busy/);
+        assert.equal(element.getAttribute('aria-busy'), 'true');
+        assert.match(renderZkapiPanelExperience(retrying), /Temporary-key service is busy/);
+        if (['receipt', 'relay'].includes(proposal)) {
+            assert.match(element.innerHTML, />Retrying</);
+        }
+        if (['receipt', 'relay', 'ambient', 'capsule'].includes(proposal)) {
+            assert.match(element.innerHTML, /role="status"/);
+            assert.match(element.innerHTML, /aria-live="polite"/);
+        }
+    }
+});
+
+test('live UI facades render New Chat settlement state in sidebar and right panel', () => {
+    const oldChat = { id: 'old-chat', title: 'Old chat' };
+    const app = {
+        state: {
+            currentSessionId: 'new-chat',
+            sessions: [oldChat],
+            sessionsById: new Map([[oldChat.id, oldChat]])
+        },
+        elements: {},
+        newChatSettlementState: null
+    };
+    const productOptions = createZkapiUi({
+        getTransition: () => app.newChatSettlementState,
+        getSessionStatus: () => ({
+            label: app.newChatSettlementState?.phase === 'ready' ? 'Private key settled' : 'Closing private key',
+            tone: app.newChatSettlementState?.phase === 'ready' ? 'success' : 'working'
+        })
+    });
+    const ui = createVanillaUiInterface(app, { chatDBImpl: {}, ...productOptions });
+    const sidebar = Object.create(Sidebar.prototype);
+    sidebar.app = ui.sidebar;
+    sidebar.deletingSessionIds = new Set();
+    const panel = Object.create(RightPanel.prototype);
+    panel.app = ui.componentApp;
+
+    app.newChatSettlementState = {
+        phase: 'settling',
+        sessionId: oldChat.id,
+        message: 'Closing in the background.'
+    };
+
+    assert.equal(ui.sidebar.newChatSettlementState, undefined, 'product state stays behind explicit callbacks');
+    assert.equal(ui.componentApp.integration.getTransition(), app.newChatSettlementState);
+    assert.match(sidebar.buildSessionHTML(oldChat), /Closing private key/);
+    assert.deepEqual(panel.getMissingApiKeyStatus(), {
+        label: 'Closing previous chat key',
+        badge: 'Settling',
+        badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-500\/15 dark:text-amber-200'
+    });
+
+    app.newChatSettlementState = {
+        phase: 'ready',
+        sessionId: oldChat.id,
+        message: 'Finished.'
+    };
+    assert.match(sidebar.buildSessionHTML(oldChat), /Private key settled/);
+    assert.equal(panel.getMissingApiKeyStatus().badge, 'Ready');
+});
+
+test('time-only ticks use a separate channel from semantic client changes', () => {
+    let clockEvents = 0;
+    let semanticEvents = 0;
+    let globalSemanticEvents = 0;
+    const originalWindowDispatch = globalThis.window.dispatchEvent;
+    globalThis.window.dispatchEvent = () => { globalSemanticEvents += 1; };
+    const unsubscribeClock = zkapiClient.subscribeClock(detail => {
+        clockEvents += 1;
+        assert.equal(typeof detail.now, 'number');
+    });
+    const unsubscribeSemantic = zkapiClient.subscribe(() => { semanticEvents += 1; });
+
+    try {
+        zkapiClient.emitClock();
+        assert.equal(clockEvents, 1);
+        assert.equal(semanticEvents, 0);
+        assert.equal(globalSemanticEvents, 0);
+
+        zkapiClient.emitChange('runtime');
+        assert.equal(clockEvents, 1);
+        assert.equal(semanticEvents, 1);
+        assert.equal(globalSemanticEvents, 1);
+    } finally {
+        unsubscribeClock();
+        unsubscribeSemantic();
+        globalThis.window.dispatchEvent = originalWindowDispatch;
+    }
+});
+
+test('unchanged quiet refreshes do not fan out semantic UI events', async () => {
+    const original = {
+        browserMode: zkapiClient.browserMode,
+        config: zkapiClient.config,
+        wallet: zkapiClient.wallet,
+        withdrawal: zkapiClient.withdrawal,
+        lastError: zkapiClient.lastError,
+        apiJson: zkapiClient.apiJson
+    };
+    zkapiClient.browserMode = false;
+    zkapiClient.config = { version: 1 };
+    zkapiClient.wallet = { note: null };
+    zkapiClient.withdrawal = null;
+    zkapiClient.lastError = null;
+    zkapiClient.apiJson = async path => path === '/zkapi/v1/config'
+        ? { version: 1 }
+        : { note: null };
+    let semanticEvents = 0;
+    const unsubscribe = zkapiClient.subscribe(() => { semanticEvents += 1; });
+
+    try {
+        await zkapiClient.refresh({ quiet: true });
+        assert.equal(semanticEvents, 0);
+
+        zkapiClient.apiJson = async path => path === '/zkapi/v1/config'
+            ? { version: 2 }
+            : { note: null };
+        await zkapiClient.refresh({ quiet: true });
+        assert.equal(semanticEvents, 1, 'a real runtime change must still notify subscribers');
+    } finally {
+        unsubscribe();
+        zkapiClient.browserMode = original.browserMode;
+        zkapiClient.config = original.config;
+        zkapiClient.wallet = original.wallet;
+        zkapiClient.withdrawal = original.withdrawal;
+        zkapiClient.lastError = original.lastError;
+        zkapiClient.apiJson = original.apiJson;
+    }
+});
+
+test('automatic daemon probe hides its expected failure from browser-wallet UI', async () => {
+    const client = new ZkapiClient();
+    client.apiJson = async () => {
+        const error = new Error('HTTP 404');
+        error.status = 404;
+        throw error;
+    };
+    const events = [];
+    const unsubscribe = client.subscribe((snapshot, detail) => {
+        events.push({ reason: detail.reason, error: snapshot.lastError });
+    });
+
+    try {
+        await assert.rejects(client.refresh({ speculative: true }), /HTTP 404/);
+        assert.equal(client.lastError, null);
+        assert.equal(client.loading, false);
+        assert.deepEqual(events, []);
+    } finally {
+        unsubscribe();
+    }
+});
+
+test('startup probes daemon by default but preserves explicit transport modes', async () => {
+    const originalSearch = globalThis.window.location.search;
+    const originalSetInterval = globalThis.window.setInterval;
+    const originalDocumentAddEventListener = globalThis.document.addEventListener;
+    globalThis.window.setInterval = () => 1;
+    globalThis.document.addEventListener = () => {};
+
+    const makeClient = () => {
+        const client = new ZkapiClient();
+        client.attachWalletEvents = () => {};
+        client.reconcileBrowserWithdrawalsOnLoad = async () => true;
+        return client;
+    };
+
+    try {
+        globalThis.window.location.search = '';
+        const automatic = makeClient();
+        const automaticRefreshes = [];
+        let automaticBrowserEnables = 0;
+        automatic.refresh = async options => {
+            automaticRefreshes.push(options);
+            if (automaticRefreshes.length === 1) throw new Error('HTTP 404');
+            return automatic.snapshot();
+        };
+        automatic.enableBrowserMode = async () => {
+            automaticBrowserEnables += 1;
+            automatic.browserMode = true;
+        };
+        await automatic.init();
+        assert.deepEqual(automaticRefreshes, [{ speculative: true }, undefined]);
+        assert.equal(automaticBrowserEnables, 1);
+
+        globalThis.window.location.search = '?zkapiMode=daemon';
+        const daemon = makeClient();
+        let daemonBrowserEnables = 0;
+        daemon.refresh = async options => {
+            assert.deepEqual(options, { speculative: false });
+            throw new Error('daemon unavailable');
+        };
+        daemon.enableBrowserMode = async () => { daemonBrowserEnables += 1; };
+        await assert.rejects(daemon.init(), /daemon unavailable/);
+        assert.equal(daemonBrowserEnables, 0);
+
+        globalThis.window.location.search = '?zkapiMode=browser';
+        const browser = makeClient();
+        let browserEnables = 0;
+        const browserRefreshes = [];
+        browser.enableBrowserMode = async () => {
+            browserEnables += 1;
+            browser.browserMode = true;
+        };
+        browser.refresh = async options => {
+            browserRefreshes.push(options);
+            return browser.snapshot();
+        };
+        await browser.init();
+        assert.equal(browserEnables, 1);
+        assert.deepEqual(browserRefreshes, [undefined]);
+    } finally {
+        globalThis.window.location.search = originalSearch;
+        globalThis.window.setInterval = originalSetInterval;
+        globalThis.document.addEventListener = originalDocumentAddEventListener;
+    }
+});
+
+test('right-panel clock ticks update countdown text without replacing interactive UI', () => {
+    const originalDocument = globalThis.document;
+    let loads = 0;
+    let expiryText = '';
+    globalThis.document = {
+        querySelector(selector) {
+            if (selector.includes('[data-zkapi-note-expiry]')) {
+                return {
+                    set textContent(value) { expiryText = value; },
+                    get textContent() { return expiryText; }
+                };
+            }
+            return null;
+        }
+    };
+
+    const panel = Object.create(RightPanel.prototype);
+    panel.loadSessionData = () => { loads += 1; };
+    try {
+        panel.handleZkapiClock();
+        assert.equal(loads, 0, 'a clock tick must not rebuild the panel');
+        panel.handleZkapiChange({ reason: 'clock' });
+        assert.equal(loads, 0, 'a legacy clock event must remain non-rendering');
+        panel.handleZkapiChange({ reason: 'note' });
+        assert.equal(loads, 1, 'a real billing update should still rebuild the panel');
+    } finally {
+        globalThis.document = originalDocument;
+    }
+});
+
+test('account clock patches preserve the modal and enable escape finalization at its deadline', () => {
+    const originalWallet = zkapiClient.wallet;
+    const originalConfig = zkapiClient.config;
+    const originalWithdrawal = zkapiClient.withdrawal;
+    const originalFormatExpiry = zkapiClient.formatExpiry;
+    const originalActiveElement = globalThis.document.activeElement;
+    const countdown = { textContent: '' };
+    const finalizeButton = { textContent: '', disabled: true };
+    const noteExpiry = { textContent: '' };
+    const leaseExpiry = { textContent: '' };
+    const withdrawalCheckbox = { checked: true };
+    let overlayWrites = 0;
+    const overlay = {
+        scrollTop: 137,
+        set innerHTML(_value) { overlayWrites += 1; },
+        querySelector(selector) {
+            if (selector === '[data-zkapi-escape-countdown]') return countdown;
+            if (selector === '#zkapi-finalize-btn') return finalizeButton;
+            if (selector === '[data-zkapi-balance-expiry]') return noteExpiry;
+            if (selector === '[data-zkapi-active-lease-expiry]') return leaseExpiry;
+            if (selector === '#zkapi-withdraw-confirm') return withdrawalCheckbox;
+            return null;
+        }
+    };
+    const deadline = 2_000_000_000;
+    zkapiClient.wallet = { note: { expiry_ts: deadline + 10_000 } };
+    zkapiClient.config = { active_lease: { expires_at: deadline } };
+    zkapiClient.withdrawal = { phase: 'pending', challengeDeadline: deadline };
+    let expiryLabel = '1m';
+    zkapiClient.formatExpiry = () => expiryLabel;
+    globalThis.document.activeElement = finalizeButton;
+
+    const modal = Object.create(AccountModal.prototype);
+    modal.isOpen = true;
+    modal.overlay = overlay;
+    modal.view = 'withdraw';
+    modal.busy = false;
+    try {
+        modal.handleZkapiClock(deadline * 1000 - 1);
+        assert.equal(finalizeButton.disabled, true);
+        assert.equal(finalizeButton.textContent, 'Finalize in 1m');
+        assert.equal(countdown.textContent, 'Finalize in 1m.');
+        assert.equal(globalThis.document.activeElement, finalizeButton);
+        assert.equal(withdrawalCheckbox.checked, true);
+        assert.equal(overlay.scrollTop, 137);
+        assert.equal(overlayWrites, 0, 'the dialog subtree must remain mounted');
+
+        modal.handleZkapiClock(deadline * 1000);
+        assert.equal(finalizeButton.disabled, false);
+        assert.equal(finalizeButton.textContent, 'Finalize in MetaMask');
+        assert.equal(countdown.textContent, 'The safety window is complete.');
+        assert.equal(globalThis.document.activeElement, finalizeButton);
+        assert.equal(withdrawalCheckbox.checked, true);
+        assert.equal(overlay.scrollTop, 137);
+        assert.equal(overlayWrites, 0, 'crossing the deadline must not rebuild the dialog');
+
+        modal.view = 'balance';
+        modal.handleZkapiClock(deadline * 1000);
+        assert.equal(noteExpiry.textContent, 'expires in 1m');
+        assert.equal(leaseExpiry.textContent, '1m');
+        expiryLabel = 'expired';
+        modal.handleZkapiClock(deadline * 1000 + 1);
+        assert.equal(leaseExpiry.textContent, 'expired');
+        assert.equal(overlayWrites, 0);
+    } finally {
+        zkapiClient.wallet = originalWallet;
+        zkapiClient.config = originalConfig;
+        zkapiClient.withdrawal = originalWithdrawal;
+        zkapiClient.formatExpiry = originalFormatExpiry;
+        globalThis.document.activeElement = originalActiveElement;
+    }
+});
+
+test('a canceled custom deposit resumes from its durable amount after modal state changes', () => {
+    const originalWallet = zkapiClient.wallet;
+    const originalConfig = zkapiClient.config;
+    const originalFormatBillingAmount = zkapiClient.formatBillingAmount;
+    zkapiClient.wallet = { has_note: false, note: null };
+    zkapiClient.config = {
+        pending_deposit: {
+            phase: 'prepared',
+            amount: 5_000_000,
+            next_note_id: 7
+        },
+        funding: {
+            demo_mint_enabled: false,
+            billing_token_symbol: 'USDC'
+        }
+    };
+    zkapiClient.formatBillingAmount = amount => amount === 5_000_000 ? '5' : 'wrong';
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    modal.depositAmount = '99';
+    modal.renderWithdrawalStatusLink = () => '';
+
+    try {
+        const html = modal.renderBalance();
+        assert.match(html, /Private deposit ready to resume/);
+        assert.match(html, /value="5" readonly/);
+        assert.doesNotMatch(html, /value="99"/);
+        assert.match(html, /Resume deposit with MetaMask/);
+    } finally {
+        zkapiClient.wallet = originalWallet;
+        zkapiClient.config = originalConfig;
+        zkapiClient.formatBillingAmount = originalFormatBillingAmount;
+    }
+});
+
+test('a returned withdrawal is a success while network finality runs without user action', () => {
+    const original = {
+        wallet: zkapiClient.wallet,
+        config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals
+    };
+    const hash = '0x34e298c17052af34acbbd1f1fd0e910f023af7938c5ff1656dd4bd669140ae48';
+    const returned = {
+        recordId: 'returned-mainnet',
+        mode: 'mutual',
+        phase: 'closed_unconfirmed',
+        chainStatus: 'closed',
+        finalBalance: 1_972_567,
+        destination: '0x68674ae1f6188391da867255d9ae0e099fc354c5',
+        transactionHash: hash
+    };
+    zkapiClient.wallet = { has_note: false, note: null };
+    zkapiClient.config = { funding: { chain_id: 1 } };
+    zkapiClient.withdrawals = [returned];
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    try {
+        const html = modal.renderWithdrawalRecords();
+        assert.equal(modal.withdrawalRecordLabel(returned), 'Returned');
+        assert.match(html, /returned to/);
+        assert.match(html, /Funds are in your wallet/);
+        assert.match(html, /no action is needed/);
+        assert.match(html, new RegExp(`href="https://etherscan.io/tx/${hash}"`));
+        assert.match(html, /Add a new private balance/);
+        assert.doesNotMatch(html, /returning to|finalizing|Check status|Check on-chain status|data-finalize-withdrawal|Replace transaction/);
+        assert.doesNotMatch(modal.renderWithdrawalStatusLink(), /withdrawals? to check/);
+
+        const pendingEscape = {
+            ...returned, recordId: 'pending-escape', mode: 'escape', phase: 'pending',
+            chainStatus: 'pending_withdrawal', challengeDeadline: Math.floor(Date.now() / 1000) - 1
+        };
+        zkapiClient.withdrawals = [returned, pendingEscape];
+        const mixedHtml = modal.renderWithdrawalRecords();
+        assert.match(mixedHtml, /data-finalize-withdrawal="pending-escape"/);
+        assert.doesNotMatch(mixedHtml, /data-finalize-withdrawal="returned-mainnet"/);
+        assert.match(modal.renderWithdrawalStatusLink(), /1 withdrawal to check/);
+
+        zkapiClient.config.funding.chain_id = 11155111;
+        assert.equal(modal.withdrawalTransactionUrl(returned), `https://sepolia.etherscan.io/tx/${hash}`);
+        assert.equal(modal.withdrawalTransactionUrl({ ...returned, transactionHash: 'javascript:alert(1)' }), null);
+        assert.equal(modal.withdrawalTransactionUrl({ ...returned, mode: 'escape' }), null,
+            'an escape-start transaction must not be linked as proof of payout');
+        zkapiClient.config.funding.chain_id = 999;
+        assert.equal(modal.withdrawalTransactionUrl(returned), null);
+    } finally {
+        Object.assign(zkapiClient, original);
+    }
+});
+
+test('mined withdrawals with a temporary status outage get neutral feedback instead of a failed-payment toast', async t => {
+    const modal = Object.create(AccountModal.prototype);
+    const toasts = [];
+    modal.app = { showToast: (...args) => toasts.push(args) };
+    modal.busy = false;
+    modal.render = () => {};
+    modal.setStatus = (message, isError) => { modal.status = message; modal.statusError = isError; };
+    let completed;
+    t.mock.method(zkapiClient, 'beginActivity', () => 'mined-activity');
+    t.mock.method(zkapiClient, 'completeActivity', (id, detail) => { completed = { id, ...detail }; });
+    t.mock.method(zkapiClient, 'failActivity', () => assert.fail('a mined transaction is not a failed payment'));
+    const error = Object.assign(new Error('RPC temporarily unavailable'), {
+        shortMessage: 'Your withdrawal transaction was mined. Its status will be checked automatically; you can close this window.',
+        withdrawalConfirmationPending: true
+    });
+    await modal.run(async () => { throw error; }, { kind: 'withdrawal', title: 'Returning your balance' });
+    assert.equal(modal.busy, false);
+    assert.equal(modal.statusError, false);
+    assert.equal(toasts[0][0], error.shortMessage);
+    assert.equal(toasts[0][1], 'info');
+    assert.equal(completed.title, 'Withdrawal transaction mined');
+    assert.equal(completed.phase, 'mined');
+});
+
+test('a missing withdrawal receipt exposes safe same-nonce replacement', () => {
+    const originalWallet = zkapiClient.wallet;
+    const originalConfig = zkapiClient.config;
+    const originalWithdrawal = zkapiClient.withdrawal;
+    const originalFormatMoney = zkapiClient.formatMoney;
+    zkapiClient.wallet = {
+        has_note: true,
+        note: { note_id: 7, current_balance: 1_000_000 }
+    };
+    zkapiClient.config = {
+        prepared_withdrawal: {
+            phase: 'dropped_or_pending',
+            mode: 'escape',
+            note_id: 7,
+            destination: `0x${'12'.repeat(20)}`,
+            transaction_hash: `0x${'34'.repeat(32)}`,
+            replacement_available: true,
+            clearance_reserved: false
+        }
+    };
+    zkapiClient.withdrawal = null;
+    zkapiClient.formatMoney = () => '$1.00';
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    modal.withdrawMode = 'escape';
+
+    try {
+        const html = modal.renderWithdrawal();
+        assert.match(html, /No receipt was found/);
+        assert.match(html, /Resubmit with original nonce/);
+        assert.match(html, /id="zkapi-sync-withdrawal-btn"/);
+        assert.doesNotMatch(html, /id="zkapi-withdraw-btn"/);
+    } finally {
+        zkapiClient.wallet = originalWallet;
+        zkapiClient.config = originalConfig;
+        zkapiClient.withdrawal = originalWithdrawal;
+        zkapiClient.formatMoney = originalFormatMoney;
+    }
+});
+
+test('welcome success is edge-triggered and retains focus across later state events', () => {
+    const originalDocument = globalThis.document;
+    const originalWallet = zkapiClient.wallet;
+    const focusedChild = { id: 'welcome-continue' };
+    const overlay = {};
+    globalThis.document = {
+        ...originalDocument,
+        activeElement: focusedChild,
+        getElementById(id) { return id === 'welcome-panel' ? overlay : null; }
+    };
+    zkapiClient.wallet = { has_note: true, note: { current_balance: 1 } };
+    const panel = new WelcomePanel({});
+    panel.isOpen = true;
+    panel.step = 'welcome';
+    panel.busy = false;
+    let renders = 0;
+    panel.render = () => { renders += 1; };
+
+    try {
+        zkapiClient.emitClock();
+        assert.equal(renders, 0, 'clock ticks must not reach the welcome renderer');
+        zkapiClient.emitChange('runtime');
+        assert.equal(renders, 1);
+        assert.equal(panel.step, 'success');
+        assert.equal(globalThis.document.activeElement, focusedChild);
+
+        zkapiClient.emitChange('runtime');
+        assert.equal(renders, 1, 'duplicate funded state must retain the existing success DOM');
+        assert.equal(globalThis.document.activeElement, focusedChild);
+    } finally {
+        panel.unsubscribe?.();
+        zkapiClient.wallet = originalWallet;
+        globalThis.document = originalDocument;
+    }
+});
+
+test('right-panel disclosures preserve both open and closed state across real rerenders', () => {
+    const originalDocument = globalThis.document;
+    const basePrototype = Object.getPrototypeOf(RightPanel.prototype);
+    const originalBaseRender = basePrototype.renderTopSectionOnly;
+    const disclosure = (open) => {
+        const listeners = new Map();
+        return {
+            open,
+            addEventListener(type, listener) { listeners.set(type, listener); },
+            toggle(value) {
+                this.open = value;
+                listeners.get('toggle')?.();
+            }
+        };
+    };
+    let current = {
+        experience: disclosure(true),
+        billing: disclosure(true)
+    };
+    let replacement = {
+        experience: disclosure(false),
+        billing: disclosure(false)
+    };
+    let afterBaseRender = false;
+    globalThis.document = {
+        querySelector(selector) {
+            const set = afterBaseRender ? replacement : current;
+            return selector.includes('billing-explainer') ? set.billing : set.experience;
+        }
+    };
+    basePrototype.renderTopSectionOnly = () => { afterBaseRender = true; };
+
+    const panel = Object.create(RightPanel.prototype);
+    try {
+        panel.renderTopSectionOnly();
+        assert.equal(replacement.experience.open, true);
+        assert.equal(replacement.billing.open, true);
+
+        replacement.billing.toggle(false);
+        current = replacement;
+        replacement = {
+            experience: disclosure(false),
+            billing: disclosure(true)
+        };
+        afterBaseRender = false;
+        panel.renderTopSectionOnly();
+        assert.equal(replacement.experience.open, true);
+        assert.equal(replacement.billing.open, false, 'closing the billing disclosure must persist');
+    } finally {
+        basePrototype.renderTopSectionOnly = originalBaseRender;
+        globalThis.document = originalDocument;
+    }
+});
+
+test('user bubbles omit delivery state while assistant rows show precise private-access work', () => {
+    for (const deliveryState of [null, 'queued', 'securing', 'sending', 'sent', 'failed', 'canceled']) {
+        for (const isSessionStreaming of [true, false]) {
+            const userHtml = buildMessageHTML({
+                id: `user-${deliveryState || 'none'}`,
+                sessionId: 'chat-a',
+                role: 'user',
+                content: 'Explain HTTPS',
+                timestamp: 1,
+                deliveryState
+            }, {}, [], '', { isSessionStreaming });
+
+            assert.doesNotMatch(userHtml, /user-delivery|data-delivery-state/);
+            assert.doesNotMatch(userHtml, />\s*(?:Queued|Securing|Sending|Sent|Not sent|Canceled|Retry|Edit)\s*</);
+            assert.match(userHtml, /resend-prompt-btn message-action-btn/);
+            assert.match(userHtml, /edit-prompt-btn message-action-btn/);
+            assert.match(userHtml, /aria-label="Resend prompt"/);
+            assert.match(userHtml, /aria-label="Edit prompt"/);
+        }
+    }
+
+    const proving = buildTypingIndicator(
+        'typing-proving',
+        'OpenAI',
+        'OpenAI: GPT-5.3 Instant',
+        1,
+        'requesting-key',
+        { kind: 'access', phase: 'proving', message: 'Proving this chat is funded…' },
+        'chat-a'
+    );
+    assert.match(proving, /data-pending-session-id="chat-a"/);
+    assert.match(proving, /data-phase="requesting-key"/);
+    assert.match(proving, /data-progress-phase="proving"/);
+    assert.match(proving, /role="status"/);
+    assert.match(proving, /aria-live="polite"/);
+    assert.match(proving, /aria-atomic="true"/);
+    assert.match(proving, /pending-security-icon/);
+    assert.match(proving, />Generating a zero-knowledge funding proof…</);
+    assert.match(proving, /data-step-id="vault" data-state="complete"/);
+    assert.match(proving, /data-step-id="proof" data-state="active" aria-label="Generate funding proof, current step" aria-current="step"/);
+    assert.match(proving, /proof is generated on this device/i);
+
+    window.rememberPendingSecurityTrace({
+        open: true,
+        dataset: { pendingSecurityTraceId: 'chat-a' }
+    });
+    const restoredExpanded = buildTypingIndicator(
+        'typing-restored',
+        'OpenAI',
+        'OpenAI: GPT-5.3 Instant',
+        1,
+        'requesting-key',
+        { kind: 'access', phase: 'requesting' },
+        'chat-a'
+    );
+    assert.match(restoredExpanded, /data-pending-security-trace-id="chat-a"[^>]* open>/);
+    window.rememberPendingSecurityTrace({
+        open: false,
+        dataset: { pendingSecurityTraceId: 'chat-a' }
+    });
+
+    const queued = buildTypingIndicator(
+        'typing-queued',
+        'OpenAI',
+        'OpenAI: GPT-5.3 Instant',
+        1,
+        'preparing-access',
+        { kind: 'settlement', phase: 'usage' },
+        'chat-b'
+    );
+    assert.match(queued, /data-phase="preparing-access"/);
+    assert.match(queued, /data-progress-phase="usage"/);
+    assert.match(queued, />Confirming the previous chat’s usage…</);
+    assert.match(queued, /data-step-id="usage" data-state="active" aria-label="Confirm final usage, current step" aria-current="step"/);
+
+    for (const phase of ['waiting-response', 'stream-open']) {
+        const thinking = buildTypingIndicator(
+            `typing-${phase}`,
+            'OpenAI',
+            'OpenAI: GPT-5.3 Instant',
+            1,
+            phase,
+            { kind: 'access', phase: 'proving' },
+            'chat-c'
+        );
+        assert.match(thinking, /data-phase="waiting-response"/);
+        assert.match(thinking, /data-progress-phase="waiting-response"/);
+        assert.match(thinking, />Thinking</);
+        assert.doesNotMatch(thinking, /Generate funding proof|zero-knowledge proof is exchanged/);
+    }
+
+    const pendingAssistant = buildMessageHTML({
+        id: 'assistant-pending',
+        sessionId: 'chat-a',
+        role: 'assistant',
+        content: '',
+        timestamp: 1,
+        model: 'openai/gpt-5.3-chat',
+        streamingPending: true,
+        streamingPhase: 'requesting-key',
+    }, {
+        processContentWithLatex: value => value,
+        formatTime: () => '00:00:01'
+    }, [], 'openai/gpt-5.3-chat', { isSessionStreaming: true, pendingProgress: { kind: 'access', phase: 'verifying' } });
+    assert.match(pendingAssistant, />Verifying private access with Open Anonymity…</);
+    assert.match(pendingAssistant, /data-step-id="verify" data-state="active"/);
+});
+
+test('assistant pending rows keep verbose announcements clipped with one compact visible status', () => {
+    const cases = [
+        {
+            name: 'private access',
+            phase: 'requesting-key',
+            progress: { kind: 'access', phase: 'proving' },
+            current: 'Generating a zero-knowledge funding proof…',
+            announcement: 'Securing private access. Generating a zero-knowledge funding proof…',
+            securityVisible: true
+        },
+        {
+            name: 'previous-chat settlement',
+            phase: 'preparing-access',
+            progress: { kind: 'settlement', phase: 'usage' },
+            current: 'Confirming the previous chat’s usage…',
+            announcement: 'Finishing the previous private chat. Confirming the previous chat’s usage…',
+            securityVisible: true
+        },
+        {
+            name: 'model wait',
+            phase: 'waiting-response',
+            progress: { kind: 'access', phase: 'Hold stale proof copy out of view' },
+            current: 'Thinking',
+            announcement: 'Message sent. Waiting for the response.',
+            securityVisible: false
+        }
+    ];
+
+    for (const testCase of cases) {
+        const html = buildTypingIndicator(
+            `typing-announcement-${testCase.name.replaceAll(' ', '-')}`,
+            'OpenAI',
+            'OpenAI: GPT-5.6 Sol',
+            1,
+            testCase.phase,
+            testCase.progress,
+            `announcement-${testCase.name}`
+        );
+        const announcement = html.match(/<span class="pending-response-announcement sr-only"([^>]*)>([\s\S]*?)<\/span>/);
+        assert.ok(announcement, `${testCase.name} keeps an assistive live region in the DOM`);
+        assert.match(announcement[1], /role="status"/);
+        assert.match(announcement[1], /aria-live="polite"/);
+        assert.match(announcement[1], /aria-atomic="true"/);
+        assert.doesNotMatch(announcement[1], /(?:aria-hidden|\shidden(?:\s|=|$))/);
+        assert.equal(announcement[2], testCase.announcement);
+
+        const summary = html.match(/<summary class="pending-security-summary"[^>]*>([\s\S]*?)<\/summary>/)?.[1] || '';
+        const simple = html.match(/<div class="pending-response-simple([^\"]*)">([\s\S]*?)<\/div>/);
+        if (testCase.securityVisible) {
+            assert.match(html, /<details class="pending-security-trace"/);
+            assert.doesNotMatch(html, /<details class="pending-security-trace hidden"/);
+            assert.match(simple?.[1] || '', /hidden/);
+            assert.match(summary, new RegExp(`>${testCase.current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<`));
+            assert.doesNotMatch(summary, new RegExp(testCase.announcement.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        } else {
+            assert.match(html, /<details class="pending-security-trace hidden"/);
+            assert.doesNotMatch(simple?.[1] || '', /hidden/);
+            assert.match(simple?.[2] || '', new RegExp(`>${testCase.current}<`));
+            assert.doesNotMatch(html, /Hold stale proof copy out of view/);
+        }
+    }
+
+    const styles = [
+        fs.readFileSync(new URL('../oa-chat/chat/styles.css', import.meta.url), 'utf8'),
+        fs.readFileSync(new URL('./zkapi.css', import.meta.url), 'utf8')
+    ];
+    const announcementRules = styles
+        .map(css => css.replace(/\/\*[\s\S]*?\*\//g, ''))
+        .flatMap(css => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+        .filter(match => match[1].split(',').map(selector => selector.trim()).includes('.pending-response-announcement'))
+        .map(match => match[2]);
+    assert.ok(announcementRules.length > 0, 'the live-region class must not rely on an ungenerated sr-only utility');
+    assert.ok(announcementRules.some(rule => (
+        /position:\s*absolute/.test(rule)
+        && /width:\s*1px/.test(rule)
+        && /height:\s*1px/.test(rule)
+        && /overflow:\s*hidden/.test(rule)
+        && /white-space:\s*nowrap/.test(rule)
+        && (/(?:^|;)\s*clip:\s*rect\(0(?:px)?,?\s*0(?:px)?,?\s*0(?:px)?,?\s*0(?:px)?\)/.test(rule)
+            || /clip-path:\s*inset\(50%\)/.test(rule))
+    )), 'the live region must be visually clipped in light, dark, and reduced-motion modes');
+    assert.ok(announcementRules.every(rule => !/(?:display:\s*none|visibility:\s*hidden)/.test(rule)),
+        'visual clipping must not remove the announcement from the accessibility tree');
+});
+
+test('returning to a chat preserves its complete conversation and excludes the other chat', () => {
+    const chatA = [
+        { role: 'user', content: 'Explain HTTPS.' },
+        { role: 'assistant', content: 'HTTPS combines HTTP with TLS.' },
+        { role: 'user', content: 'go on' }
+    ];
+    const chatB = [
+        { role: 'user', content: 'Explain photosynthesis.' },
+        { role: 'assistant', content: 'Plants turn light into chemical energy.' }
+    ];
+
+    // Reselecting a chat must rebuild from that chat's durable messages; a new
+    // ephemeral key changes billing transport, not conversation semantics.
+    const selectedSessionMessages = new Map([
+        ['chat-a', chatA],
+        ['chat-b', chatB]
+    ]).get('chat-a');
+    const request = processMessagesForApi(selectedSessionMessages, 'openai/gpt-5.3-chat');
+
+    assert.deepEqual(request, chatA);
+    assert.equal(request.some(message => /photosynthesis/i.test(message.content)), false);
+    assert.deepEqual(request.map(message => message.role), ['user', 'assistant', 'user']);
+});
+
+test('consumer-facing payment UI omits note numbers and the redundant sidebar account pill', () => {
+    const panel = fs.readFileSync(new URL('./components/RightPanel.js', import.meta.url), 'utf8');
+    const account = fs.readFileSync(new URL('./components/AccountModal.js', import.meta.url), 'utf8');
+    const client = fs.readFileSync(new URL('./services/zkapiClient.js', import.meta.url), 'utf8');
+    const shell = fs.readFileSync(new URL('./components/ZkapiShell.js', import.meta.url), 'utf8');
+
+    for (const source of [panel, account, client]) {
+        assert.doesNotMatch(source, /(?:private\s+)?note\s*#/i);
+    }
+    assert.match(shell, /panelToggle\.before\(balance\)/);
+    assert.match(shell, /getElementById\('account-nav'\)\?\.remove\(\)/);
+    assert.match(shell, /data-private-balance-label/);
+});
+
+test('capsule uses static hold and error endpoints without implying accepted success', () => {
+    const element = composerElement();
+    const waiting = lowTextState('capsule', {
+        primary: {
+            phase: 'escape-wait',
+            tone: 'waiting',
+            title: 'Recovery window in progress',
+            detail: 'Wait for the safety window.',
+            compact: 'Recovery window in progress',
+            busy: false,
+            blocksSend: true
+        }
+    });
+
+    renderZkapiComposerStatus(element, null, waiting);
+    assert.match(element.innerHTML, /zkapi-state-glyph--waiting/);
+    assert.match(element.innerHTML, /zkapi-capsule-origin--neutral/);
+    assert.match(element.innerHTML, /zkapi-capsule-end--hold/);
+    assert.doesNotMatch(element.innerHTML, /✓|→/);
+    assert.equal(element.getAttribute('aria-busy'), 'false');
+
+    const error = lowTextState('capsule', {
+        primary: {
+            phase: 'error',
+            tone: 'error',
+            title: 'Previous chat needs attention',
+            detail: 'Try again.',
+            compact: 'Needs attention',
+            busy: false,
+            blocksSend: true
+        }
+    });
+    renderZkapiComposerStatus(element, null, error);
+    assert.match(element.innerHTML, /zkapi-state-glyph--error/);
+    assert.match(element.innerHTML, /zkapi-capsule-origin--neutral/);
+    assert.match(element.innerHTML, /zkapi-capsule-end--error/);
+    assert.doesNotMatch(element.innerHTML, /✓|→/);
+
+    const closing = lowTextState('capsule', {
+        primary: {
+            phase: 'closing',
+            tone: 'working',
+            title: 'Finishing previous chat',
+            detail: 'Closing its private key.',
+            compact: 'Finishing previous chat',
+            busy: true,
+            blocksSend: false
+        }
+    });
+    renderZkapiComposerStatus(element, null, closing);
+    assert.match(element.innerHTML, /zkapi-capsule-origin--neutral/);
+    assert.match(element.innerHTML, /zkapi-capsule-end--closing/);
+    assert.doesNotMatch(element.innerHTML, /✓|→/);
+});
+
+test('message recovery controls have a visible busy state and reduced motion keeps pending copy readable', () => {
+    const css = fs.readFileSync(new URL('./zkapi.css', import.meta.url), 'utf8');
+    const reducedMotion = css.slice(css.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
+
+    assert.doesNotMatch(css, /\.user-delivery-(?:row|details|glyph|label|popover|actions)/);
+    assert.doesNotMatch(css, /zkapiReceiptOrbit/);
+    assert.match(css, /\.message-action-btn\.is-processing::after,[\s\S]*?animation: zkapiActionOrbit/);
+    assert.match(css, /\.chat-session\[data-deleting="true"\]\s*\{[\s\S]*?cursor: wait/);
+    assert.match(css, /\.zkapi-composer-live-status\s*\{[\s\S]*?clip: rect\(0, 0, 0, 0\)/);
+    assert.match(reducedMotion, /\.pending-response-streaming\s*\{[\s\S]*?animation: none !important/);
+    assert.match(reducedMotion, /\.message-action-btn\.is-processing::after/);
+    assert.match(reducedMotion, /-webkit-text-fill-color: currentColor !important/);
+});
