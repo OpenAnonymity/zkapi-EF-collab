@@ -144,3 +144,11 @@ and a progress disclosure staying open across clock updates. The fixture's
 on-chain deposit/withdrawal tests; never treat the simulated note or token as
 real payment evidence. Existing wallet journals, withdrawal state machines and
 contracts are unchanged by this composition refactor.
+
+For composer accessibility/layout regressions, evaluate
+`scripts/browser-composer-style-check.js` after the local fixture, then send a
+one-line prompt through the UI. Once the streamed response completes, evaluate
+`window.composerStyleCheck.verify()`. It checks the actual acceptance/completion
+announcements, their screen-reader semantics, clipping, and unchanged composer
+height. Repeat after reloading in light/dark themes and a narrow viewport. This
+test helper is not a production asset and does not use a real wallet or model.
