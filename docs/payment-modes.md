@@ -146,14 +146,43 @@ on each deployment, and neither Vercel error scan returned logs. Mainnet UI
 verification retained the existing ticket-mode transcript; no mainnet wallet
 connection or transaction was performed.
 
+The composer restoration passed 602 OA tests, 276 client tests, and 10
+composition tests. A subsequent one-line System Panel capability correction
+passed all 10 focused panel tests. Fresh adversarial review approved both
+changes. Regression coverage includes captured feature ownership, draft and
+navigation races, stale memory approvals, older-history backfill persistence,
+mode-switch draining, and historical Parallel lane regeneration.
+
+Live Chrome checks restored the Tickets Memory switch, context editor,
+Scrubber settings and shortcut, Parallel model pickers, and Council settings.
+A real Parallel request returned `parallel-copper-29` independently from
+GPT-4o-mini and GPT-4.1 Mini; both station verifications succeeded and the
+ticket count changed from 11 to 9. Switching that historical chat to zkAPI
+retained both responses and disabled Memory and Parallel with explanations.
+Double-Tab left the synthetic draft unchanged and displayed `Scrubber needs
+Tickets`. Returning to Tickets restored the remembered Memory/Parallel choices
+and both selected models. Reload preserved the transcript and mode. The final
+System Panel correctly shows one pending key in zkAPI and restores the Parallel
+key rows in Tickets. Both network frontends passed UI capability switching.
+
+The initial Scrubber live attempt found staging has no `TINFOIL_ADMIN_KEY`;
+the org returned its service-unavailable response and rolled back the ticket.
+The user then explicitly excluded live Tinfoil testing. Memory retrieval and
+Scrubber inference therefore remain unverified against a live provider; their
+UI and deterministic capability/ownership tests passed. No staging Tinfoil or
+production configuration was changed. The synthetic local memory file was
+removed. One eight-ticket staging invite was redeemed for these checks, and
+its raw handoff files were removed; nine staging tickets remain in the Sepolia
+trial browser. No mainnet wallet transactions were performed.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`b3cb9f2fff91877caed9168a712606f0aec4834d`, and the shared OA commit is
-`faefd10157356955d90affda4215f6c4cbf93a8d`. Both repositories remain on
+`3d61abba5fd1fe97806f1164ffa87d30fce1be04`, and the shared OA commit is
+`1ec19f1fc7a3f36b4fe0c7631943b4c9b498fca8`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
 The existing staging services run oa-org
@@ -177,12 +206,13 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-q25gm1irx-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-24jcd0mki-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_GoaHxrbLKze8cKTYFiKi5MMhHED4` (READY).
+- Deployment: `dpl_DV58nWRZd7NECF8K52XByoYiTM8L` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `a4a1082fcdbdff6c2af5a0f84105f853b947fac85f702fff09dfee5b62cc9938`.
-- Validation: 586 OA tests, 275 client tests, 10 composition tests passed;
+- Build fingerprint: `c0246357d5d4f2b83a2a29214e8a39c7840410624b1b4f573fc47900463b0d4b`.
+- Validation: 602 OA tests, 276 client tests, 10 composition tests passed;
+  the final panel correction also passed its 10 focused tests;
   fresh adversarial review approved; all 153 published asset digests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
   ticket, verifier, wallet, and provider boundaries and zero uncaught
@@ -231,11 +261,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-mf5ykwvye-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-h692ljy54-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_AAAUsh6zfdiqi2918jrvGjKBpM9j` (READY).
+- Deployment: `dpl_5qW47zjpyrrJFPbQAwuXtfv343UF` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `b39772c195a44bc6dbdc368af51083daadd79479f06bd52da4cb24ad7f134b12`.
+- Build fingerprint: `a9552f80d3469aa1bb393e6485cf4868676300f11b540d80fe400b919a911076`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
