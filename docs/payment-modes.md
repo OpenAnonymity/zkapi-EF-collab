@@ -123,14 +123,27 @@ panel collapse/reopen, balance-dialog opening, Escape dismissal, and focus
 return to the panel's Balance details button. No inference or wallet mutation
 was needed to validate this presentation change.
 
+On the routed-pricing release, a live Sepolia zkAPI continuation selected
+Auto Router and received the saved `blue-heron-62` marker from DeepSeek V4
+Flash 0731. The composer retained Auto Router. The System Panel updated from
+3,761 input / 12 output tokens and $0.007724 to 6,446 input / 52 output tokens
+and $0.016 for the chat. Reload preserved the concrete response attribution,
+selected router, transcript, and estimate. Deterministic tests above verify
+exact fallback arithmetic when the provider omits cost; this live response
+checks the provider path and rendered persistence. Both current trial apps
+loaded the new bundle with no browser errors. All 153 asset digests matched
+on each deployment, and neither Vercel error scan returned logs. Mainnet UI
+verification retained the existing ticket-mode transcript; no mainnet wallet
+connection or transaction was performed.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`b3590ced76f651a287d62b3ce4e4a260aa4b47e9`, and the shared OA commit is
-`121876ec774f0a5cac8ff078a8aeb622df11a773`. Both repositories remain on
+`b3cb9f2fff91877caed9168a712606f0aec4834d`, and the shared OA commit is
+`faefd10157356955d90affda4215f6c4cbf93a8d`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
 The existing staging services run oa-org
@@ -154,12 +167,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-qzcmw7obs-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-q25gm1irx-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_6S7WU6Pay97T1JSpjTTTkVo1k94z` (READY).
+- Deployment: `dpl_GoaHxrbLKze8cKTYFiKi5MMhHED4` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `87ddf73ccd3159bb1bc1b0932de74d0fb5ff18060fad1f27ac532cc1400300fb`.
-- Validation: 555 OA tests, 264 client tests, 10 composition tests passed;
+- Build fingerprint: `a4a1082fcdbdff6c2af5a0f84105f853b947fac85f702fff09dfee5b62cc9938`.
+- Validation: 586 OA tests, 275 client tests, 10 composition tests passed;
   fresh adversarial review approved; all 153 published asset digests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
   ticket, verifier, wallet, and provider boundaries and zero uncaught
@@ -208,11 +221,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-3r5ldcxnj-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-mf5ykwvye-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_F9gCiNYkGXr6gcwgRqEsLmbTwUQ2` (READY).
+- Deployment: `dpl_AAAUsh6zfdiqi2918jrvGjKBpM9j` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `0203886ad3228aed74ba12cf288ba59ac11f97a770b6d79fecb1e75ee14ab4ee`.
+- Build fingerprint: `b39772c195a44bc6dbdc368af51083daadd79479f06bd52da4cb24ad7f134b12`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
