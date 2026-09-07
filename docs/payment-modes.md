@@ -55,3 +55,29 @@ published and do not reuse a person's browser profile, wallet, or tickets.
 A live funded cryptographic end-to-end run additionally needs a dedicated
 Sepolia wallet and expendable valid OA tickets; the simulated run does not
 certify a live payment or provider response.
+
+## Sepolia trial deployment — 2026-09-06
+
+- App: https://oa-chat-payment-modes.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-4tf3kad08-mingyech1.vercel.app/funding/
+- Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
+- Deployed client commit: `9b77b2e` in zkapi-EF-collab.
+- Deployed shared OA commit: `a230c64e613392a1b7bfab37e7ec1abc060d7c6e`.
+- Both repositories: `codex/unified-chat-payment-modes`; main unchanged.
+- Build fingerprint: `dd39102cd53d5e330a5a8c548bd63b6cb98577a30c499d0085899f0952832e56`.
+- Validation: 555 OA tests, 258 client tests, 8 composition tests passed;
+  fresh adversarial review approved; all 153 published asset digests matched.
+- All six browser E2E scenarios passed on the deployed URL with zero uncaught
+  application errors. Live unmodified browser startup loaded both catalogs,
+  the browser wallet initialized on Sepolia, and deployment health/config/model
+  rewrites returned HTTP 200. The Vercel runtime error scan returned no logs
+  (the frontend is static).
+- Full funded live payment/provider completion remains unverified pending a
+  dedicated Sepolia test wallet and expendable valid OA tickets. Existing user
+  notes and named tester ticket inventory were left untouched.
+
+This project is a separate explicit static deployment with no Git connection.
+To redeploy, build the pinned browser sources, copy only `dist/browser` to a
+fresh staging directory's `public` folder, use `vercel.browser.json` with empty
+install/build commands and `outputDirectory: public`, link this exact project,
+and run `vercel build --prod` followed by `vercel deploy --prebuilt --prod`.
