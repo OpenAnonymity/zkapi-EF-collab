@@ -19,7 +19,7 @@ const ZKAPI_BACKEND_ID = 'zkapi';
 const TITLE_SUMMARY_MODEL_ID = 'google/gemini-3.1-flash-lite-preview';
 
 export class ZkapiAPI extends OpenRouterAPI {
-    constructor() {
+    constructor({ modelCatalog = null } = {}) {
         super({
             networkTransport: networkProxy,
             acquireRequestAccess: async (sessionId, options) => {
@@ -41,10 +41,12 @@ export class ZkapiAPI extends OpenRouterAPI {
             },
             onRequestFinished: () => { void zkapiClient.refresh({ quiet: true }).catch(() => {}); }
         });
-        this.displayNameOverrides = { ...getDefaultModelConfig().displayNameOverrides };
+        this.modelCatalog = modelCatalog;
+        if (!modelCatalog) this.displayNameOverrides = { ...getDefaultModelConfig().displayNameOverrides };
     }
 
     getCachedModels() {
+        if (this.modelCatalog) return this.modelCatalog.getCachedModels();
         const cachedModels = loadModelCatalog(ZKAPI_BACKEND_ID);
         if (!Array.isArray(cachedModels)) {
             return [];
@@ -55,8 +57,16 @@ export class ZkapiAPI extends OpenRouterAPI {
         }));
     }
 
-    // zkAPI deployments advertise the models their proof-bound keys can use.
+    getDisplayName(modelId, fallback, provider) {
+        return this.modelCatalog
+            ? this.modelCatalog.getDisplayName(modelId, fallback)
+            : super.getDisplayName(modelId, fallback, provider);
+    }
+
+    // Dual-mode chat shares OA's catalog, independent of wallet readiness.
+    // Preserve the configured catalog for standalone/legacy daemon clients.
     async fetchModels() {
+        if (this.modelCatalog) return this.modelCatalog.fetchModels();
         try {
             await zkapiClient.init();
             const configured = zkapiClient.config?.funding?.models || [];
@@ -116,7 +126,8 @@ export class ZkapiAPI extends OpenRouterAPI {
     }
 
     getModelBudgetMetadata(modelId) {
-        return super.getModelBudgetMetadata(modelId)
+        return this.getCachedModels().find(model => model.id === modelId)
+            || super.getModelBudgetMetadata(modelId)
             || BUNDLED_MODEL_CATALOG[baseModelId(modelId)] || null;
     }
 

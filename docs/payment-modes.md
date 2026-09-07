@@ -5,6 +5,23 @@ The adjacent control opens ticket management or the private balance. The
 composer has no duplicate funding/progress status. Detailed access preparation
 continues to appear with the pending assistant response.
 
+Both modes use the ordinary OA OpenRouter model catalog, display names, pinned
+and disabled models, and selection defaults. Tickets show the normal ticket
+cost; zkAPI shows USD per million input/output tokens, with exact per-token
+rates in the pricing tooltip. Models without published token prices say
+`Pricing unavailable` in zkAPI mode.
+
+The combined runtime injects the shared catalog into its zkAPI request adapter.
+It reads the same OpenRouter cache immediately and uses the same refresh and
+offline fallback as Tickets, without waiting for the wallet or narrowing the
+list to the deployment manifest. Old zkAPI-only catalog caches do not govern
+the combined picker. Shared pricing and provider output limits also inform
+zkAPI's existing request budget, preserving exact model-variant prices.
+Standalone/legacy zkAPI runtimes retain their configured catalog because they
+may use a local echo or non-OpenRouter provider. The hosted direct lease binds
+the spending limit and lifetime, not a model allowlist; this catalog change
+does not alter contracts, proofs, key issuance, or verifier checks.
+
 A selection changes the current chat and the default for subsequent new chats.
 Historical sessions retain their own `inferenceBackend`. Both methods use the
 same OA IndexedDB database, session records, messages, imports, and account sync;
