@@ -179,8 +179,7 @@
     white-space: nowrap;
 }
 
-#account-tab-btn.zkapi-private-balance-control,
-.payment-funding-control {
+#account-tab-btn.zkapi-private-balance-control {
     display: inline-flex;
     flex: 0 1 auto;
     width: auto;
@@ -1180,7 +1179,7 @@
         -webkit-text-fill-color: currentColor !important;
     }
 }
-/* One persistent payment choice; funding status stays beside it, away from drafting. */
+/* One persistent payment choice; funding status lives in the System Panel. */
 .payment-mode-control {
     display: inline-flex;
     align-items: center;
@@ -1205,16 +1204,13 @@
     box-shadow: 0 1px 3px hsl(var(--color-foreground) / .08);
 }
 .payment-mode-control button:hover:not(:disabled) { color: hsl(var(--color-foreground)); }
-.payment-mode-control button:focus-visible, .payment-funding-control:focus-visible {
+.payment-mode-control button:focus-visible {
     outline: 2px solid hsl(var(--color-accent-primary));
     outline-offset: 2px;
 }
 .payment-mode-control button:disabled { cursor: wait; opacity: .6; }
-.payment-funding-control { cursor: pointer; min-height: 34px; }
-.payment-funding-control [data-private-balance-label] { white-space: nowrap; }
 @media (max-width: 640px) {
     .payment-mode-control button { padding: 5px 8px; }
-    .payment-funding-control { font-size: 11px; gap: 4px; padding-inline: 6px; }
     .payment-mode-toolbar #share-btn-text, .payment-mode-toolbar #wide-mode-btn { display: none; }
     .payment-mode-toolbar #share-btn { padding-inline: 6px; }
 }

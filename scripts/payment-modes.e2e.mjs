@@ -235,8 +235,8 @@ try {
     await ready();
     await selected('tickets');
     assert.equal(await page.locator('#zkapi-composer-status').count(), 0);
-    assert.equal(await page.locator('#payment-funding-btn').count(), 1);
-    await page.locator('#payment-funding-btn').click();
+    assert.equal(await page.locator('#payment-funding-btn').count(), 0);
+    if (await page.locator('#show-right-panel-btn').isVisible()) await page.locator('#show-right-panel-btn').click();
     if (!await page.locator('#invitation-code-input').count()) await page.locator('#toggle-invitation-form-btn').click();
     const ticketInputPreserved = await page.evaluate(() => {
         const input = document.getElementById('invitation-code-input');
@@ -323,7 +323,7 @@ try {
     assert.equal(await page.locator('#zkapi-composer-status').count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
     await page.screenshot({ path: path.join(output, 'mobile.png'), fullPage: true });
-    checks.push('Desktop/mobile show one funding control, no redundant composer status, and no horizontal overflow.');
+    checks.push('Desktop/mobile keep the payment selector with funding status only in the System Panel and no horizontal overflow.');
     assert.deepEqual(pageErrors, [], 'No uncaught application errors are permitted.');
     const report = { passed: true, url: url.href, checks, pageErrors,
         boundary: 'Payment issuance, verifier answers, blockchain funding, leases and provider replies were simulated; application, persistence, mode switching and streaming parsing were real.' };

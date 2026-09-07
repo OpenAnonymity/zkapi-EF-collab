@@ -1,9 +1,13 @@
 # Ticket and zkAPI payment modes
 
 The composed OA chat app offers **Tickets** and **zkAPI** in the top toolbar.
-The adjacent control opens ticket management or the private balance. The
-composer has no duplicate funding/progress status. Detailed access preparation
-continues to appear with the pending assistant response.
+Balance and ticket counts appear in the System Panel, with its normal controls
+for funding, balance details, and ticket management. The toolbar and composer
+have no duplicate funding status. Detailed access preparation continues to
+appear with the pending assistant response. The standard panel toggle keeps
+these controls accessible when the panel is collapsed, including on mobile.
+The private-balance modal has no toolbar trigger; panel actions and send
+preflight still open it and return focus to their initiating control.
 
 Both modes use the ordinary OA OpenRouter model catalog, display names, pinned
 and disabled models, and selection defaults. Tickets show the normal ticket
