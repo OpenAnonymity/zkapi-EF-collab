@@ -52,9 +52,10 @@ The browser matrix covers both switch directions on the same transcript,
 remembered new-chat choice, historical resume, reload, busy-state prevention,
 mobile layout, and absence of duplicate composer status. Test fixtures are not
 published and do not reuse a person's browser profile, wallet, or tickets.
-A live funded cryptographic end-to-end run additionally needs a dedicated
-Sepolia wallet and expendable valid OA tickets; the simulated run does not
-certify a live payment or provider response.
+The simulated run does not certify a live payment or provider response. The
+additional live Sepolia browser run below covers funding, private access,
+provider responses, settlement, and transcript continuity. A positive live
+ticket-redemption/provider run still needs an expendable valid OA ticket code.
 
 ## Sepolia trial deployment — 2026-09-06
 
@@ -72,9 +73,23 @@ certify a live payment or provider response.
   the browser wallet initialized on Sepolia, and deployment health/config/model
   rewrites returned HTTP 200. The Vercel runtime error scan returned no logs
   (the frontend is static).
-- Full funded live payment/provider completion remains unverified pending a
-  dedicated Sepolia test wallet and expendable valid OA tickets. Existing user
-  notes and named tester ticket inventory were left untouched.
+- Additional live Chrome/MetaMask test: minted and deposited 5 Sepolia test
+  billing tokens, obtained a private ephemeral key, and received a real
+  GPT-4o-mini response containing the expected conversation marker. The
+  verifier panel reported a verified JWT signature and matching hardware policy.
+- Switched that chat to Tickets, observed successful key settlement, and
+  preserved its transcript. With zero tickets, sending retained the draft and
+  reported that one ticket was required. There was no automatic zkAPI fallback.
+- Verified new-chat defaults in both modes, historical mode selection, and
+  transcript persistence after reload. Switched back to zkAPI, obtained fresh
+  access, and received the original marker from a real follow-up response.
+- The live positive ticket-funded response remains unverified: this origin has
+  no tickets, no expendable code was supplied, and public free issuance reports
+  `FREE_ACCESS_DISABLED`. Named tester ticket inventory was left untouched.
+- MetaMask displayed a malicious-site warning on the new Vercel origin. The
+  user explicitly authorized acknowledgement for the Sepolia test. Token and
+  spender matched the pinned test deployment; wallet protections were not
+  disabled. No mainnet wallet transaction was performed.
 
 This project is a separate explicit static deployment with no Git connection.
 To redeploy, build the pinned browser sources, copy only `dist/browser` to a
