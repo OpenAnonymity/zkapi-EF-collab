@@ -74,13 +74,29 @@ additional live Sepolia browser runs below cover funding, private access,
 ticket redemption, verified provider responses in both modes, settlement, and
 transcript continuity. Mainnet funding and wallet transactions remain untested.
 
+The shared-catalog correction adds six regression tests for common model
+configuration, full live/cache parity, ignored stale single-model zkAPI cache,
+wallet-independent catalog loading, exact variant pricing/budget metadata, and
+the unchanged standalone catalog. A fresh adversarial review passed all 38
+focused catalog, runtime, pricing, and lifecycle tests.
+
+Live Chrome verification on both updated trial apps found 375 selectable model
+rows with identical names and ordering across modes. Sepolia fetched the public
+OpenRouter catalog with HTTP 200 and without a disk-cache hit; no browser or
+catalog errors were recorded. GPT-4.1 Mini displayed 1 ticket in Tickets mode
+and `$0.4/M input · $1.6/M output` in zkAPI mode. Selecting it in Tickets mode
+and switching to zkAPI retained that selection. This model is absent from the
+old eight-entry zkAPI manifest, and a real Sepolia zkAPI continuation returned
+the earlier `blue-heron-62` marker. Its key subsequently settled successfully.
+Mainnet catalog and price parity were checked without wallet transactions.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`02c7d8580b3554562911dced062bbfd91a2df605`, and the shared OA commit is
+`a10c85b0fb482a8b24cae44b6c02957b96ac8b04`, and the shared OA commit is
 `121876ec774f0a5cac8ff078a8aeb622df11a773`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -105,12 +121,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-7c4rvb7ea-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-qlth1m4jy-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_BptW9RG3MDfLMY9pkhHBxGZGr14q` (READY).
+- Deployment: `dpl_GhjKkZ5PvQVYitfpPjjeRfpVbVB6` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `4a1ddc4ea0a6a48386ab75285b55091fcedaf8ac7b4c60997d49f3611608c06b`.
-- Validation: 555 OA tests, 258 client tests, 10 composition tests passed;
+- Build fingerprint: `0bbbf8b308ad2fc55d570684c824db6eba9048c650576be5a0c5e333e6f47783`.
+- Validation: 555 OA tests, 264 client tests, 10 composition tests passed;
   fresh adversarial review approved; all 153 published asset digests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
   ticket, verifier, wallet, and provider boundaries and zero uncaught
@@ -159,11 +175,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-q5url0dgq-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-rh5oydwm5-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_9UoobVMU5rQugVNLRovo9gAYZABt` (READY).
+- Deployment: `dpl_2JM1uaCPyPoy1EysD2e7No5jJi9A` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `2902c6e5cf8da654300a2ca464448e1563d6639953b99b43af1435b98e539466`.
+- Build fingerprint: `4bef0db6c8f712ca80361348c0982441d7446510f9ed769cb9e0d0367c7527fd`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
