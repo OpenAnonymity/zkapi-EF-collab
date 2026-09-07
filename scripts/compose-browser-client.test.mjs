@@ -1,19 +1,23 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { composeBrowserClient, composeHtml, isPublishableAsset, validateOutputDirectory } from './compose-browser-client.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
-const HTML = '<!doctype html><html><head><base href="/"><link href="styles.css" rel="stylesheet"></head><body><!-- BUNDLE:PRELUDE --><script type="module" src="prelude.js"></script><!-- /BUNDLE:PRELUDE --><!-- BUNDLE:APP --><script type="module" src="standalone.js"></script><!-- /BUNDLE:APP --></body></html>';
+const HTML = '<!doctype html><html><head><base href="/"><link href="styles.css" rel="stylesheet"><link rel="dns-prefetch" href="https://org.openanonymity.ai"></head><body><!-- BUNDLE:PRELUDE --><script type="module" src="prelude.js"></script><!-- /BUNDLE:PRELUDE --><!-- BUNDLE:APP --><script type="module" src="standalone.js"></script><!-- /BUNDLE:APP --></body></html>';
 
 async function fixture(t) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'zkapi-compose-test-'));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
     const files = {
-        'oa-chat/chat/publicApi.js': 'export function createChatApp() { globalThis.composed = true; }',
+        'oa-chat/chat/publicApi.js': "import { ORG_API_BASE, ORG_AUTH_ORIGIN, VERIFIER_URL } from './config.js'; export function createChatApp() { globalThis.composed = true; globalThis.oaEndpoints = { apiBase: ORG_API_BASE, authOrigin: ORG_AUTH_ORIGIN, verifier: VERIFIER_URL }; }",
+        'oa-chat/chat/config.js': await fs.readFile(new URL('../oa-chat/chat/config.js', import.meta.url), 'utf8'),
+        'oa-chat/chat/services/orgEndpoints.js': await fs.readFile(new URL('../oa-chat/chat/services/orgEndpoints.js', import.meta.url), 'utf8'),
         'oa-chat/chat/index.html': HTML,
         'oa-chat/chat/prelude.js': 'globalThis.prelude = true;',
         'oa-chat/chat/styles.css': ':root { color: black; }',
@@ -59,6 +63,18 @@ async function fixture(t) {
     return root;
 }
 
+function readBundledEndpoints({ directory, manifest }) {
+    const moduleUrl = pathToFileURL(path.join(directory, manifest.app)).href;
+    const script = `
+        globalThis.window = { location: { hostname: 'trial.example.org', origin: 'https://trial.example.org' } };
+        globalThis.__OA_PRODUCTION_ORG_ORIGIN__ = 'https://untrusted.example.org';
+        globalThis.__OA_ORG_SAME_ORIGIN__ = true;
+        await import(${JSON.stringify(moduleUrl)});
+        process.stdout.write(JSON.stringify(globalThis.oaEndpoints));
+    `;
+    return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' }));
+}
+
 test('composition keeps OA source untouched and publishes only runtime assets', async t => {
     const root = await fixture(t);
     const before = await fs.readFile(path.join(root, 'oa-chat/chat/index.html'), 'utf8');
@@ -89,6 +105,53 @@ test('identical source produces deterministic output across separate output dire
     assert.equal(first.manifest.hash.length, 64);
     assert.equal(first.manifest.oaChatRevision, 'a'.repeat(40));
     assert.equal(first.manifest.protocolRevision, 'b'.repeat(40));
+    assert.equal(first.manifest.oaOrgOrigin, 'https://org.openanonymity.ai');
+    assert.deepEqual(readBundledEndpoints(first), {
+        apiBase: 'https://org.openanonymity.ai',
+        authOrigin: 'https://org.openanonymity.ai',
+        verifier: 'https://verifier2.openanonymity.ai'
+    });
+});
+
+test('a pinned staging org changes account and ticket endpoints without changing either zkAPI deployment', async t => {
+    const root = await fixture(t);
+    const oaOrgOrigin = 'https://staging.example.org';
+    for (const network of ['sepolia', 'mainnet']) {
+        const originalConfig = await fs.readFile(path.join(root, 'funding-page', network === 'mainnet' ? 'browser-config.mainnet.json' : 'browser-config.json'), 'utf8');
+        const result = await composeBrowserClient({ repoRoot: root, outDir: path.join(root, 'dist', network), network, oaOrgOrigin: `${oaOrgOrigin}/` });
+        assert.equal(result.manifest.oaOrgOrigin, oaOrgOrigin);
+        assert.equal(result.manifest.network, network);
+        assert.deepEqual(readBundledEndpoints(result), {
+            apiBase: oaOrgOrigin,
+            authOrigin: oaOrgOrigin,
+            verifier: 'https://verifier2.openanonymity.ai'
+        });
+        const html = await fs.readFile(path.join(result.directory, 'index.html'), 'utf8');
+        assert.ok(html.includes(`<link rel="dns-prefetch" href="${oaOrgOrigin}">`));
+        assert.ok(!html.includes('org.openanonymity.ai'));
+        for (const name of Object.keys(result.manifest.files).filter(file => file.endsWith('.js'))) {
+            assert.ok(!(await fs.readFile(path.join(result.directory, name), 'utf8')).includes('org.openanonymity.ai'), name);
+        }
+        assert.deepEqual(JSON.parse(await fs.readFile(path.join(result.directory, 'browser-config.json'), 'utf8')), JSON.parse(originalConfig));
+        for (const kind of ['request', 'withdrawal']) {
+            assert.equal(result.manifest.files[`proofs/${kind}.pk`], hash(await fs.readFile(path.join(root, 'protocol/setup/v2', `${kind}.pk`))));
+        }
+    }
+    assert.equal(await fs.readFile(path.join(root, 'oa-chat/chat/index.html'), 'utf8'), HTML);
+});
+
+test('invalid org origins fail closed before replacing the last successful build', async t => {
+    const root = await fixture(t);
+    const options = { repoRoot: root, outDir: path.join(root, 'dist/browser') };
+    const first = await composeBrowserClient(options);
+    for (const oaOrgOrigin of [
+        'http://staging.example.org', '//staging.example.org', 'javascript:alert(1)',
+        'https://user:password@staging.example.org', 'https://staging.example.org/api',
+        'https://staging.example.org?org=other', 'https://staging.example.org#other'
+    ]) {
+        await assert.rejects(composeBrowserClient({ ...options, oaOrgOrigin }), /--oa-org-origin/);
+    }
+    assert.equal(JSON.parse(await fs.readFile(path.join(first.directory, 'build.json'), 'utf8')).hash, first.manifest.hash);
 });
 
 test('mainnet and Sepolia compose the same app with isolated pinned configuration', async t => {

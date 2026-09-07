@@ -26,6 +26,24 @@ existing `scripts/package-browser-client*.sh` commands call this same composer.
 runs the composer. The UX proposal wrapper supplies a build-time configuration
 choice; it does not mutate the generated configuration after its hash is taken.
 
+The org for ordinary ticket issuance and account services is independent of the
+zkAPI network. Default builds use `https://org.openanonymity.ai`. To pin a trial
+build to the persistent staging org, pass its origin explicitly:
+
+```sh
+npm run build:browser -- --oa-org-origin https://org-staging.openanonymity.ai
+npm run build:mainnet -- --oa-org-origin https://org-staging.openanonymity.ai
+```
+
+The composer accepts only an exact HTTPS origin (HTTP is permitted for
+loopback development), compiles it into the account and ticket clients, and
+records it as `oaOrgOrigin` in `build.json`. It also updates the shell's DNS
+prefetch. `OA_ORG_ORIGIN` environment variables and runtime settings are not read
+by this composer. The flag leaves the selected zkAPI chain, contracts, verifier,
+proof keys and deployment rewrites unchanged. OA requests use the pinned
+absolute origin, so the org must allow the deployed app origin through CORS;
+no additional Vercel org rewrites are required.
+
 `cargo build -p zkapi-clientd` invokes this same composer from `build.rs` and
 embeds its output from Cargo's `OUT_DIR`. It requires the Node/npm prerequisites
 above, and never falls back to embedding a separate vendored application. The

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { DEFAULT_PRODUCTION_ORG_ORIGIN, normalizePublicOrigin } from '../oa-chat/scripts/buildConfig.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROPOSALS = new Set(['quiet', 'guided', 'activity', 'receipt', 'relay', 'ambient', 'capsule']);
@@ -73,9 +74,14 @@ async function pinnedRevisions(repoRoot) {
     return lock;
 }
 
-export function composeHtml(source, { app, prelude, css, oaCommit }) {
+export function composeHtml(source, { app, prelude, css, oaCommit, oaOrgOrigin = DEFAULT_PRODUCTION_ORG_ORIGIN }) {
     let html = source.replace(/<base\s+href="[^"]*"\s*\/?\s*>/, '<base href="/funding/">');
     if (!html.includes('<base href="/funding/">')) throw new Error('OA shell is missing its base URL.');
+    // Never contact the production org just to warm DNS in a staging build.
+    html = html.replace(
+        /<link\s+rel="dns-prefetch"\s+href="https:\/\/org\.openanonymity\.ai"\s*>/g,
+        `<link rel="dns-prefetch" href="${oaOrgOrigin}">`
+    );
     for (const [name, bundle] of [['APP', app], ['PRELUDE', prelude]]) {
         const block = new RegExp(`<!--\\s*BUNDLE:${name}\\s*-->[\\s\\S]*?<!--\\s*\\/BUNDLE:${name}\\s*-->`);
         if (!block.test(html)) throw new Error(`OA shell is missing BUNDLE:${name}.`);
@@ -92,6 +98,9 @@ export async function composeBrowserClient(options = {}) {
     const outputRoot = validateOutputDirectory(options.outDir || path.join(repoRoot, 'dist/browser'), repoRoot);
     const network = options.network || 'sepolia';
     const proposal = options.proposal || null;
+    // The org is a build input, independent of the pinned zkAPI deployment.
+    // Deliberately do not read environment or runtime endpoint overrides.
+    const oaOrgOrigin = normalizePublicOrigin(options.oaOrgOrigin, '--oa-org-origin') || DEFAULT_PRODUCTION_ORG_ORIGIN;
     if (!['sepolia', 'mainnet'].includes(network)) throw new Error('Network must be sepolia or mainnet.');
     if (proposal && !PROPOSALS.has(proposal)) throw new Error('Unknown UX proposal.');
     const oaRoot = path.join(repoRoot, 'oa-chat');
@@ -139,7 +148,11 @@ export async function composeBrowserClient(options = {}) {
             outdir: path.join(stage, 'assets'), entryNames: '[name]-[hash]', chunkNames: 'chunk-[hash]',
             assetNames: 'asset-[hash]', minify: true, metafile: true, logLevel: 'warning',
             loader: { '.svg': 'file', '.png': 'file', '.jpg': 'file', '.woff': 'file', '.woff2': 'file' },
-            define: { __DEV__: 'false' }
+            define: {
+                __DEV__: 'false',
+                __OA_ORG_SAME_ORIGIN__: 'false',
+                __OA_PRODUCTION_ORG_ORIGIN__: JSON.stringify(oaOrgOrigin)
+            }
         });
         // new Worker(new URL('./zkapiWasmWorker.js', import.meta.url)) resolves from any
         // app/chunk in assets/. Worker-relative ../wasm/ and ../browser-config.json
@@ -160,7 +173,7 @@ export async function composeBrowserClient(options = {}) {
         const prelude = outputFor(path.join(oaRoot, 'chat/prelude.js'));
         const css = app.info.cssBundle ? path.relative(stage, path.resolve(repoRoot, app.info.cssBundle)).split(path.sep).join('/') : null;
         const html = composeHtml(await fs.readFile(path.join(oaRoot, 'chat/index.html'), 'utf8'), {
-            app: app.filename, prelude: prelude.filename, css, oaCommit
+            app: app.filename, prelude: prelude.filename, css, oaCommit, oaOrgOrigin
         });
         await fs.writeFile(path.join(stage, 'index.html'), html);
         // Preserve the daemon's legacy asset endpoint without serving another app implementation.
@@ -168,7 +181,7 @@ export async function composeBrowserClient(options = {}) {
         const files = {};
         for (const file of await listFiles(stage)) files[file] = sha256(await fs.readFile(path.join(stage, file)));
         const manifest = {
-            schema: 1, builder: 'oa-zkapi-composition', network, proposal,
+            schema: 1, builder: 'oa-zkapi-composition', network, proposal, oaOrgOrigin,
             hash: sha256(JSON.stringify(files)),
             oaChatRevision: oaCommit, protocolRevision: revisions.protocol,
             app: app.filename, prelude: prelude.filename,
@@ -187,7 +200,7 @@ export async function composeBrowserClient(options = {}) {
 
 function parseArguments(args) {
     const options = {};
-    const names = { '--out-dir': 'outDir', '--network': 'network', '--proposal': 'proposal' };
+    const names = { '--out-dir': 'outDir', '--network': 'network', '--proposal': 'proposal', '--oa-org-origin': 'oaOrgOrigin' };
     for (let index = 0; index < args.length; index += 2) {
         const name = names[args[index]];
         if (!name || !args[index + 1] || args[index + 1].startsWith('--')) throw new Error(`Unknown or incomplete build argument: ${args[index]}`);
