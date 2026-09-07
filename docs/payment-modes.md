@@ -60,12 +60,13 @@ ticket-redemption/provider run still needs an expendable valid OA ticket code.
 ## Sepolia trial deployment — 2026-09-06
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-4tf3kad08-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-ced0t1m4e-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployed client commit: `9b77b2e` in zkapi-EF-collab.
-- Deployed shared OA commit: `a230c64e613392a1b7bfab37e7ec1abc060d7c6e`.
+- Deployment: `dpl_AuURfvrd34oWLYxci1qScURs6qw7` (READY).
+- Deployed client commit: `fb46f36e7977d25d1a7cdf96785c1e4f6ac06aad`.
+- Deployed shared OA commit: `121876ec774f0a5cac8ff078a8aeb622df11a773`.
 - Both repositories: `codex/unified-chat-payment-modes`; main unchanged.
-- Build fingerprint: `dd39102cd53d5e330a5a8c548bd63b6cb98577a30c499d0085899f0952832e56`.
+- Build fingerprint: `20b224bf9ff2707acf29228cbdea99e22c9bae21244022470c2397935b301342`.
 - Validation: 555 OA tests, 258 client tests, 8 composition tests passed;
   fresh adversarial review approved; all 153 published asset digests matched.
 - All six browser E2E scenarios passed on the deployed URL with zero uncaught
@@ -90,9 +91,37 @@ ticket-redemption/provider run still needs an expendable valid OA ticket code.
   user explicitly authorized acknowledgement for the Sepolia test. Token and
   spender matched the pinned test deployment; wallet protections were not
   disabled. No mainnet wallet transaction was performed.
+- The funded flow ran on client `9b77b2e`; the final update changes shared
+  verifier explanatory copy only. After updating, browser checks confirmed
+  the revised copy, both saved responses, and the remaining test balance.
+  The refreshed deployment's 153 asset digests and public routes passed;
+  the new OA revision passed 555 tests and composition passed 8 tests.
 
 This project is a separate explicit static deployment with no Git connection.
 To redeploy, build the pinned browser sources, copy only `dist/browser` to a
 fresh staging directory's `public` folder, use `vercel.browser.json` with empty
 install/build commands and `outputDirectory: public`, link this exact project,
 and run `vercel build --prod` followed by `vercel deploy --prebuilt --prod`.
+
+## Mainnet trial deployment — 2026-09-06
+
+- App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-ic4i7zoiu-mingyech1.vercel.app/funding/
+- New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
+- Deployment: `dpl_DWyR4fKviR35vt2sxG7onUgeTYnh` (READY).
+- Source: the same client/OA commits as the refreshed Sepolia deployment above.
+- Build fingerprint: `3b45312a0d309d7fc85d072f7ef7847b111290ec2b978b9a22179d7d1b5f7fec`.
+- All 153 published assets matched. HTML, config, proxied deployment config,
+  health, model catalog, root redirect, and security headers passed. Trusted
+  pins match the existing chain 1 deployment. Vercel error scan found no logs.
+- Actual Chrome UI checks passed: both payment controls, normal ticket
+  management, zkAPI catalog, mode persistence across reload, and the mainnet
+  funding screen identifying real USDC and Ethereum gas. The composer has no
+  duplicate payment status. No mainnet wallet connection or transaction was
+  requested during verification.
+
+This is a new standalone static Vercel project with no Git connection. The
+existing `oa-zkapi-composed-mainnet` app was not changed, and its prior build
+fingerprint was verified unchanged. This frontend uses the existing
+experimental, unaudited mainnet vault; deploying it adds no contracts. The live
+ticket-funded verification limitation above applies to both network builds.
