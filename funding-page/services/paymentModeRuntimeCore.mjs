@@ -15,7 +15,17 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
         ...zkRuntime,
         inferenceService,
         modelConfiguration,
-        features: { ...zkRuntime.features, accounts: true, tickets: true },
+        // Mount the complete OA experience once; availability follows the
+        // owning chat instead of disabling ticket features for the whole app.
+        features: { ...zkRuntime.features, accounts: true, tickets: true, memory: true, scrubber: true, council: true },
+        supportsFeature: (feature, session) => !['memory', 'scrubber', 'council'].includes(feature)
+            || modeFor(session) === 'tickets',
+        getFeatureUnavailableReason(feature, session) {
+            if (runtime.supportsFeature(feature, session)) return '';
+            if (feature === 'council') return 'Parallel needs separate model keys. Switch to Tickets to use it.';
+            const label = feature === 'scrubber' ? 'Privacy Scrubber' : 'Memory';
+            return `${label} uses a separate Tinfoil key paid with tickets. Switch to Tickets to use it.`;
+        },
         usesTicketAccess: session => modeFor(session) === 'tickets',
         getMode: (session = context?.getCurrentSession()) => modeFor(session),
         isSwitching: () => switching,

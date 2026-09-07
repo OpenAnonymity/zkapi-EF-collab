@@ -61,9 +61,19 @@ backend resolve independently of the new-chat preference: ordinary OA history
 uses Tickets, and explicit legacy zkAPI binding metadata identifies zkAPI.
 
 Normal OA account, ticket import, invite redemption, and shared chat controls
-remain available. This composed trial retains the existing zkAPI feature scope:
-Memory, Scrubber, and Council are disabled in both modes. The standalone OA app
-retains its normal feature defaults.
+remain available. Tickets mode retains the complete OA composer: Memory
+auto-attach and its context editor, Privacy Scrubber, Parallel, and Council
+review. Availability follows the current chat without changing saved global
+preferences or removing historical multi-model responses.
+
+The same controls explain their unavailability in zkAPI mode. Memory retrieval
+and background extraction, like the Privacy Scrubber, acquire separate Tinfoil
+keys through ticket redemption; they cannot currently be paid from the zkAPI
+balance. Parallel/Council also require multiple independent ephemeral keys.
+Switching to zkAPI prevents these operations from spending tickets implicitly;
+switching back to Tickets restores the user's choices. The shared standalone
+OA app retains its normal feature defaults, and the legacy standalone zkAPI
+shell retains its prior restricted interface.
 
 The new Vercel app uses the browser wallet. A local daemon with an active key
 must close that key before switching methods, because its legacy settlement

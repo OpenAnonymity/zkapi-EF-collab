@@ -67,12 +67,6 @@ export function createPaymentModeUi(runtime) {
             // System Panel actions and send preflight open this modal directly.
             privateBalance = new ZkapiAccountModal(app, { triggerId: null, overlayId: 'payment-balance-modal' });
             privateBalance.updateTabIndicator = renderControls;
-            for (const id of ['scrubber-shortcut-hint', 'scrubber-preview-hint', 'scrubber-settings-section',
-                'memory-settings-section', 'memory-context-toggle', 'parallel-settings-section',
-                'council-inline-models', 'chat-mode-toggle']) {
-                const element = document.getElementById(id);
-                if (element) { element.hidden = true; element.inert = true; element.style.display = 'none'; }
-            }
             renderControls();
         },
         presentation: {

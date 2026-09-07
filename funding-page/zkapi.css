@@ -225,14 +225,6 @@
     .zkapi-welcome-dialog { animation: none; }
 }
 
-#scrubber-shortcut-hint,
-#scrubber-preview-hint,
-#scrubber-settings-section,
-#memory-settings-section,
-#chat-mode-toggle {
-    display: none !important;
-}
-
 @media (max-width: 1023px) {
     #right-panel {
         position: fixed;

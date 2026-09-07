@@ -122,6 +122,36 @@ test('a remembered new-chat choice never overrides the payment mode of historica
     assert.equal(h.events.filter(([kind]) => kind === 'settle').length, 0);
 });
 
+test('ticket features follow the owning chat and preserve preferences across mode changes', async () => {
+    const h = harness({ initialMode: 'zkapi' });
+    const ticketSession = h.sessions.get('ticket-chat');
+    ticketSession.responseMode = 'council';
+    ticketSession.councilConfig = { enabled: true, members: ['First model', 'Second model'] };
+    ticketSession.memoryRetrievedContext = 'Previously approved test context';
+    const preferences = structuredClone(ticketSession.councilConfig);
+    for (const feature of ['memory', 'scrubber', 'council']) {
+        assert.equal(h.runtime.features[feature], true, 'shared controls and services mount for ticket chats');
+        assert.equal(h.runtime.supportsFeature(feature, ticketSession), true);
+        assert.equal(h.runtime.supportsFeature(feature, h.sessions.get('zk-chat')), false);
+        assert.equal(h.runtime.supportsFeature(feature, null), false, 'empty composer follows the default mode');
+        assert.match(h.runtime.getFeatureUnavailableReason(feature, h.sessions.get('zk-chat')), /Switch to Tickets/);
+        assert.equal(h.runtime.getFeatureUnavailableReason(feature, ticketSession), '');
+    }
+    assert.equal(h.runtime.supportsFeature('accounts', h.sessions.get('zk-chat')), true);
+    h.select('ticket-chat');
+    await h.runtime.changeMode('zkapi');
+    assert.equal(h.runtime.supportsFeature('council', ticketSession), false);
+    assert.deepEqual(ticketSession.councilConfig, preferences);
+    assert.equal(ticketSession.responseMode, 'council');
+    assert.equal(ticketSession.memoryRetrievedContext, 'Previously approved test context');
+    await h.runtime.changeMode('tickets');
+    assert.equal(h.runtime.supportsFeature('council', ticketSession), true);
+    assert.deepEqual(ticketSession.councilConfig, preferences);
+    assert.equal(h.runtime.supportsFeature('memory', null), true);
+    assert.equal(h.events.filter(([kind]) => ['ticket-access', 'zk-access'].includes(kind)).length, 0,
+        'restoring controls or preferences never acquires a key');
+});
+
 test('both switch directions keep the same durable conversation and acquire from only the selected source', async () => {
     const h = harness();
     h.select('ticket-chat');
