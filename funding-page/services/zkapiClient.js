@@ -2336,7 +2336,13 @@ class ZkapiClient extends EventTarget {
             || { status: 'submitted', transaction_hash: submittedHash };
     }
 
-    async settleActiveLease(onStatus = () => {}) {
+    async settleActiveLease(onStatus = () => {}, { sessionId = null } = {}) {
+        // The legacy daemon's settlement endpoint has no expected-owner
+        // parameter. Never issue a global settlement for a mode change.
+        if (sessionId && !this.browserMode) {
+            if (await this.getPendingLeaseOwner() !== sessionId) return;
+            throw new Error('Close the active private key in the local daemon before changing payment methods.');
+        }
         const hasPendingRequest = Boolean(this.activeLease || this.wallet?.pending_request);
         const activityId = hasPendingRequest ? this.beginActivity('settlement', {
             phase: 'settling',
@@ -2354,10 +2360,13 @@ class ZkapiClient extends EventTarget {
         }
         try {
             const settled = this.browserMode
-                ? await browserWalletRuntime.settleActiveLease((phase, message) => report(phase, message))
+                ? sessionId
+                    ? await browserWalletRuntime.settleSessionLease(sessionId, report)
+                    : await browserWalletRuntime.settleActiveLease(report)
                 : await this.apiJson('/wallet/settle', { method: 'POST' });
             await this.refresh({ quiet: true });
-            if (this.activeLease || this.wallet?.pending_request) {
+            if (sessionId ? await this.getPendingLeaseOwner() === sessionId
+                : this.activeLease || this.wallet?.pending_request) {
                 throw new Error('The private key usage is still settling. Try again shortly.');
             }
             if (hasPendingRequest) {
@@ -2376,6 +2385,14 @@ class ZkapiClient extends EventTarget {
         if (this.browserMode) return browserWalletRuntime.hasPendingLease();
         await this.refresh({ quiet: true });
         return Boolean(this.activeLease || this.wallet?.pending_request);
+    }
+
+    async getPendingLeaseOwner() {
+        await this.init();
+        if (this.browserMode) {
+            return browserWalletRuntime.getPendingLeaseOwner();
+        }
+        return this.config?.active_lease?.session_id || null;
     }
 
     async syncLateWithdrawalAttempts(onStatus = () => {}) {

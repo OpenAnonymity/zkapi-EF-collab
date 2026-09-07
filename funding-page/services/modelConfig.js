@@ -11,7 +11,7 @@ import { standardizeModelDisplayName } from './modelNames.js';
 import { DEFAULT_MODEL_ID } from './modelPricing.mjs';
 
 // Cache key for pinned/disabled model metadata
-const MODEL_AVAILABILITY_CACHE_KEY = 'oa-model-availability-cache';
+const MODEL_AVAILABILITY_CACHE_KEY = 'zkapi-model-availability-cache';
 
 // Event target for notifying listeners of updates
 const eventTarget = new EventTarget();

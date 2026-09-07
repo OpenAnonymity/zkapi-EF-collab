@@ -65,9 +65,9 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
         publish();
     }
 
-    function startRetirement(sessionId, { cancelWork = true } = {}) {
+    function startRetirement(sessionId, { cancelWork = true, expectedOwner = false } = {}) {
         if (retirement) return retirement;
-        const ownerId = client.activeLease?.session_id || sessionId;
+        const ownerId = expectedOwner ? sessionId : client.activeLease?.session_id || sessionId;
         if (!ownerId) return Promise.resolve();
         setTransition({ phase: 'settling', sessionId: ownerId,
             title: context?.getSession(ownerId)?.title || 'Previous chat',
@@ -78,9 +78,9 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (cancelWork) await context?.cancelSessionWork(ownerId);
             const deadline = Date.now() + retirementTimeoutMs;
             while (true) {
-                if (client.activeLease && client.activeLease.session_id !== ownerId) break;
+                if (!expectedOwner && client.activeLease && client.activeLease.session_id !== ownerId) break;
                 try {
-                    await client.settleActiveLease();
+                    await client.settleActiveLease(undefined, expectedOwner ? { sessionId: ownerId } : {});
                     break;
                 } catch (error) {
                     const retryable = ['lease_requests_in_flight', 'lease_pending', 'lease_settlement_pending'].includes(error?.code)
@@ -197,6 +197,15 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (await client.hasPendingLease()) throw new Error('Private access is still finishing. Try again shortly.');
         },
         getTransition: () => transition,
+        async retireSessionAccess(sessionId) {
+            await client.init();
+            if (retirement && transition?.sessionId === sessionId) await retirement;
+            const owner = typeof client.getPendingLeaseOwner === 'function'
+                ? await client.getPendingLeaseOwner() : client.activeLease?.session_id;
+            if (owner === sessionId) {
+                await startRetirement(sessionId, { cancelWork: false, expectedOwner: true });
+            }
+        },
         getSessionStatus(session) {
             if (queuedSessions.has(session?.id)) return { tone: 'waiting', label: 'Queued' };
             if (transition?.sessionId === session?.id && transition.phase === 'settling') return { tone: 'working', label: 'Finishing' };

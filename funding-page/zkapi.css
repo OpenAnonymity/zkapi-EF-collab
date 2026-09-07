@@ -179,7 +179,8 @@
     white-space: nowrap;
 }
 
-#account-tab-btn.zkapi-private-balance-control {
+#account-tab-btn.zkapi-private-balance-control,
+.payment-funding-control {
     display: inline-flex;
     flex: 0 1 auto;
     width: auto;
@@ -1178,4 +1179,42 @@
         color: hsl(var(--color-muted-foreground)) !important;
         -webkit-text-fill-color: currentColor !important;
     }
+}
+/* One persistent payment choice; funding status stays beside it, away from drafting. */
+.payment-mode-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid hsl(var(--color-border));
+    border-radius: 9px;
+    background: hsl(var(--color-muted) / .25);
+    flex-shrink: 0;
+}
+.payment-mode-control button {
+    padding: 5px 11px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 20px;
+    color: hsl(var(--color-muted-foreground));
+    transition: color .15s, background .15s;
+}
+.payment-mode-control button[aria-pressed="true"] {
+    color: hsl(var(--color-foreground));
+    background: hsl(var(--color-background));
+    box-shadow: 0 1px 3px hsl(var(--color-foreground) / .08);
+}
+.payment-mode-control button:hover:not(:disabled) { color: hsl(var(--color-foreground)); }
+.payment-mode-control button:focus-visible, .payment-funding-control:focus-visible {
+    outline: 2px solid hsl(var(--color-accent-primary));
+    outline-offset: 2px;
+}
+.payment-mode-control button:disabled { cursor: wait; opacity: .6; }
+.payment-funding-control { cursor: pointer; min-height: 34px; }
+.payment-funding-control [data-private-balance-label] { white-space: nowrap; }
+@media (max-width: 640px) {
+    .payment-mode-control button { padding: 5px 8px; }
+    .payment-funding-control { font-size: 11px; gap: 4px; padding-inline: 6px; }
+    .payment-mode-toolbar #share-btn-text, .payment-mode-toolbar #wide-mode-btn { display: none; }
+    .payment-mode-toolbar #share-btn { padding-inline: 6px; }
 }

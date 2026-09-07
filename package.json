@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "OA Chat composed with the zkAPI browser and daemon payment runtime",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "npm run build:browser",
     "build:browser": "node scripts/compose-browser-client.mjs",
@@ -11,9 +13,11 @@
     "test": "npm run test:client && npm run test:build",
     "test:client": "node --test funding-page/*.test.cjs funding-page/*.test.mjs",
     "test:build": "node --test scripts/compose-browser-client.test.mjs",
+    "test:e2e": "node scripts/payment-modes.e2e.mjs",
     "lock:sources": "node scripts/lock-browser-sources.mjs"
   },
   "devDependencies": {
-    "esbuild": "0.27.2"
+    "esbuild": "0.27.2",
+    "playwright-core": "1.63.0"
   }
 }

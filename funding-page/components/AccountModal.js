@@ -5,10 +5,11 @@ import { updateZkapiBalanceControl } from './ZkapiStateExperience.js';
 const MODAL_CLASSES = 'w-full max-w-md rounded-xl border border-border bg-background shadow-2xl mx-4 flex flex-col overflow-hidden';
 
 export default class AccountModal {
-    constructor(app) {
+    constructor(app, { triggerId = 'account-tab-btn', overlayId = 'account-modal' } = {}) {
         this.app = app;
+        this.triggerId = triggerId;
         this.isOpen = false;
-        this.overlay = document.getElementById('account-modal');
+        this.overlay = document.getElementById(overlayId);
         this.view = 'balance';
         this.withdrawMode = 'mutual';
         this.busy = false;
@@ -41,12 +42,12 @@ export default class AccountModal {
     }
 
     attachTabListener() {
-        const tabBtn = document.getElementById('account-tab-btn');
+        const tabBtn = document.getElementById(this.triggerId);
         if (tabBtn) tabBtn.onclick = () => this.isOpen ? this.close() : this.open();
     }
 
     updateTabIndicator() {
-        const tabBtn = document.getElementById('account-tab-btn');
+        const tabBtn = document.getElementById(this.triggerId);
         if (!tabBtn) return;
         updateZkapiBalanceControl(tabBtn, this.app);
     }
@@ -64,7 +65,7 @@ export default class AccountModal {
         this.statusError = false;
         this.render();
         this.overlay.classList.remove('hidden');
-        document.getElementById('account-tab-btn')?.setAttribute('aria-expanded', 'true');
+        document.getElementById(this.triggerId)?.setAttribute('aria-expanded', 'true');
         this.overlay.onclick = event => { if (event.target === this.overlay) this.close(); };
         this.escapeHandler = event => { if (event.key === 'Escape') this.close(); };
         document.addEventListener('keydown', this.escapeHandler);
@@ -84,7 +85,7 @@ export default class AccountModal {
         this.isOpen = false;
         this.overlay.classList.add('hidden');
         this.overlay.innerHTML = '';
-        document.getElementById('account-tab-btn')?.setAttribute('aria-expanded', 'false');
+        document.getElementById(this.triggerId)?.setAttribute('aria-expanded', 'false');
         if (this.escapeHandler) document.removeEventListener('keydown', this.escapeHandler);
         this.escapeHandler = null;
         this.returnFocusEl?.focus?.();

@@ -293,17 +293,21 @@ export default class RightPanel extends SharedRightPanel {
 
     async handleRenewApiKey() {
         if (this.isRenewingKey || !this.currentSession) return;
+        const session = this.currentSession;
+        const reservation = this.app.beginSessionMutation(session.id, { exclusive: true });
+        if (!reservation) return;
         this.isRenewingKey = true;
         this.renderTopSectionOnly();
         try {
-            this.app.services.inference.clearAccessInfo(this.currentSession);
-            await this.app.data.saveSession(this.currentSession);
-            await this.app.acquireAndSetAccess(this.currentSession);
+            this.app.services.inference.clearAccessInfo(session);
+            await this.app.data.saveSession(session);
+            await this.app.acquireAndSetAccess(session);
             this.loadSessionData();
         } catch (error) {
             this.app.showToast?.(error.message || 'Could not refresh the private key.', 'error');
         } finally {
             this.isRenewingKey = false;
+            this.app.endSessionMutation(session.id, reservation);
             this.renderTopSectionOnly();
         }
     }

@@ -699,6 +699,14 @@ class BrowserWalletRuntime extends EventTarget {
         return Boolean(this.activeLease || this.runtime?.journal);
     }
 
+    async getPendingLeaseOwner() {
+        await this.init();
+        return withBrowserWalletLock(this.manifest.deployment_id, async () => {
+            await this.reload();
+            return this.runtime?.lease?.sessionId || this.activeLease?.sessionId || null;
+        });
+    }
+
     async remoteFetch(url, init = {}) {
         const proxyUrl = this.deploymentProxyUrl(url);
         if (proxyUrl) {
@@ -1940,6 +1948,26 @@ class BrowserWalletRuntime extends EventTarget {
         }
         this.activeLease = null;
         return this.walletStatus();
+    }
+
+    async settleSessionLease(sessionId, onProgress = () => {}) {
+        await this.init();
+        if (this.activeLease?.sessionId === sessionId) {
+            // retireActiveLease captures the exact request and checks it again
+            // under the wallet lock before publishing its settlement.
+            await this.retireActiveLease(onProgress);
+        }
+        return withBrowserWalletLock(this.manifest.deployment_id, async () => {
+            await this.reload();
+            // A different tab may have opened a key after our first owner read.
+            // Recovery must never retire that tab's new lease.
+            if (this.runtime?.lease?.sessionId !== sessionId) return;
+            await this.recoverPendingLocked({ retireLostKey: true, onProgress });
+            if (this.runtime?.journal && this.runtime?.lease?.sessionId === sessionId) {
+                throw new BrowserWalletHttpError('This chat’s private key is still being finalized. Try again shortly.',
+                    409, 'lease_pending');
+            }
+        });
     }
 
     async installRecoveredResponse(clientRequestId, onProgress = () => {}) {

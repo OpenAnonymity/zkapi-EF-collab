@@ -4,6 +4,9 @@ OA Chat is a pinned `oa-chat` submodule. The zkAPI entry point lives in
 `funding-page/zkapi-entry.js` and imports `oa-chat/chat/publicApi.js`. Shared chat
 source files are not overlaid, copied back, or rewritten during a build.
 
+The composed app now supports [Tickets and zkAPI in the same chat history](payment-modes.md).
+The toolbar selects access issuance per chat and remembers the choice for new chats.
+
 ## Local builds
 
 Node.js 24+ is required for the JavaScript build. Initialize the committed
