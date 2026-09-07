@@ -15,6 +15,17 @@ cost; zkAPI shows USD per million input/output tokens, with exact per-token
 rates in the pricing tooltip. Models without published token prices say
 `Pricing unavailable` in zkAPI mode.
 
+Auto Router remains the chat's selected model, while each response displays
+the concrete model returned by OpenRouter. The System Panel's usage estimate
+uses that returned model's input/output rates, including exact priced variants.
+Late model metadata reprices the existing preview without resetting tokens;
+stopped partial responses retain the corrected estimate. An unknown returned
+model has no local price instead of inheriting Auto Router's placeholder rate.
+OpenRouter's reported `usage.cost`, including zero, takes precedence over the
+token estimate. Saved usage retains its response-time price across reloads;
+older estimates are not retroactively recalculated. Private balance settlement
+still uses the authoritative key usage, independently of this display estimate.
+
 The combined runtime injects the shared catalog into its zkAPI request adapter.
 It reads the same OpenRouter cache immediately and uses the same refresh and
 offline fallback as Tickets, without waiting for the wallet or narrowing the
@@ -60,6 +71,16 @@ endpoint cannot atomically check the expected chat owner. Mode switching never
 uses that unqualified endpoint to retire a possibly different chat's key.
 
 ## Verification
+
+The Auto Router correction merges OA main `e8dad48` and adds response-pricing
+regressions. All 586 OA tests, 275 client tests, and 10 composition tests pass.
+A fresh adversarial review approved the final diff. Focused tests exercise the
+actual zkAPI SSE adapter, shared controller, usage ledger, both final writes,
+saved-session reload and recovery from message metadata. They cover missing
+provider cost, explicit zero/positive cost, exact model variants, unknown
+pricing, late attribution, cancellation, and sparse final metadata. These
+deterministic tests simulate access and provider boundaries, with no wallet
+transactions.
 
 - `npm test`: wallet, runtime, UI behavior, and deterministic composition checks.
 - `(cd oa-chat && npm test)`: shared chat lifecycle, storage ownership, ticket

@@ -47,9 +47,11 @@ const { default: zkapiClient } = await import('./services/zkapiClient.js');
 const { createZkapiBackend } = await import('./services/inference/backends/zkapiBackend.js');
 const { createPaymentModeRuntime } = await import('./services/paymentModeRuntime.js');
 const { createPaymentModeUi } = await import('./ui/createPaymentModeUi.js');
-const { openRouterBackend } = await import('../oa-chat/chat/publicInferenceApi.js');
+const { openRouterBackend, createInferenceService } = await import('../oa-chat/chat/publicInferenceApi.js');
 const { networkProxy, loadModelCatalog, saveModelCatalog } = await import('../oa-chat/chat/publicRuntimeApi.js');
 const { default: ticketApi } = await import('../oa-chat/chat/api.js');
+const { ChatApp } = await import('../oa-chat/chat/app.js');
+const { createZkapiChatRuntimeCore } = await import('./services/zkapiChatRuntimeCore.mjs');
 
 const CATALOG = [
     { id: 'openrouter/auto', name: 'Auto Router', pricing: { prompt: '0', completion: '0' }, context_length: 128000 },
@@ -195,4 +197,164 @@ test('the standalone zkAPI API retains its legacy catalog when no shared catalog
     const models = createZkapiBackend(legacy).getCachedModels();
     assert.deepEqual(models.map(model => model.id), ['openai/gpt-4o-mini']);
     assert.ok(legacy.getModelBudgetMetadata('openai/gpt-5.6-sol')?.pricing, 'the bundled pricing fallback remains available for uncached models');
+});
+
+function usageHarness(t, api, initialSession) {
+    const session = structuredClone(initialSession || {
+        id: 'routed-private-chat', inferenceBackend: 'zkapi', apiKey: 'fixture-session-binding',
+        model: 'Auto Router'
+    });
+    let savedSession = null;
+    const runtime = createZkapiChatRuntimeCore({
+        client: { init: async () => {}, subscribe: () => () => {} },
+        backend: createZkapiBackend(api),
+        createInferenceService,
+        modelConfiguration: { getDefaultModelConfig: () => ({ defaultModelId: 'openrouter/auto' }) }
+    });
+    t.after(runtime.attach({
+        getSession: id => id === session.id ? session : null,
+        saveSession: async value => { savedSession = structuredClone(value); },
+        refreshPresentation() {}
+    }));
+    // Bypass DOM construction, retaining the actual controller and backend
+    // methods that receive SSE usage and persist the completed message estimate.
+    const app = Object.assign(Object.create(ChatApp.prototype), {
+        runtime,
+        inferenceService: runtime.inferenceService,
+        state: { models: api.getCachedModels(), modelsBackendId: 'zkapi', currentSessionId: session.id }
+    });
+    return { app, runtime, session, readSavedSession: () => structuredClone(savedSession) };
+}
+
+function stubRoutedStream(t, events) {
+    t.mock.method(zkapiClient, 'acquireInferenceAccess', async sessionId => {
+        assert.equal(sessionId, 'fixture-session-binding');
+        return { baseUrl: 'https://inference.example.test/v1', headers: {}, spendingLimitUsd: 1, release() {} };
+    });
+    t.mock.method(zkapiClient, 'refresh', async () => {});
+    return t.mock.method(networkProxy, 'fetchWithRetry', async (url, options) => {
+        assert.equal(url, 'https://inference.example.test/v1/chat/completions');
+        assert.equal(JSON.parse(options.body).model, 'openrouter/auto');
+        const encoder = new TextEncoder();
+        return { ok: true, status: 200, body: new ReadableStream({
+            start(controller) {
+                for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                controller.close();
+            }
+        }) };
+    });
+}
+
+function assertUsageCost(actual, expected) {
+    if (expected === null || expected === 0) assert.equal(actual, expected);
+    else assert.ok(typeof actual === 'number' && Math.abs(actual - expected) < 1e-12,
+        `Expected a $${expected} estimate, received ${actual}`);
+}
+
+test('routed SSE prices survive controller finalization, ledger reload and message recovery', async t => {
+    for (const scenario of [
+        { name: 'catalog rate without provider cost', model: CATALOG[3].id, pricing: CATALOG[3].pricing, cost: 0.0008 },
+        { name: 'null provider cost uses catalog rate', model: CATALOG[3].id, pricing: CATALOG[3].pricing, providerCost: null, cost: 0.0008 },
+        { name: 'exact routed variant rate', model: CATALOG[2].id, pricing: CATALOG[2].pricing, cost: 0.003 },
+        { name: 'provider charge overrides catalog rate', model: CATALOG[3].id, pricing: CATALOG[3].pricing, providerCost: 0.0123, cost: 0.0123 },
+        { name: 'zero provider charge overrides catalog rate', model: CATALOG[3].id, pricing: CATALOG[3].pricing, providerCost: 0, cost: 0 },
+        { name: 'unknown routed model has no router-price fallback', model: 'unknown/unlisted-response', pricing: null, cost: null }
+    ]) await t.test(scenario.name, async t => {
+        saveModelCatalog('openrouter', ticketApi.formatModels(CATALOG));
+        const api = new ZkapiAPI({ modelCatalog: openRouterBackend });
+        const h = usageHarness(t, api);
+        const providerUsage = { prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 };
+        if ('providerCost' in scenario) providerUsage.cost = scenario.providerCost;
+        const transport = stubRoutedStream(t, [
+            { model: scenario.model, choices: [{ delta: { role: 'assistant' } }] },
+            { choices: [{ delta: { content: 'Routed answer' } }] },
+            { choices: [], usage: providerUsage }
+        ]);
+        const message = { id: 'routed-response', role: 'assistant', model: 'Auto Router', content: '' };
+        const result = await h.app.streamCompletionWithRuntime(
+            [{ role: 'user', content: 'Route this request.' }], 'openrouter/auto', h.session,
+            chunk => { message.content += chunk || ''; },
+            usage => h.app.updateResponseModel(message, usage.model, 'openrouter/auto', 'Auto Router', h.session),
+            [], false, new AbortController(), null, null, false, 'medium', message.id
+        );
+        assert.equal(result.model, scenario.model);
+        assert.deepEqual(result.pricing, scenario.pricing);
+        assert.notEqual(message.model, 'Auto Router');
+        assert.equal(message.content, 'Routed answer');
+        assert.equal(h.session.model, 'Auto Router');
+        assertUsageCost(h.session.zkapiUsageLedger[0].estimatedCostUsd, scenario.cost);
+
+        // This is the second upsert performed by the real Send finalization.
+        // It must not replace the routed rate or double count the response.
+        await h.app.recordRuntimeUsage(h.session, message, result);
+        const savedMessage = structuredClone(message);
+        assertUsageCost(savedMessage.estimatedCostUsd, scenario.cost);
+        assert.deepEqual(savedMessage.usagePricing, scenario.pricing);
+        assert.equal(savedMessage.usageProviderReported, typeof scenario.providerCost === 'number');
+        assert.equal(h.session.zkapiUsageLedger.length, 1);
+        assert.equal(transport.mock.callCount(), 1);
+
+        for (const recoverFromMessage of [false, true]) {
+            const savedSession = h.readSavedSession();
+            if (recoverFromMessage) delete savedSession.zkapiUsageLedger;
+            const reloaded = usageHarness(t, api, savedSession);
+            await reloaded.runtime.restoreSession(reloaded.session, [savedMessage]);
+            const ledger = reloaded.session.zkapiUsageLedger;
+            assert.equal(ledger.length, 1);
+            assertUsageCost(ledger[0].estimatedCostUsd, scenario.cost);
+            assert.deepEqual(ledger[0].pricing, scenario.pricing);
+            assert.equal(ledger[0].providerReported, typeof scenario.providerCost === 'number');
+            const summary = reloaded.runtime.getSessionUsageSummary(reloaded.session);
+            assert.equal(summary.promptTokens, 1000);
+            assert.equal(summary.completionTokens, 500);
+            assert.equal(summary.totalTokens, 1500);
+            assert.equal(summary.requests, 1);
+            assert.equal(summary.hasEstimate, scenario.cost !== null);
+            assertUsageCost(summary.estimatedCostUsd, scenario.cost ?? 0);
+        }
+    });
+});
+
+test('late routed model metadata reprices the latest token snapshot before cancellation', async t => {
+    for (const scenario of [
+        { name: 'catalog estimate', model: CATALOG[3].id, pricing: CATALOG[3].pricing, cost: 0.0008 },
+        { name: 'provider zero remains authoritative', model: CATALOG[3].id, pricing: CATALOG[3].pricing, providerCost: 0, cost: 0 },
+        { name: 'unknown routed price remains unknown', model: 'unknown/late-response', pricing: null, cost: null }
+    ]) await t.test(scenario.name, async t => {
+        saveModelCatalog('openrouter', ticketApi.formatModels(CATALOG));
+        const api = new ZkapiAPI({ modelCatalog: openRouterBackend });
+        const h = usageHarness(t, api);
+        const providerUsage = { prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 };
+        if ('providerCost' in scenario) providerUsage.cost = scenario.providerCost;
+        stubRoutedStream(t, [
+            { choices: [{ delta: { content: 'Partial answer' } }] },
+            { usage: providerUsage, choices: [] },
+            { model: scenario.model, choices: [{ delta: { role: 'assistant' } }] }
+        ]);
+        t.mock.method(console, 'error', () => {});
+        const controller = new AbortController();
+        let modelUpdates = 0;
+        await assert.rejects(h.app.streamCompletionWithRuntime(
+            [{ role: 'user', content: 'Route this request.' }], 'openrouter/auto', h.session,
+            () => {}, usage => {
+                if (usage.modelOnly) {
+                    modelUpdates += 1;
+                    assert.equal(h.runtime.getSessionUsageSummary(h.session).totalTokens, 1500);
+                    controller.abort();
+                }
+            }, [], false, controller, null, null, false, 'medium', 'interrupted-response'
+        ), error => error.name === 'AbortError' && error.isCancelled);
+        assert.equal(modelUpdates, 1);
+        const reloaded = usageHarness(t, api, h.readSavedSession());
+        assert.equal(reloaded.session.zkapiUsageLedger.length, 1);
+        const [entry] = reloaded.session.zkapiUsageLedger;
+        assert.equal(entry.model, scenario.model);
+        assert.deepEqual(entry.pricing, scenario.pricing);
+        assertUsageCost(entry.estimatedCostUsd, scenario.cost);
+        assert.equal(entry.providerReported, typeof scenario.providerCost === 'number');
+        assert.equal(entry.promptTokens, 1000);
+        assert.equal(entry.completionTokens, 500);
+        assert.equal(entry.totalTokens, 1500);
+    });
 });
