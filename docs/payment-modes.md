@@ -319,13 +319,44 @@ wallet transactions were not performed. All 153 published assets on each trial
 matched, both manifests and proof pins were verified, health/catalog and security
 headers passed, and both Vercel error-log scans were empty.
 
+## Billing help and expiry history verification — 2026-09-08
+
+The expiry update passed 350 client tests and 10 composition tests, plus fresh
+independent review and re-review of all fixes. Tests cover clock-only deadlines,
+verified claim events, generic closure without payout evidence, preserved
+recovery data, idempotent persistence, failed-storage retries, cursor resets,
+wrong-network and finality failures, malformed events, and public RPC selection
+independent of note ownership. Selected and replacement withdrawals reject a
+saved claim before wallet prompts or replacement-plan mutations. No expiry
+transaction was executed on either live vault; claim outcomes were tested with
+deterministic RPC and storage fixtures.
+
+Live Chrome loaded `assets/app-5V2N6KT5.js` on both final trial deployments.
+On funded Sepolia, both System Panel question marks opened, expiry help worked
+with Tab/Enter, and help stayed open through clock and semantic refreshes.
+Balance details showed the same explanations and retained open state after
+Refresh. Escape returned focus to the remounted Balance details button, including
+a regression fixed after the initial browser check. The existing $5 deposit
+history and conversation remained intact; no false expiry entry appeared for
+the unexpired note. Mainnet selection with no balance opened funding, its
+billing question mark worked, and switching back to Tickets preserved the
+conversation. Both browser error scans were empty. No inference or wallet
+transaction was needed for these help/history checks; live Tinfoil tests remain
+skipped as requested.
+
+All 153 published asset digests matched for each deployment. Both immutable
+manifests, staging OA selection, deployment/proof pins, health/catalog endpoints,
+security headers and root redirects passed. Both Vercel error scans were empty.
+Only the two existing trial project aliases were updated; main and contracts
+remain unchanged.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`ee85c2a91cae5a4ec43dab0bc7d1644d6658cf01`, and the shared OA commit is
+`3ead475f4a89b4d6954a683c3ab564be0a6754ba`, and the shared OA commit is
 `1ec19f1fc7a3f36b4fe0c7631943b4c9b498fca8`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -350,12 +381,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-35kzhww49-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-fcz8u0kn6-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_DNnVvsoivvWc9mjwr9D9MpyD6M1W` (READY).
+- Deployment: `dpl_54uhz98veptCugcnULrVn4Sh6Htb` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `bece5735f932d9a27d46e6749e2021772905c435c4d5252de9b8221e8709d34a`.
-- Validation: 308 client tests and 10 composition tests passed for this change;
+- Build fingerprint: `cfb875fa68b299067637120bf9dfbc51094d511c2206195fe0edca43fe39975f`.
+- Validation: 350 client tests and 10 composition tests passed for this change;
   the unchanged OA code previously passed 602 tests and its final panel
   correction passed 10 focused tests;
   fresh adversarial review approved; all 153 published asset digests matched.
@@ -406,11 +437,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-c0wmuxbxu-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-cg6wkc08q-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_HMU7cpKo4XkqUHdgkU8Kr7JbEfuR` (READY).
+- Deployment: `dpl_H3VJXvnyppg2ky95PTvzcckwQYbt` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `547379851dcfa8f879ba8c0631173132df1d93f5e2c3567f2940347a449e5fd4`.
+- Build fingerprint: `b027a3a2bd2d3a3dc9b789e65fabd228005ed6fc68764c372eef89c073241428`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
