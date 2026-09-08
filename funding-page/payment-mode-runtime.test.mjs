@@ -172,7 +172,7 @@ test('both switch directions keep the same durable conversation and acquire from
     assert.equal((await h.runtime.acquireAccess({ session })).backendId, 'openrouter');
     assert.equal(h.client.activeLease, null);
     assert.equal(session.zkapiSessionId, undefined);
-    assert.equal(session.zkapiSettleBeforeAccess, undefined);
+    assert.equal(session.zkapiSettleBeforeAccess, true, 'private recovery intent survives in ticket mode');
     assert.deepEqual(h.messages, messagesBefore);
     for (const [field, value] of Object.entries(metadataBefore)) assert.deepEqual(session[field], value);
     assert.deepEqual(h.events.filter(([kind]) => ['ticket-access', 'zk-access', 'settle'].includes(kind)),
@@ -180,43 +180,54 @@ test('both switch directions keep the same durable conversation and acquire from
     assert.equal(h.preferences.get(PAYMENT_MODE_PREFERENCE), 'tickets');
 });
 
-test('zkAPI retirement completes before mode persistence and never cancels the backend-change owner', async () => {
+test('Tickets selection and access finish while private retirement remains pending', async () => {
     const retirement = deferred();
     const h = harness({ settle: () => retirement.promise });
     h.select('zk-chat');
-    const changing = h.runtime.changeMode('tickets');
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(h.runtime.isSwitching(), true);
-    assert.equal(h.runtime.isModeLocked(), true);
-    assert.equal(h.stored.get('zk-chat').inferenceBackend, 'zkapi');
-    assert.equal(h.preferences.has(PAYMENT_MODE_PREFERENCE), false);
-    await assert.rejects(h.runtime.changeMode('zkapi'), /Finish or stop/);
-    retirement.resolve();
-    await changing;
+    const messagesBefore = structuredClone(h.messages);
+    await h.runtime.changeMode('tickets');
     assert.equal(h.stored.get('zk-chat').inferenceBackend, 'openrouter');
+    assert.equal(h.preferences.get(PAYMENT_MODE_PREFERENCE), 'tickets');
     assert.equal(h.runtime.isModeLocked(), false);
-    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false,
-        'settlement inside a switch must not abort the shared controller reservation');
+    assert.equal(h.runtime.getTransition().phase, 'settling');
+    assert.equal(await h.runtime.checkCanSend({ sessionId: 'zk-chat' }), true);
+    await h.runtime.prepareTurn({ sessionId: 'zk-chat' });
+    const session = h.sessions.get('zk-chat');
+    const access = await h.runtime.acquireAccess({ session });
+    assert.equal(access.backendId, 'openrouter');
+    session.apiKey = access.key;
+    session.apiKeyInfo = access;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.events.filter(([kind]) => kind === 'settle').length, 1);
+    retirement.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.runtime.getTransition().phase, 'ready');
+    assert.equal(session.apiKey, access.key, 'late private settlement cannot replace the new ticket key');
+    assert.deepEqual(h.messages, messagesBefore);
+    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false);
 });
 
-test('a failed retirement preserves history, current method, credential binding, and the remembered default', async () => {
-    const failure = new Error('Settlement temporarily unavailable');
-    const h = harness({ initialMode: 'zkapi', settle: () => { throw failure; } });
+test('failed private retirement leaves Tickets usable with durable recovery intent', async () => {
+    const h = harness({ initialMode: 'zkapi', settle: () => { throw new Error('Settlement temporarily unavailable'); } });
     h.select('zk-chat');
-    const before = structuredClone(h.sessions.get('zk-chat'));
-    await assert.rejects(h.runtime.changeMode('tickets'), error => error === failure);
-    assert.deepEqual(h.sessions.get('zk-chat'), before);
-    assert.deepEqual(h.stored.get('zk-chat'), before);
-    assert.equal(h.inferenceService.getDefaultBackendId(), 'zkapi');
-    assert.equal(h.preferences.has(PAYMENT_MODE_PREFERENCE), false);
+    const before = structuredClone(h.messages);
+    await h.runtime.changeMode('tickets');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.stored.get('zk-chat').inferenceBackend, 'openrouter');
+    assert.equal(h.stored.get('zk-chat').zkapiSettleBeforeAccess, true);
+    assert.equal(h.inferenceService.getDefaultBackendId(), 'openrouter');
+    assert.equal(h.preferences.get(PAYMENT_MODE_PREFERENCE), 'tickets');
     assert.equal(h.runtime.isModeLocked(), false);
     assert.equal(h.runtime.getTransition().phase, 'error');
+    await h.runtime.prepareTurn({ sessionId: 'zk-chat' });
+    assert.equal((await h.runtime.acquireAccess({ session: h.sessions.get('zk-chat') })).backendId, 'openrouter');
+    assert.deepEqual(h.messages, before);
 });
 
-test('switching after startup waits for wallet hydration before inspecting persisted key ownership', async () => {
+test('wallet hydration never blocks switching to Tickets and a rapid private return sees its barrier', async () => {
     const hydration = deferred();
-    const h = harness({ initialMode: 'zkapi' });
+    const retirement = deferred();
+    const h = harness({ initialMode: 'zkapi', settle: () => retirement.promise });
     h.select('zk-chat');
     h.client.activeLease = null;
     h.client.init = () => hydration.promise;
@@ -225,16 +236,26 @@ test('switching after startup waits for wallet hydration before inspecting persi
         assert.equal(hydrated, true, 'lease ownership cannot be checked against an unhydrated wallet');
         return 'zk-chat';
     };
-    const changing = h.runtime.changeMode('tickets');
-    await Promise.resolve();
-    assert.equal(h.runtime.isSwitching(), true);
-    assert.equal(h.stored.get('zk-chat').inferenceBackend, 'zkapi');
+    await h.runtime.changeMode('tickets');
+    assert.equal(h.runtime.isModeLocked(), false);
+    assert.equal(h.stored.get('zk-chat').inferenceBackend, 'openrouter');
     assert.equal(h.events.some(([kind]) => kind === 'settle'), false);
+    const returning = h.runtime.changeMode('zkapi');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.runtime.getMode(), 'zkapi');
+    assert.equal(h.runtime.isModeLocked(), false);
+    let prepared = false;
+    const preparing = h.runtime.prepareTurn({ sessionId: 'zk-chat' }).then(() => { prepared = true; });
     hydrated = true;
     hydration.resolve();
-    await changing;
+    await returning;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(prepared, false);
     assert.equal(h.events.filter(([kind]) => kind === 'settle').length, 1);
-    assert.equal(h.stored.get('zk-chat').inferenceBackend, 'openrouter');
+    retirement.resolve();
+    await preparing;
+    assert.equal(prepared, true);
+    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false);
 });
 
 test('an expired owned lease still settles, while another chat\'s persisted lease remains untouched', async () => {
@@ -244,6 +265,7 @@ test('an expired owned lease still settles, while another chat\'s persisted leas
         h.client.activeLease = null;
         h.client.getPendingLeaseOwner = async () => owner;
         await h.runtime.changeMode('tickets');
+        await new Promise(resolve => setImmediate(resolve));
         assert.equal(h.events.filter(([kind]) => kind === 'settle').length, owner === 'zk-chat' ? 1 : 0);
         assert.equal(h.stored.get('zk-chat').inferenceBackend, 'openrouter');
     }
@@ -378,4 +400,79 @@ test('preflight and usage follow the request owner even while another payment mo
     const before = h.events.filter(([kind]) => kind === 'settle').length;
     await h.runtime.prepareTurn({ sessionId: 'ticket-chat' });
     assert.equal(h.events.filter(([kind]) => kind === 'settle').length, before);
+});
+
+
+test('a private retry for another chat cannot cancel the old owner now using Tickets', async () => {
+    let attempts = 0;
+    const h = harness({ settle: () => {
+        if (++attempts === 1) throw new Error('Try later');
+    } });
+    h.select('zk-chat');
+    await h.runtime.changeMode('tickets');
+    await new Promise(resolve => setImmediate(resolve));
+    const ticketSession = h.sessions.get('zk-chat');
+    ticketSession.apiKey = (await h.runtime.acquireAccess({ session: ticketSession })).key;
+    h.select('ticket-chat');
+    await h.runtime.changeMode('zkapi');
+    await h.runtime.prepareTurn({ sessionId: 'ticket-chat' });
+    assert.equal(attempts, 2);
+    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false);
+    assert.equal(ticketSession.apiKey, 'ticket-key:zk-chat');
+    assert.equal(ticketSession.inferenceBackend, 'openrouter');
+});
+
+test('a reloaded ticket chat retains owner-scoped retirement intent on returning to zkAPI', async () => {
+    const retirement = deferred();
+    const h = harness({ settle: () => retirement.promise });
+    const session = h.sessions.get('zk-chat');
+    Object.assign(session, { inferenceBackend: 'openrouter', apiKey: 'new-ticket-key',
+        apiKeyInfo: { backendId: 'openrouter' }, zkapiSettleBeforeAccess: true });
+    delete session.zkapiSessionId;
+    h.select('zk-chat');
+    await h.runtime.changeMode('zkapi');
+    assert.equal(h.stored.get(session.id).zkapiSettleBeforeAccess, true);
+    assert.equal(session.apiKey, null);
+    let prepared = false;
+    const preparing = h.runtime.prepareTurn({ sessionId: session.id }).then(() => { prepared = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(prepared, false, 'the restored same-owner key must close before new private access');
+    retirement.resolve();
+    await preparing;
+    assert.equal(h.events.filter(([kind]) => kind === 'settle').length, 1);
+    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false);
+});
+
+test('a wallet hydration failure cannot reject the successful Tickets selection', async () => {
+    const h = harness({ initialMode: 'zkapi' });
+    h.select('zk-chat');
+    h.client.init = async () => { throw new Error('Wallet offline'); };
+    await h.runtime.changeMode('tickets');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.runtime.getMode(), 'tickets');
+    assert.equal(h.runtime.isModeLocked(), false);
+    assert.equal(h.runtime.getTransition().phase, 'error');
+    assert.equal((await h.runtime.acquireAccess({ session: h.sessions.get('zk-chat') })).backendId, 'openrouter');
+});
+
+
+test('a failed mode save keeps the private chat intact while its registered retirement still gates reuse', async () => {
+    const retirement = deferred();
+    const h = harness({ initialMode: 'zkapi', settle: () => retirement.promise,
+        save: () => { throw new Error('Storage unavailable'); } });
+    h.select('zk-chat');
+    const before = structuredClone(h.sessions.get('zk-chat'));
+    await assert.rejects(h.runtime.changeMode('tickets'), /Storage unavailable/);
+    assert.deepEqual(h.sessions.get('zk-chat'), before);
+    assert.deepEqual(h.stored.get('zk-chat'), before);
+    assert.equal(h.inferenceService.getDefaultBackendId(), 'zkapi');
+    assert.equal(h.preferences.has(PAYMENT_MODE_PREFERENCE), false);
+    assert.equal(h.runtime.isModeLocked(), false);
+    let prepared = false;
+    const preparing = h.runtime.prepareTurn({ sessionId: 'zk-chat' }).then(() => { prepared = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(prepared, false);
+    retirement.resolve();
+    await preparing;
+    assert.equal(h.events.some(([kind]) => kind === 'cancel'), false);
 });

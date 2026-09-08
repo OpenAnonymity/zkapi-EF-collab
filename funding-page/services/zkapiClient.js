@@ -2347,7 +2347,7 @@ class ZkapiClient extends EventTarget {
         // parameter. Never issue a global settlement for a mode change.
         if (sessionId && !this.browserMode) {
             if (await this.getPendingLeaseOwner() !== sessionId) return;
-            throw new Error('Close the active private key in the local daemon before changing payment methods.');
+            throw new Error('Close the active private key in the local daemon before using zkAPI again.');
         }
         const hasPendingRequest = Boolean(this.activeLease || this.wallet?.pending_request);
         const activityId = hasPendingRequest ? this.beginActivity('settlement', {

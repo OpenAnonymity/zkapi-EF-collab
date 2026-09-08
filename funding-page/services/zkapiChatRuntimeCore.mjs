@@ -76,8 +76,18 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
         // Assign the promise before any await; a rapid Send sees this barrier.
         const job = Promise.resolve().then(async () => {
             if (cancelWork) await context?.cancelSessionWork(ownerId);
+            if (expectedOwner) {
+                // Hydration and owner discovery belong inside the registered
+                // barrier: a fast return to private mode must see them too.
+                await client.init();
+            }
             const deadline = Date.now() + retirementTimeoutMs;
             while (true) {
+                if (expectedOwner) {
+                    const owner = typeof client.getPendingLeaseOwner === 'function'
+                        ? await client.getPendingLeaseOwner() : client.activeLease?.session_id;
+                    if (owner !== ownerId) break;
+                }
                 if (!expectedOwner && client.activeLease && client.activeLease.session_id !== ownerId) break;
                 try {
                     await client.settleActiveLease(undefined, expectedOwner ? { sessionId: ownerId } : {});
@@ -171,6 +181,9 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (signal?.aborted) throw abortError();
             const activeOwner = client.activeLease?.session_id;
             if (!retirement && activeOwner && activeOwner !== sessionId) startRetirement(activeOwner);
+            if (!retirement && context?.getSession(sessionId)?.zkapiSettleBeforeAccess) {
+                startRetirement(sessionId, { cancelWork: false, expectedOwner: true });
+            }
             if (transition?.phase === 'error' && !retirement) startRetirement(transition.sessionId, { cancelWork: transition.sessionId !== sessionId });
             if (!retirement) return;
             queuedSessions.set(sessionId, (queuedSessions.get(sessionId) || 0) + 1);
@@ -197,14 +210,8 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (await client.hasPendingLease()) throw new Error('Private access is still finishing. Try again shortly.');
         },
         getTransition: () => transition,
-        async retireSessionAccess(sessionId) {
-            await client.init();
-            if (retirement && transition?.sessionId === sessionId) await retirement;
-            const owner = typeof client.getPendingLeaseOwner === 'function'
-                ? await client.getPendingLeaseOwner() : client.activeLease?.session_id;
-            if (owner === sessionId) {
-                await startRetirement(sessionId, { cancelWork: false, expectedOwner: true });
-            }
+        retireSessionAccess(sessionId) {
+            return startRetirement(sessionId, { cancelWork: false, expectedOwner: true });
         },
         getSessionStatus(session) {
             if (queuedSessions.has(session?.id)) return { tone: 'waiting', label: 'Queued' };

@@ -7,7 +7,8 @@ export default class PaymentModeRightPanel extends ZkapiRightPanel {
     }
 
     handleZkapiChange(detail) {
-        if (!this.isTicketMode()) super.handleZkapiChange(detail);
+        if (this.isTicketMode()) this.updateBackgroundClosingNotice();
+        else super.handleZkapiChange(detail);
     }
 
     loadSessionData() {
@@ -18,8 +19,29 @@ export default class PaymentModeRightPanel extends ZkapiRightPanel {
 
     generateFundingSectionHTML() {
         return this.isTicketMode()
-            ? TicketRightPanel.prototype.generateFundingSectionHTML.call(this)
+            ? `${TicketRightPanel.prototype.generateFundingSectionHTML.call(this)}
+                <div id="zkapi-ticket-closing-notice" class="px-3 pb-3" ${this.isClosingPreviousChat() ? '' : 'hidden'}>
+                    <section class="zkapi-panel-experience zkapi-panel-experience--quiet" role="status" aria-live="polite" aria-atomic="true">
+                        <div class="zkapi-panel-state-heading">
+                            <span class="zkapi-state-spinner" aria-hidden="true"></span>
+                            <div><strong>Closing previous chat</strong><p>You can keep using Tickets.</p></div>
+                        </div>
+                    </section>
+                </div>`
             : super.generateFundingSectionHTML();
+    }
+
+    isClosingPreviousChat() {
+        return ['settling', 'waiting'].includes(this.app.integration.getTransition?.()?.phase);
+    }
+
+    updateBackgroundClosingNotice() {
+        // Settlement events must not remount ticket forms or ephemeral-key
+        // controls. Only this keyed notice changes as the private key closes.
+        const notice = document.getElementById('zkapi-ticket-closing-notice');
+        if (!notice) return;
+        const hidden = !this.isClosingPreviousChat();
+        if (notice.hidden !== hidden) notice.hidden = hidden;
     }
 
     getMissingApiKeyStatus() {
@@ -46,5 +68,6 @@ export default class PaymentModeRightPanel extends ZkapiRightPanel {
             this.loadSessionData();
         }
         if (mode === 'zkapi') super.onRuntimePresentationChange();
+        else this.updateBackgroundClosingNotice();
     }
 }

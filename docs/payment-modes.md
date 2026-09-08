@@ -75,11 +75,22 @@ and export remain available.
 
 Switching is disabled while the selected chat has a response, access request,
 title, or timeline mutation in progress. Stop or finish that operation first.
-Switching from zkAPI settles the captured chat's owned lease before the backend
-change is saved. The wallet checks ownership again under its lock to preserve
-another tab's newer lease. A failed settlement or save retains the current mode
-and history. An unowned interrupted proof journal remains in the existing
-wallet recovery store. The next private request recovers it normally.
+Switching from zkAPI starts settlement of the captured chat's owned lease in
+background and saves Tickets without waiting for wallet hydration or settlement.
+Ticket access and responses proceed independently, even if settlement fails.
+The ticket System Panel shows only a compact closing notice while it runs;
+updates preserve the ticket controls and key display. A private retry must never
+cancel work in a conversation that has since changed to Tickets.
+
+The private runtime registers its retirement barrier synchronously, before
+wallet hydration. Returning to zkAPI waits for that barrier; a durable
+`zkapiSettleBeforeAccess` marker preserves the same requirement after reload.
+Recovery settlement is scoped to the captured session and rechecks ownership
+under the wallet lock, preserving another tab's newer lease. Settlement failures
+retain wallet recovery state and diagnostics without reverting Tickets. Only a
+failed session save keeps the previous selected method and default. An unowned
+interrupted proof journal remains in the wallet recovery store and the next
+private request recovers it normally.
 
 Tickets keep OA's verified ticket-redemption path. zkAPI keeps its private proof
 and verified ephemeral-key path. Credentials are cleared at a successful mode
@@ -103,10 +114,11 @@ switching back to Tickets restores the user's choices. The shared standalone
 OA app retains its normal feature defaults, and the legacy standalone zkAPI
 shell retains its prior restricted interface.
 
-The new Vercel app uses the browser wallet. A local daemon with an active key
-must close that key before switching methods, because its legacy settlement
-endpoint cannot atomically check the expected chat owner. Mode switching never
-uses that unqualified endpoint to retire a possibly different chat's key.
+The new Vercel app uses the browser wallet. A local daemon's legacy settlement
+endpoint cannot atomically check the expected chat owner. Tickets selection can
+still proceed, but returning to private access requires closing its old key in
+the daemon. Mode switching never uses the unqualified endpoint to retire a
+possibly different chat's key.
 
 ## Verification
 

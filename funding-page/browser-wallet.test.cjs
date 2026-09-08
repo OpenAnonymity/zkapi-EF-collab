@@ -497,7 +497,7 @@ test('OA credit-exhaustion recovery immediately settles the zkAPI lease', () => 
     const backend = fs.readFileSync(path.join(__dirname, 'services/inference/backends/zkapiBackend.js'), 'utf8');
     assert.match(backend, /refreshOnCreditExhaustion: true/);
     assert.match(backend, /session\.zkapiSettleBeforeAccess = true/);
-    assert.match(backend, /await zkapiClient\.settleActiveLease\(\)/);
+    assert.match(backend, /await zkapiClient\.settleActiveLease\(undefined, \{ sessionId: session\.id \}\)/);
     assert.match(backend, /delete session\.zkapiSettleBeforeAccess/);
 });
 

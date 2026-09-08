@@ -113,7 +113,7 @@ export function createZkapiBackend(api = zkapiAPI) {
             }
             if (!session?.id) throw new Error('No active chat is available.');
             if (session.zkapiSettleBeforeAccess) {
-                await zkapiClient.settleActiveLease();
+                await zkapiClient.settleActiveLease(undefined, { sessionId: session.id });
                 delete session.zkapiSettleBeforeAccess;
             }
             const token = session.zkapiSessionId || session.apiKey || session.id;

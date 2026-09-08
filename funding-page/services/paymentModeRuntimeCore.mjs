@@ -33,7 +33,12 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
         isModeLocked: () => switching || Boolean(context?.isSessionBusy()),
         attach(value) {
             context = value;
-            return zkRuntime.attach(value);
+            return zkRuntime.attach({ ...value,
+                // A later private-key retry may still name this conversation
+                // after it has moved to Tickets. Never cancel its new work.
+                cancelSessionWork: sessionId => modeFor(value.getSession(sessionId)) === 'zkapi'
+                    ? value.cancelSessionWork(sessionId) : undefined
+            });
         },
         async changeMode(mode) {
             if (!Object.hasOwn(PAYMENT_MODES, mode)) throw new Error('Choose Tickets or zkAPI.');
@@ -68,12 +73,18 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
                 }
             }
         },
-        async beforeBackendChange({ session, previousBackendId }) {
-            if (previousBackendId === 'zkapi') await zkRuntime.retireSessionAccess(session.id);
+        beforeBackendChange({ session, previousBackendId }) {
+            if (previousBackendId === 'zkapi') {
+                // Register the private-access barrier synchronously, but let
+                // Tickets proceed independently of wallet/network settlement.
+                void zkRuntime.retireSessionAccess(session.id).catch(() => {});
+                // Keep recovery intent through reload and a switch back. This
+                // marker never contains a credential or blocks ticket access.
+                session.zkapiSettleBeforeAccess = true;
+            }
             // An OA key and a zkAPI session binding are different credentials.
             // Never carry either into the other backend's issuance request.
             delete session.zkapiSessionId;
-            delete session.zkapiSettleBeforeAccess;
         },
         acquireAccess(options) {
             return modeFor(options.session) === 'tickets'
