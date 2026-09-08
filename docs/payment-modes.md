@@ -182,13 +182,24 @@ removed. One eight-ticket staging invite was redeemed for these checks, and
 its raw handoff files were removed; nine staging tickets remain in the Sepolia
 trial browser. No mainnet wallet transactions were performed.
 
+The funding-on-selection correction passed all 281 client and 10 composition
+tests, followed by 31 focused runtime tests after the review's slow-navigation
+guard. Live Chrome reproduced the old missing dialog, then verified the new
+deployment opens it immediately after selecting zkAPI in both an empty view
+and the existing unfunded `cedar-lark-23` chat. No Send action was needed.
+Escape and Close kept zkAPI selected; reload preserved the historical answer
+and mode without reopening the dismissed dialog. The funded Sepolia wallet
+($4.96) stayed in chat on selection. Both pages had zero browser errors, and
+both deployments passed all 153 asset hashes with no Vercel error logs.
+Wallet connection, deposit, and Tinfoil inference were not invoked.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`3d61abba5fd1fe97806f1164ffa87d30fce1be04`, and the shared OA commit is
+`1e60a43db5bcb3ee8e6a662e041006d3c642e791`, and the shared OA commit is
 `1ec19f1fc7a3f36b4fe0c7631943b4c9b498fca8`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -210,16 +221,17 @@ The OA org selection does not change the network-specific zkAPI vault,
 deployment manifest, proof keys, or verifier pins. The mainnet configuration
 and proof assets retain their prior digests.
 
-## Sepolia trial deployment — 2026-09-06
+## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-24jcd0mki-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-ilresoh22-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_DV58nWRZd7NECF8K52XByoYiTM8L` (READY).
+- Deployment: `dpl_AumhJZNV3ssvGvv4SVfdJTNBSJgt` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `c0246357d5d4f2b83a2a29214e8a39c7840410624b1b4f573fc47900463b0d4b`.
-- Validation: 602 OA tests, 276 client tests, 10 composition tests passed;
-  the final panel correction also passed its 10 focused tests;
+- Build fingerprint: `d3ad57dc5cab0d3c94927effafde93d99a5d57864720cf965f55a69d058b9112`.
+- Validation: 281 client tests and 10 composition tests passed for this change;
+  the unchanged OA code previously passed 602 tests and its final panel
+  correction passed 10 focused tests;
   fresh adversarial review approved; all 153 published asset digests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
   ticket, verifier, wallet, and provider boundaries and zero uncaught
@@ -265,14 +277,14 @@ project, and run `vercel build --prod` followed by
 `vercel deploy --prebuilt --prod`. A default build without the explicit org
 selection would restore the production OA org and is not this trial's artifact.
 
-## Mainnet trial deployment — 2026-09-06
+## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-h692ljy54-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-qzp01bw37-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_5qW47zjpyrrJFPbQAwuXtfv343UF` (READY).
+- Deployment: `dpl_9vSEpX6cs3adxJWeUbwCREtccJsy` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `a9552f80d3469aa1bb393e6485cf4868676300f11b540d80fe400b919a911076`.
+- Build fingerprint: `527f0b6c6eaf75588dfd68e16fe8c6cb635d4769ef4a5263d534e5dc2702e7be`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
