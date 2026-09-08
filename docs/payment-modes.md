@@ -251,13 +251,39 @@ wallet transactions, inference requests, or Tinfoil calls.
 All 153 published asset hashes matched on each trial app; health, catalog,
 redirects, security headers, and Vercel error-log checks passed.
 
+The background-settlement release passed all 308 client and 10 composition
+tests. A fresh adversarial reviewer independently passed 45 focused tests and
+approved the diff. Coverage includes slow wallet hydration, pending/failed
+settlement, immediate ticket access, a rapid return to private access, recovery
+after reload, failed mode persistence, and protecting a new ticket response
+from an old private-key retry. Backend tests exercise the actual scoped
+settlement call and the wallet's check against another chat's newer lease.
+
+Live Chrome on Sepolia resumed the `blue-heron-62` conversation with a real
+GPT-4o-mini zkAPI response. While its bounded key was still active, selecting
+Tickets immediately showed Tickets selected, enabled payment controls and Send,
+and the compact closing notice. Sending then redeemed one staging ticket and
+returned `blue-heron-62` through a verified station while the closing notice was
+still visible. Background settlement subsequently completed and removed the
+notice without changing the ticket mode, key display, or response. Reload kept
+both new responses and Tickets; eight staging tickets remain. An automatic
+confidential-key request encountered the previously known staging service
+unavailability; Tinfoil testing remains excluded and no credential was configured.
+
+Both browser tabs loaded `assets/app-4N3VBW5W.js`. The mainnet UI retained its
+existing transcript, opened funding when selecting zkAPI with no private note,
+and switched back to Tickets normally; it reported no browser errors. Mainnet
+wallet transactions were not performed. All 153 published assets on each trial
+matched, both manifests and proof pins were verified, health/catalog and security
+headers passed, and both Vercel error-log scans were empty.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`d720bc09f43c030b948e6c592c7f54bf93c3ed9b`, and the shared OA commit is
+`ee85c2a91cae5a4ec43dab0bc7d1644d6658cf01`, and the shared OA commit is
 `1ec19f1fc7a3f36b4fe0c7631943b4c9b498fca8`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -282,12 +308,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-5uf1p7jxr-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-35kzhww49-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_FQs6zVGNmH22ZWXk8R6HX3jakQXX` (READY).
+- Deployment: `dpl_DNnVvsoivvWc9mjwr9D9MpyD6M1W` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `64015c6f9acba1d2a50bca58795eef40aa89031a160ebabd0d2882341d8c76c5`.
-- Validation: 296 client tests and 10 composition tests passed for this change;
+- Build fingerprint: `bece5735f932d9a27d46e6749e2021772905c435c4d5252de9b8221e8709d34a`.
+- Validation: 308 client tests and 10 composition tests passed for this change;
   the unchanged OA code previously passed 602 tests and its final panel
   correction passed 10 focused tests;
   fresh adversarial review approved; all 153 published asset digests matched.
@@ -338,11 +364,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-qbxdzbxkf-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-c0wmuxbxu-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_37UruaM1Cfih41UMCzpdCam83pFM` (READY).
+- Deployment: `dpl_HMU7cpKo4XkqUHdgkU8Kr7JbEfuR` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `256e300fff33d48b7dffebe31bacdd0ac83525d8547b1d15c69dee0f5f83ca59`.
+- Build fingerprint: `547379851dcfa8f879ba8c0631173132df1d93f5e2c3567f2940347a449e5fd4`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
