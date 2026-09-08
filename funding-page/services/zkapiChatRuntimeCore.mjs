@@ -154,12 +154,12 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             void client.init().then(publish, publish);
             return () => { disposed = true; unsubscribe(); };
         },
-        async checkCanSend({ signal } = {}) {
+        async checkCanSend({ signal, shouldOpenFunding = () => true } = {}) {
             if (signal?.aborted) throw abortError();
             await client.init();
             if (signal?.aborted) throw abortError();
             if (client.withdrawalBlocksChat || !client.hasNote) {
-                context?.openFunding();
+                if (shouldOpenFunding()) context?.openFunding();
                 return false;
             }
             return true;

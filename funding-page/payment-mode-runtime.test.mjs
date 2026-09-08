@@ -76,6 +76,7 @@ function harness({ initialMode = 'tickets', settle = null, save = null, ticketEr
         cancelSessionWork: async id => events.push(['cancel', id]),
         logLocalEvent: () => {},
         openFunding: () => events.push(['funding']),
+        showToast: (...args) => events.push(['toast', ...args]),
         setProgress: () => {},
         async saveSession(session) {
             await save?.(session);
@@ -251,11 +252,87 @@ test('an expired owned lease still settles, while another chat\'s persisted leas
 test('a failed durable write does not advertise a changed method or persist the new default', async () => {
     const h = harness({ save: () => { throw new Error('Storage unavailable'); } });
     h.select('ticket-chat');
+    h.client.hasNote = false;
     await assert.rejects(h.runtime.changeMode('zkapi'), /Storage unavailable/);
     assert.equal(h.sessions.get('ticket-chat').inferenceBackend, 'openrouter');
     assert.equal(h.inferenceService.getDefaultBackendId(), 'openrouter');
     assert.equal(h.preferences.has(PAYMENT_MODE_PREFERENCE), false);
     assert.equal(h.runtime.isSwitching(), false);
+    assert.equal(h.events.some(([kind]) => kind === 'funding'), false);
+});
+
+test('selecting zkAPI opens funding for an unfunded new or historical chat without issuing keys', async () => {
+    for (const sessionId of [null, 'ticket-chat']) {
+        const h = harness();
+        h.select(sessionId);
+        h.client.hasNote = false;
+        await h.runtime.changeMode('zkapi');
+        assert.equal(h.runtime.getMode(), 'zkapi');
+        assert.equal(h.preferences.get(PAYMENT_MODE_PREFERENCE), 'zkapi');
+        assert.equal(h.events.filter(([kind]) => kind === 'funding').length, 1);
+        assert.equal(h.events.some(([kind]) => ['settle', 'ticket-access', 'zk-access'].includes(kind)), false);
+        if (sessionId) assert.equal(h.stored.get(sessionId).inferenceBackend, 'zkapi');
+        await h.runtime.changeMode('tickets');
+        assert.equal(h.events.filter(([kind]) => kind === 'funding').length, 1);
+    }
+});
+
+test('funded wallets stay in chat even when they do not have an active key', async () => {
+    const h = harness();
+    h.client.activeLease = null;
+    await h.runtime.changeMode('zkapi');
+    assert.equal(h.events.some(([kind]) => kind === 'funding'), false);
+});
+
+test('wallet restoration finishes before deciding to show funding', async () => {
+    const h = harness();
+    const hydration = deferred();
+    h.client.hasNote = false;
+    h.client.init = () => hydration.promise;
+    const changing = h.runtime.changeMode('zkapi');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.runtime.getMode(), 'zkapi');
+    assert.equal(h.runtime.isModeLocked(), false, 'wallet loading does not trap the user in the selected mode');
+    assert.equal(h.events.some(([kind]) => kind === 'funding'), false);
+    h.client.hasNote = true;
+    hydration.resolve();
+    await changing;
+    assert.equal(h.events.some(([kind]) => kind === 'funding'), false);
+});
+
+test('late funding checks cannot open over another chat or a newer payment choice', async () => {
+    for (const nextAction of ['navigate', 'navigation-pending', 'tickets', 'zkapi-again']) {
+        const h = harness();
+        const hydration = deferred();
+        h.select('ticket-chat');
+        h.client.hasNote = false;
+        h.client.activeLease = null;
+        h.client.init = () => hydration.promise;
+        const first = h.runtime.changeMode('zkapi');
+        await new Promise(resolve => setImmediate(resolve));
+        let second;
+        if (nextAction === 'navigate') h.select('zk-chat');
+        else if (nextAction === 'navigation-pending') h.setBusy(true);
+        else if (nextAction === 'tickets') {
+            // The empty composer changes the default without retiring a chat key.
+            h.select(null);
+            await h.runtime.changeMode('tickets');
+        } else second = h.runtime.changeMode('zkapi');
+        hydration.resolve();
+        await Promise.all([first, second]);
+        assert.equal(h.events.filter(([kind]) => kind === 'funding').length, nextAction === 'zkapi-again' ? 1 : 0);
+    }
+});
+
+test('a wallet loading failure keeps the successful selection and reports a balance-check error', async () => {
+    const h = harness();
+    h.select('ticket-chat');
+    h.client.init = async () => { throw new Error('Wallet offline'); };
+    await h.runtime.changeMode('zkapi');
+    assert.equal(h.stored.get('ticket-chat').inferenceBackend, 'zkapi');
+    assert.equal(h.preferences.get(PAYMENT_MODE_PREFERENCE), 'zkapi');
+    assert.equal(h.events.some(([kind]) => kind === 'funding'), false);
+    assert.match(h.events.find(([kind]) => kind === 'toast')[1], /zkAPI selected.*could not be checked/);
 });
 
 test('busy chat and invalid mode requests cannot trigger settlement, acquisition, or preference writes', async () => {

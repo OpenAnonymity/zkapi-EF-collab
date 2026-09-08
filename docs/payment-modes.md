@@ -6,8 +6,15 @@ for funding, balance details, and ticket management. The toolbar and composer
 have no duplicate funding status. Detailed access preparation continues to
 appear with the pending assistant response. The standard panel toggle keeps
 these controls accessible when the panel is collapsed, including on mobile.
-The private-balance modal has no toolbar trigger; panel actions and send
-preflight still open it and return focus to their initiating control.
+Selecting zkAPI checks the restored wallet and opens the funding dialog when
+there is no private note, using the same funding/recovery check as Send.
+Funded wallets stay in the chat. Closing the dialog keeps zkAPI selected;
+it stays closed until another explicit funding action or send attempt.
+The check runs after the payment choice is saved, and a late wallet result
+cannot open it over another chat or a subsequent payment selection. Wallet
+loading errors report that the mode changed but the balance could not be
+checked, rather than treating an unknown wallet as unfunded. Panel actions and
+send preflight also open the dialog and return focus to their initiating control.
 
 Both modes use the ordinary OA OpenRouter model catalog, display names, pinned
 and disabled models, and selection defaults. Tickets show the normal ticket

@@ -64,7 +64,7 @@ export function createPaymentModeUi(runtime) {
             overlay.className = document.getElementById('account-modal').className;
             overlay.classList.add('hidden');
             document.body.append(overlay);
-            // System Panel actions and send preflight open this modal directly.
+            // Payment selection, System Panel actions and send preflight open it.
             privateBalance = new ZkapiAccountModal(app, { triggerId: null, overlayId: 'payment-balance-modal' });
             privateBalance.updateTabIndicator = renderControls;
             renderControls();

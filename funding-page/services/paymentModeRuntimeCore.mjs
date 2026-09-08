@@ -6,6 +6,7 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
     modelConfiguration, preferenceStorage = null, initialMode = 'tickets' }) {
     let context = null;
     let switching = false;
+    let selectionGeneration = 0;
     const modeFor = session => session
         ? (session.inferenceBackend || inferenceService.getLegacyBackendId?.(session)) === 'zkapi' ? 'zkapi' : 'tickets'
         : inferenceService.getDefaultBackendId() === 'zkapi' ? 'zkapi' : 'tickets';
@@ -38,6 +39,9 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
             if (!Object.hasOwn(PAYMENT_MODES, mode)) throw new Error('Choose Tickets or zkAPI.');
             if (!context) throw new Error('Chat is still loading. Please try again.');
             if (runtime.isModeLocked()) throw new Error('Finish or stop the current response before switching payment methods.');
+            const owner = context;
+            const session = context.getCurrentSession();
+            const generation = ++selectionGeneration;
             switching = true;
             context.refreshPresentation();
             try {
@@ -47,6 +51,21 @@ export function createPaymentModeRuntimeCore({ zkRuntime, inferenceService, acqu
             } finally {
                 switching = false;
                 context.refreshPresentation();
+            }
+            if (mode === 'zkapi') {
+                // Wallet restoration can outlive this selection. Reuse send
+                // preflight without opening a dialog over another chat/mode.
+                const shouldOpenFunding = () => context === owner
+                    && selectionGeneration === generation
+                    && context.getCurrentSession() === session
+                    && !context.isSessionBusy()
+                    && runtime.getMode() === 'zkapi';
+                try {
+                    await zkRuntime.checkCanSend({ shouldOpenFunding });
+                } catch {
+                    if (shouldOpenFunding()) context.showToast?.(
+                        'zkAPI selected, but your private balance could not be checked. Reload to retry.', 'error');
+                }
             }
         },
         async beforeBackendChange({ session, previousBackendId }) {
