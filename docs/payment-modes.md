@@ -16,7 +16,7 @@ loading errors report that the mode changed but the balance could not be
 checked, rather than treating an unknown wallet as unfunded. Panel actions and
 send preflight also open the dialog and return focus to their initiating control.
 
-Balance details links to **Payment history**, combining deposits and withdrawals
+Balance details links to **Payment history**, combining deposits, withdrawals, and expiry events
 in one list with amounts, status, dates, and transaction links when known.
 Pending deposits remain visibly unconfirmed and link to their existing recovery
 flow. Withdrawal checks, finalization, and recovery actions remain available in
@@ -28,8 +28,50 @@ Confirmation records and the confirmed wallet state are saved atomically.
 Existing notes, withdrawal-held notes, and archived notes contribute recoverable
 older deposits using their original deposit amount. Missing historical dates
 and transaction hashes remain unknown; history does not infer them from a later
-withdrawal or query the chain for a user's payment activity. Private note
+withdrawal. Private note
 secrets, proofs, and recovery payloads are excluded from history records.
+
+The question mark beside **Private balance** explains billing, matching the
+ticket help pattern. The separate question mark beside the expiry countdown
+explains the note deadline. Both controls support keyboard use and preserve
+their open state across background balance updates; clock ticks update text
+without replacing the controls.
+
+Expiry does **not** automatically refund unused funds in the deployed protocol.
+Both trial vaults report a 30-day `noteTtl`; the contract rounds the deadline up
+to the next UTC day, so a deposit lasts 30–31 days. This is independent of the
+five-minute temporary chat key. `ZkApiVault.claimExpired` requires an explicit
+transaction after the deadline while the note is Active. It closes the note,
+pays the **entire original deposit** to the service treasury, and emits
+`ExpiredClaimed`. The note contains no original depositor/refund address.
+The clock alone does not move funds. A mutual withdrawal or finalized escape
+instead pays the proven remaining amount to its chosen, proof-bound destination
+and the used amount to the treasury. An expired but unclaimed Active note can
+still be withdrawn if that transaction wins before an expiry claim; an already
+pending escape cannot be expiry-claimed. These semantics were checked in the
+deployed-source contract revision and the current pin, plus public read-only
+getters on both live vaults. No contract or treasury automation was changed.
+
+Payment history records **Expiry deadline passed** locally without claiming a
+transfer. A finalized, canonical `ExpiredClaimed` event changes that entry to
+**Expiry claim**, with the original amount, actual block date, and transaction
+link; it explicitly says no refund was made. The reader scans all expiry events
+for the public vault and validates public event blocks before matching notes
+locally. No private note IDs appear in RPC filters or determine block requests.
+Wrong-network, malformed-event, and finality failures do not advance the cursor.
+Bounded scans resume on the next background check or **Check expiry payments**.
+The saved claim and expiry metadata survive reload and note archival. A generic
+Closed vault status is not proof of a withdrawal: history labels a payment
+Returned only after a matching payout event was verified, and an expiry claim
+supersedes the abandoned withdrawal row. Legacy closure with missing payout
+evidence remains explicitly unverified.
+
+A confirmed expiry claim shows zero available balance and removes withdrawal
+actions. **Start a new balance** explicitly archives the claimed note while
+preserving its private recovery material and payment history. An expired note
+without a confirmed claim retains its amount and withdrawal option. Neither
+expired nor claimed notes can open a new private inference request; ticket
+access remains independent.
 
 The System Panel shows an extra status card only while the previous chat is
 closing. Completion removes it; ready and other states use the existing balance

@@ -111,11 +111,29 @@ function positiveTimestamp(value) {
     return Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 }
 
+function sanitizedExpiryClaim(claim, amount, expiryTs) {
+    if (!claim || !expiryTs || Number(claim.amount) !== amount
+        || !/^0x[0-9a-fA-F]{64}$/.test(claim.transactionHash || '')
+        || !/^0x[0-9a-fA-F]{64}$/.test(claim.blockHash || '')
+        || !positiveTimestamp(claim.blockNumber)
+        || !positiveTimestamp(claim.claimedAt)
+        || Number(claim.claimedAt) < expiryTs * 1000) return null;
+    return {
+        transactionHash: claim.transactionHash.toLowerCase(),
+        blockHash: claim.blockHash.toLowerCase(),
+        blockNumber: Number(claim.blockNumber),
+        claimedAt: Number(claim.claimedAt),
+        amount
+    };
+}
+
 function depositRecord(state, deploymentId, metadata = {}) {
     const noteId = Number(state?.note_id);
     const amount = Number(state?.deposit_amount);
     if (!deploymentId || state?.note_id == null || !Number.isSafeInteger(noteId) || noteId < 0
         || !Number.isSafeInteger(amount) || amount <= 0) return null;
+    const expiryTs = positiveTimestamp(state?.expiry_ts ?? metadata.expiryTs);
+    const expiryClaim = sanitizedExpiryClaim(metadata.expiryClaim, amount, expiryTs);
     // This explicit allowlist is also the public payment-history shape. Never
     // copy a private state, commitment, secret, proof, or recovery plan here.
     return {
@@ -125,11 +143,13 @@ function depositRecord(state, deploymentId, metadata = {}) {
         operationId: typeof metadata.operationId === 'string' ? metadata.operationId : null,
         noteId,
         amount,
+        expiryTs,
         status: 'confirmed',
         createdAt: positiveTimestamp(metadata.createdAt),
         confirmedAt: positiveTimestamp(metadata.confirmedAt),
         transactionHash: /^0x[0-9a-fA-F]{64}$/.test(metadata.transactionHash || '')
-            ? metadata.transactionHash.toLowerCase() : null
+            ? metadata.transactionHash.toLowerCase() : null,
+        ...(expiryClaim ? { expiryClaim } : {})
     };
 }
 
@@ -144,7 +164,9 @@ function mergeDepositRecord(records, candidate, store) {
         createdAt: previous.createdAt || candidate.createdAt,
         confirmedAt: previous.confirmedAt || candidate.confirmedAt,
         transactionHash: previous.transactionHash || candidate.transactionHash,
-        operationId: previous.operationId || candidate.operationId
+        operationId: previous.operationId || candidate.operationId,
+        expiryTs: previous.expiryTs || candidate.expiryTs,
+        ...(previous.expiryClaim ? { expiryClaim: previous.expiryClaim } : {})
     } : candidate;
     if (JSON.stringify(previous) !== JSON.stringify(next)) store?.put(next);
     records.set(next.recordId, next);
@@ -162,7 +184,7 @@ function archiveDeploymentId(archive) {
 
 function depositRecordMap(records) {
     return new Map(records.map(record => depositRecord({
-        note_id: record.noteId, deposit_amount: record.amount
+        note_id: record.noteId, deposit_amount: record.amount, expiry_ts: record.expiryTs
     }, record.deploymentId, record)).filter(Boolean).map(record => [record.recordId, record]));
 }
 
@@ -280,9 +302,56 @@ export async function writeBrowserWallet(next, { depositConfirmation = null } = 
     return value;
 }
 
+/**
+ * Save verified, finalized ExpiredClaimed observations as payment metadata.
+ * The caller verifies canonical chain evidence; this boundary independently
+ * enforces deployment/note identity and known amount/expiry. It cannot close a
+ * note, discard a pending request, or change any private recovery material.
+ */
+export async function recordBrowserExpiryClaims(deploymentId, claims) {
+    if (typeof deploymentId !== 'string' || !deploymentId.trim() || !Array.isArray(claims)) {
+        throw new Error('Expiry history requires a deployment and claim records.');
+    }
+    const database = await openDatabase();
+    const transaction = durableTransaction(database, DEPOSIT_STORE);
+    const store = transaction.objectStore(DEPOSIT_STORE);
+    const stored = await requestResult(store.getAll());
+    const history = depositRecordMap(stored.filter(record =>
+        record.deploymentId === deploymentId && record.status === 'confirmed'));
+    const updates = new Map();
+    try {
+        for (const claim of claims) {
+            if (!claim || (claim.deploymentId != null && claim.deploymentId !== deploymentId)
+                || claim.noteId == null || !Number.isSafeInteger(Number(claim.noteId))
+                || Number(claim.noteId) < 0 || Number(claim.noteId) > 0xffffffff) {
+                throw new Error('An expiry claim has an invalid deployment or note identity.');
+            }
+            const recordId = `${deploymentId}:deposit:${Number(claim.noteId)}`;
+            const record = history.get(recordId);
+            // Older fully sanitized history may have neither original expiry
+            // nor note state. Do not infer an expiry or invent an owned deposit.
+            if (!record || !record.expiryTs) continue;
+            const expiryClaim = sanitizedExpiryClaim(claim, record.amount, record.expiryTs);
+            if (!expiryClaim) throw new Error('An expiry claim does not match its saved deposit.');
+            if (record.expiryClaim && JSON.stringify(record.expiryClaim) !== JSON.stringify(expiryClaim)) {
+                throw new Error('A different finalized expiry claim is already saved for this deposit.');
+            }
+            const next = { ...record, expiryClaim };
+            history.set(recordId, next);
+            if (!record.expiryClaim) updates.set(recordId, next);
+        }
+        for (const record of updates.values()) store.put(record);
+        await transactionDone(transaction);
+        return [...updates.values()].map(record => ({ ...record, expiryClaim: { ...record.expiryClaim } }));
+    } catch (error) {
+        try { transaction.abort(); } catch { /* Preserve the original validation/storage failure. */ }
+        throw error;
+    }
+}
+
 export async function archiveBrowserWallet(reason = 'closed', expectedNoteId = null) {
     const database = await openDatabase();
-    const transaction = durableTransaction(database, [RUNTIME_STORE, ARCHIVE_STORE]);
+    const transaction = durableTransaction(database, [RUNTIME_STORE, ARCHIVE_STORE, DEPOSIT_STORE]);
     const runtimeStore = transaction.objectStore(RUNTIME_STORE);
     const current = normalizeRuntime(await requestResult(runtimeStore.get(RUNTIME_KEY)));
     if (expectedNoteId != null
@@ -290,13 +359,34 @@ export async function archiveBrowserWallet(reason = 'closed', expectedNoteId = n
         transaction.abort();
         throw new Error('The selected private note changed before it could be archived.');
     }
+    if (reason === 'expiry-claimed') {
+        const stored = current.state && await requestResult(transaction.objectStore(DEPOSIT_STORE)
+            .get(`${current.deploymentId}:deposit:${current.state.note_id}`));
+        const record = stored?.status === 'confirmed' && stored.deploymentId === current.deploymentId
+            ? depositRecordMap([stored]).get(`${current.deploymentId}:deposit:${current.state.note_id}`) : null;
+        if (expectedNoteId == null || !record?.expiryClaim
+            || record.noteId !== Number(current.state?.note_id)
+            || record.amount !== Number(current.state?.deposit_amount)
+            || record.expiryTs !== positiveTimestamp(current.state?.expiry_ts)) {
+            transaction.abort();
+            throw new Error('This private note has no matching confirmed expiry claim.');
+        }
+    }
     if (current.state) {
         transaction.objectStore(ARCHIVE_STORE).put({
             archiveId: `${current.deploymentId || 'deployment'}:${current.state.note_id}:${Date.now()}`,
             reason,
             archivedAt: Date.now(),
             deploymentId: current.deploymentId,
-            state: current.state
+            state: current.state,
+            ...(reason === 'expiry-claimed' ? {
+                // Explicitly moving a claimed note out of the selected slot
+                // must not destroy an unfinished key's private recovery data.
+                journal: current.journal,
+                lease: current.lease,
+                preparedWithdrawal: current.preparedWithdrawal,
+                pendingDeposit: current.pendingDeposit
+            } : {})
         });
     }
     const next = normalizeRuntime({

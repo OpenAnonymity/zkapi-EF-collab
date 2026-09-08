@@ -2407,6 +2407,7 @@ test('browser withdrawal recovery invariants', async t => {
             assert.equal(stored.phase, 'closed_unconfirmed');
             assert.equal(stored.state.note_id, 7);
             assert.ok(finalizedReads > 0, 'finality must be read from the chain');
+            assert.equal(stored.payoutVerified, false, 'a Closed note alone is not an escape payout receipt');
 
             finalizedBlock = 100;
             zkapiClient.withdrawals = [stored];
@@ -2414,6 +2415,7 @@ test('browser withdrawal recovery invariants', async t => {
             [stored] = await listBrowserWithdrawals(DEPLOYMENT_ID);
             assert.equal(stored.phase, 'closed');
             assert.equal(stored.state, undefined);
+            assert.equal(stored.payoutVerified, false, 'finality cannot convert an unknown closure into a refund');
         } finally {
             restoreClient();
             restoreEthereum();

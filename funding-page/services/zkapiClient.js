@@ -3,6 +3,7 @@ import { contractEstimateError, contractRevertSelector } from './zkapiContractEr
 import { bufferedGasLimit } from './zkapiGas.mjs';
 import { normalizeWalletError, walletErrorMessage } from './zkapiWalletError.mjs';
 import { backgroundWithdrawalClaims, isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
+import { deriveExpiryRecords, readFinalizedExpiryClaims } from './zkapiExpiryHistory.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
 const SESSION_HEADER = 'x-zkapi-session-id';
@@ -275,6 +276,7 @@ class ZkapiClient extends EventTarget {
                     () => this.syncEscapeWithdrawals(() => {})
                 ) && complete;
             }
+            complete = await reconcile('expiry payments', () => this.syncExpiryHistory()) && complete;
             return complete;
         } catch (error) {
             // Startup recovery must never summon MetaMask or prevent OA Chat
@@ -344,6 +346,7 @@ class ZkapiClient extends EventTarget {
                     () => this.syncEscapeWithdrawals(() => {})
                 ) && complete;
             }
+            complete = await reconcile('expiry payments', () => this.syncExpiryHistory()) && complete;
             return complete;
         })().catch(error => {
             // A background provider outage is not a new wallet failure. The
@@ -695,6 +698,68 @@ class ZkapiClient extends EventTarget {
 
     get note() {
         return this.wallet?.note || null;
+    }
+
+    get noteExpiryClaim() {
+        if (this.note?.note_id == null) return null;
+        return this.deposits.find(record => record.status === 'confirmed'
+            && record.noteId === Number(this.note.note_id))?.expiryClaim || null;
+    }
+
+    get expiryHistory() {
+        return deriveExpiryRecords(this.deposits, this.withdrawals);
+    }
+
+    async syncExpiryHistory() {
+        if (this.expiryHistoryPromise) return this.expiryHistoryPromise;
+        if (!this.browserMode || !this.config?.funding) return { complete: true, claims: [] };
+        const operation = (async () => {
+            this.deposits = await browserWalletRuntime.getDepositHistory();
+            // A generic Closed vault status may itself be an expiry claim.
+            // Never let a withdrawal's phase suppress checking actual payments.
+            if (!deriveExpiryRecords(this.deposits).some(record => record.status === 'expired')) {
+                return { complete: true, claims: [] };
+            }
+            if (!globalThis.ethereum?.request) throw new Error('Open MetaMask on the balance’s network to check expiry payments. No transaction is needed.');
+            const funding = this.config.funding;
+            const deploymentId = browserWalletRuntime.manifest.deployment_id;
+            const historyIdentity = JSON.stringify(this.deposits.filter(record => record.status === 'confirmed')
+                .map(record => [record.recordId, record.expiryTs, record.amount]).sort());
+            const scan = this.expiryScan?.deploymentId === deploymentId
+                && this.expiryScan.historyIdentity === historyIdentity ? this.expiryScan : null;
+            const result = await readFinalizedExpiryClaims({
+                request: request => globalThis.ethereum.request(request),
+                vaultAddress: funding.contract_address,
+                chainId: funding.chain_id,
+                deposits: this.deposits,
+                fromBlock: scan ? scan.scannedTo + 1 : 0,
+                deploymentBlock: scan?.deploymentBlock ?? null
+            });
+            // Advance only after durable history succeeds. A failed save can
+            // safely rescan the same public events without losing a payment.
+            if (result.claims.length) await browserWalletRuntime.rememberExpiryClaims(result.claims);
+            this.expiryScan = { deploymentId, historyIdentity, scannedTo: result.scannedTo,
+                deploymentBlock: result.deploymentBlock };
+            await this.refresh({ quiet: true });
+            return result;
+        })();
+        this.expiryHistoryPromise = operation;
+        try { return await operation; }
+        finally { if (this.expiryHistoryPromise === operation) this.expiryHistoryPromise = null; }
+    }
+
+    async archiveClaimedBalance() {
+        if (!this.noteExpiryClaim) throw new Error('The balance has no verified expiry payment.');
+        await browserWalletRuntime.archiveNote('expiry-claimed', Number(this.note.note_id));
+        await this.refresh();
+    }
+
+    async assertBalanceNotClaimed(noteId) {
+        if (this.browserMode) this.deposits = await browserWalletRuntime.getDepositHistory();
+        if (this.deposits.some(record => record.status === 'confirmed'
+            && record.noteId === Number(noteId) && record.expiryClaim)) {
+            throw new Error('This balance was claimed after expiry. Open Balance details to start a new balance.');
+        }
     }
 
     get requestMode() {
@@ -1653,6 +1718,7 @@ class ZkapiClient extends EventTarget {
         const note = this.note;
         if (!note) throw new Error('There is no active private note to withdraw.');
         if (!['mutual', 'escape'].includes(mode)) throw new Error('Choose a valid withdrawal mode.');
+        await this.assertBalanceNotClaimed(note.note_id);
 
         await this.settleActiveLease(onStatus);
 
@@ -1848,6 +1914,7 @@ class ZkapiClient extends EventTarget {
             if (this.browserMode) {
                 await browserWalletRuntime.detachClosedWithdrawal({
                     mode: 'mutual',
+                    payoutVerified: true,
                     noteId: Number(note.note_id),
                     destination,
                     finalBalance: Number(event.finalBalance),
@@ -2064,6 +2131,7 @@ class ZkapiClient extends EventTarget {
         if (!current || current.phase !== 'dropped_or_pending') {
             throw new Error('Check the withdrawal before replacing it.');
         }
+        await this.assertBalanceNotClaimed(current.noteId ?? current.public_inputs?.note_id ?? this.note?.note_id);
         onStatus('Connecting to the MetaMask account that submitted this withdrawal…');
         const from = await this.connectWallet();
         const submission = await browserWalletRuntime.claimPreparedWithdrawalReplacement(from);
@@ -2155,6 +2223,7 @@ class ZkapiClient extends EventTarget {
         // the connected account only authorizes and pays for this transaction.
         const noteId = Number(record.noteId);
         const destination = record.destination;
+        await this.assertBalanceNotClaimed(noteId);
         onStatus('Connecting to MetaMask for the set-aside balance…');
         const from = await this.connectWallet();
         let receipt;
@@ -2266,6 +2335,7 @@ class ZkapiClient extends EventTarget {
                     .includes(current.startSubmissionOutcome))) {
             throw new Error('Check the background withdrawal before replacing it.');
         }
+        await this.assertBalanceNotClaimed(current.noteId);
         onStatus('Connecting to the MetaMask account that submitted this withdrawal…');
         const from = await this.connectWallet();
         const submission = await browserWalletRuntime
@@ -2439,6 +2509,7 @@ class ZkapiClient extends EventTarget {
                     mode,
                     phase: 'closed_unconfirmed',
                     chainStatus: 'closed',
+                    payoutVerified: false,
                     noteId: Number(attempt.noteId),
                     destination,
                     finalBalance,
@@ -2746,6 +2817,7 @@ class ZkapiClient extends EventTarget {
                     noteId: Number(attempt.noteId),
                     destination: event.destination,
                     finalBalance: Number(event.finalBalance),
+                    payoutVerified: mode === 'mutual',
                     transactionHash: background?.transactionHash || attempt.transactionHash,
                     closeBlockNumber: Math.max(
                         Number(background?.closeBlockNumber || 0),
@@ -2936,6 +3008,7 @@ class ZkapiClient extends EventTarget {
                 || before?.transactionHash
                 || null;
             let closeBlockNumber = Number(result.observed_block || 0);
+            let payoutVerified = false;
             if (transactionHash && mode === 'mutual') {
                 try {
                     const receipt = await globalThis.ethereum.request({
@@ -2956,6 +3029,7 @@ class ZkapiClient extends EventTarget {
                         // finality window at the current head. Only a matching
                         // mined withdrawal can supply the earlier checkpoint.
                         closeBlockNumber = receiptBlock;
+                        payoutVerified = true;
                     }
                 } catch {
                     // The canonical Closed observation is still sufficient
@@ -2969,12 +3043,15 @@ class ZkapiClient extends EventTarget {
                 finalBalance,
                 transactionHash,
                 closeBlockNumber,
+                payoutVerified,
                 lastObservedBlock: Number(result.observed_block || 0),
                 clearanceReserved: durable?.clearanceReserved === true
                     || durable?.mode === 'mutual'
             });
             this.rememberWithdrawal(null);
-            onStatus('Withdrawal returned. Finality is being checked safely in the background.');
+            onStatus(payoutVerified
+                ? 'Withdrawal returned. Finality is being checked safely in the background.'
+                : 'This balance is closed. Its payment is being checked in Payment history.');
         } else if (result.status === 'pending_withdrawal') {
             const destination = result.destination
                 || before?.destination
@@ -3094,6 +3171,7 @@ class ZkapiClient extends EventTarget {
                     );
                     await browserWalletRuntime.detachClosedWithdrawal({
                         mode: durableMode,
+                        payoutVerified: durableMode === 'mutual',
                         noteId,
                         destination: durable?.destination || matchedEvent.destination,
                         finalBalance: Number(durable?.public_inputs?.final_balance
@@ -3108,7 +3186,9 @@ class ZkapiClient extends EventTarget {
                     });
                     this.rememberWithdrawal(null);
                     await this.refresh();
-                    onStatus('Withdrawal returned. Finality is being checked safely in the background.');
+                    onStatus(durableMode === 'mutual'
+                        ? 'Withdrawal returned. Finality is being checked safely in the background.'
+                        : 'This balance is closed. Its payment is being checked in Payment history.');
                     return consistent;
                 }
                 if (consistent.status === 'pending_withdrawal') {
@@ -3591,6 +3671,7 @@ class ZkapiClient extends EventTarget {
             ) || listedRecord;
             try {
                 let status = await this.readBrowserWithdrawalStatus(record.noteId);
+                let payoutVerified = false;
                 let minimumObservedBlock = Math.max(
                     Number(record.startBlockNumber || 0),
                     Number(record.lastObservedBlock || 0)
@@ -3677,6 +3758,7 @@ class ZkapiClient extends EventTarget {
                                 unresolvedStartHashCount += 1;
                             } else rememberResolvedStart(startHash, nonceStatus);
                         } else {
+                            if (record.mode === 'mutual') payoutVerified = true;
                             minimumObservedBlock = Math.max(
                                 minimumObservedBlock,
                                 Number(BigInt(startReceipt.blockNumber || '0x0'))
@@ -3913,6 +3995,7 @@ class ZkapiClient extends EventTarget {
                         if (Number(status.observed_block || 0) >= receiptBlock
                             && status.status === 'closed') {
                             successfulFinalizeHashes.push(hash);
+                            payoutVerified = true;
                         }
                     }
                 }
@@ -3965,6 +4048,7 @@ class ZkapiClient extends EventTarget {
                             const patch = {
                                 phase: 'closed_unconfirmed',
                                 chainStatus: 'closed',
+                                payoutVerified,
                                 closedAt: Number(record.closedAt || Date.now()),
                                 closeBlockNumber,
                                 lastObservedBlock: Math.max(
@@ -3991,6 +4075,7 @@ class ZkapiClient extends EventTarget {
                         await browserWalletRuntime.updateWithdrawal(record.recordId, {
                             phase: 'closed',
                             chainStatus: 'closed',
+                            payoutVerified,
                             closedAt: Date.now(),
                             closeBlockNumber,
                             finalizedBlockNumber: Number(finality.checkedBlock),
@@ -4568,6 +4653,7 @@ class ZkapiClient extends EventTarget {
             await browserWalletRuntime.updateWithdrawal(withdrawal.recordId, {
                 phase: 'closed_unconfirmed',
                 chainStatus: 'closed',
+                payoutVerified: true,
                 closedAt: Date.now(),
                 closeBlockNumber: Number(BigInt(receipt?.blockNumber || '0x0')),
                 lastObservedBlock: Number(confirmed.observed_block || 0),

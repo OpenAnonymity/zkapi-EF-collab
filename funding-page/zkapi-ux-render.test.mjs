@@ -758,7 +758,7 @@ test('payment history combines deposits and withdrawals by date without inventin
         { recordId: 'old-deposit', status: 'confirmed', amount: 5_000_000, createdAt: null, confirmedAt: null },
         { recordId: 'new-deposit', status: 'confirmed', amount: 2_000_000, confirmedAt: 3_000, transactionHash: hash }
     ];
-    zkapiClient.withdrawals = [{ recordId: 'returned', mode: 'mutual', phase: 'closed',
+    zkapiClient.withdrawals = [{ recordId: 'returned', mode: 'mutual', phase: 'closed', payoutVerified: true,
         finalBalance: 1_000_000, destination: '0x123456', createdAt: 2_000 }];
     try {
         const html = modal.renderWithdrawalRecords();
@@ -773,6 +773,67 @@ test('payment history combines deposits and withdrawals by date without inventin
         assert.doesNotMatch(modal.renderDepositRecord({ recordId: '<script>', status: 'confirmed',
             amount: 1, transactionHash: 'javascript:alert(1)' }), /<script>|href=/);
     } finally { Object.assign(zkapiClient, original); }
+});
+
+test('expiry history distinguishes a deadline from a verified payment, including after archival', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    const hash = `0x${'cd'.repeat(32)}`;
+    zkapiClient.config = { funding: { chain_id: 11155111 } };
+    zkapiClient.wallet = { has_note: false, note: null };
+    zkapiClient.withdrawals = [];
+    zkapiClient.deposits = [{ recordId: 'original', deploymentId: 'test', noteId: 7,
+        status: 'confirmed', amount: 2_000_000, expiryTs: 1000, confirmedAt: 1000 }];
+    try {
+        const expired = modal.renderWithdrawalRecords();
+        assert.match(expired, /Expiry deadline passed/);
+        assert.match(expired, /No automatic refund/);
+        assert.match(expired, /A treasury claim has not been confirmed here/);
+        assert.match(expired, /Check expiry payments/);
+        assert.doesNotMatch(expired, /No refund was made|was paid|View transaction/);
+        zkapiClient.deposits[0].expiryClaim = { amount: 2_000_000, claimedAt: 1_100_000,
+            transactionHash: hash, blockHash: `0x${'ef'.repeat(32)}`, blockNumber: 12 };
+        const claimed = modal.renderWithdrawalRecords();
+        assert.match(claimed, /Expiry claim/);
+        assert.match(claimed, /\$2\.00 from the original deposit was paid to the service treasury\. No refund was made/);
+        assert.match(claimed, new RegExp(`https://sepolia.etherscan.io/tx/${hash}`));
+        assert.doesNotMatch(claimed, /Check expiry payments|Expiry deadline passed/);
+        assert.ok(claimed.indexOf('data-expiry-record=') < claimed.indexOf('data-deposit-record='));
+        delete zkapiClient.deposits[0].expiryClaim;
+        zkapiClient.withdrawals = [{ deploymentId: 'test', noteId: 7, phase: 'closed', payoutVerified: true,
+            mode: 'mutual', recordId: 'return', finalBalance: 1_000_000 }];
+        assert.doesNotMatch(modal.renderWithdrawalRecords(), /Expiry deadline passed/,
+            'an already returned deposit does not acquire an expiry payment');
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('payment history updates once at expiry without remounting on every clock tick', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const realNow = Date.now;
+    const modal = Object.create(AccountModal.prototype);
+    Object.assign(modal, { busy: false, isOpen: true, view: 'withdrawals',
+        overlay: { querySelector: () => null, querySelectorAll: () => [] } });
+    let renders = 0;
+    modal.render = () => { renders += 1; modal.renderWithdrawalRecords(); };
+    zkapiClient.config = {};
+    zkapiClient.wallet = { has_note: false, note: null };
+    zkapiClient.withdrawals = [];
+    zkapiClient.deposits = [{ recordId: 'original', status: 'confirmed', amount: 2_000_000, expiryTs: 1000 }];
+    try {
+        Date.now = () => 999_999;
+        modal.renderWithdrawalRecords();
+        modal.handleZkapiClock(Date.now());
+        assert.equal(renders, 0);
+        Date.now = () => 1_000_000;
+        modal.handleZkapiClock(Date.now());
+        assert.equal(renders, 1);
+        Date.now = () => 1_001_000;
+        modal.handleZkapiClock(Date.now());
+        assert.equal(renders, 1);
+    } finally { Date.now = realNow; Object.assign(zkapiClient, original); }
 });
 
 test('unconfirmed deposits have honest status and link only to their current recovery flow', () => {
@@ -803,6 +864,7 @@ test('a returned withdrawal is a success while network finality runs without use
         recordId: 'returned-mainnet',
         mode: 'mutual',
         phase: 'closed_unconfirmed',
+        payoutVerified: true,
         chainStatus: 'closed',
         finalBalance: 1_972_567,
         destination: '0x68674ae1f6188391da867255d9ae0e099fc354c5',
@@ -846,6 +908,100 @@ test('a returned withdrawal is a success while network finality runs without use
     }
 });
 
+test('legacy closed records do not claim a payout or return amount without receipt verification', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    Object.assign(zkapiClient, { wallet: { note: null }, config: { funding: { chain_id: 1 } }, deposits: [] });
+    const modal = Object.create(AccountModal.prototype);
+    try {
+        for (const phase of ['closed', 'closed_unconfirmed']) {
+            const record = { recordId: 'legacy-close', mode: 'mutual', phase, finalBalance: 1_900_000,
+                transactionHash: `0x${'ab'.repeat(32)}`, destination: '0x123456' };
+            zkapiClient.withdrawals = [record];
+            const html = modal.renderWithdrawalRecords();
+            assert.equal(modal.withdrawalRecordLabel(record), 'Balance closed');
+            assert.match(html, /Payment not verified/);
+            assert.doesNotMatch(html, /Returned|returned to|Funds are in your wallet|\$1\.90|badge-status-success/);
+            assert.doesNotMatch(html, /data-withdraw-background|data-restore-withdrawal|data-finalize-withdrawal/);
+            assert.match(html, /View transaction/);
+        }
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('a verified expiry claim replaces obsolete withdrawal actions only for its exact deployment and note', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const hash = `0x${'cd'.repeat(32)}`;
+    Object.assign(zkapiClient, { wallet: { note: null }, config: { funding: { chain_id: 1 },
+        late_withdrawal_attempts: [{ deploymentId: 'test', note_id: 7, transaction_hash: hash }] },
+    deposits: [{ recordId: 'original', deploymentId: 'test', noteId: 7, status: 'confirmed',
+        amount: 2_000_000, expiryTs: 1000, expiryClaim: { amount: 2_000_000,
+            claimedAt: 1_100_000, blockNumber: 12, blockHash: `0x${'ef'.repeat(32)}`, transactionHash: hash } }],
+    withdrawals: [
+        { recordId: 'obsolete-close', deploymentId: 'test', noteId: 7, mode: 'mutual', phase: 'closed', finalBalance: 1_900_000 },
+        { recordId: 'obsolete-restore', deploymentId: 'test', noteId: 7, mode: 'escape', phase: 'restored', finalBalance: 1_900_000 },
+        { recordId: 'other-deployment', deploymentId: 'other', noteId: 7, mode: 'mutual', phase: 'parked', finalBalance: 1_000_000 },
+        { recordId: 'other-note', deploymentId: 'test', noteId: 8, mode: 'mutual', phase: 'parked', finalBalance: 1_000_000 }
+    ] });
+    const modal = Object.create(AccountModal.prototype);
+    try {
+        const html = modal.renderWithdrawalRecords();
+        assert.match(html, /Expiry claim/);
+        assert.match(html, /No refund was made/);
+        assert.doesNotMatch(html, /obsolete-close|obsolete-restore/);
+        assert.match(html, /data-sync-late-withdrawal/);
+        assert.match(html, /data-withdrawal-record="other-deployment"/);
+        assert.match(html, /data-withdrawal-record="other-note"/);
+        assert.match(modal.renderWithdrawalStatusLink(), /3 withdrawals to check/);
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('an idle Withdraw dialog redirects to a claimed balance while live wallet recovery remains available', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawal: zkapiClient.withdrawal, withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const hash = `0x${'cd'.repeat(32)}`;
+    Object.assign(zkapiClient, { wallet: { note: { note_id: 7, expiry_ts: 1000,
+        deposit_amount: 2_000_000, current_balance: 1_500_000 } }, config: {},
+    withdrawal: null, withdrawals: [], deposits: [{ recordId: 'original', deploymentId: 'test',
+        noteId: 7, status: 'confirmed', amount: 2_000_000, expiryTs: 1000,
+        expiryClaim: { amount: 2_000_000, claimedAt: 1_100_000, blockNumber: 12,
+            blockHash: `0x${'ef'.repeat(32)}`, transactionHash: hash } }] });
+    const modal = Object.create(AccountModal.prototype);
+    Object.assign(modal, { view: 'withdraw', busy: false,
+        overlay: { innerHTML: '', querySelector: () => null, querySelectorAll: () => [] } });
+    try {
+        assert.match(modal.renderWithdrawal(), /id="zkapi-archive-expired-balance-btn"/);
+        assert.doesNotMatch(modal.renderWithdrawal(), /id="zkapi-withdraw-btn"|id="zkapi-finalize-btn"/);
+        modal.render();
+        assert.equal(modal.view, 'balance');
+        assert.match(modal.overlay.innerHTML, /id="zkapi-payment-title"[^>]*>Private balance/);
+        modal.view = 'withdraw';
+        modal.busy = true;
+        modal.render();
+        assert.equal(modal.view, 'withdraw', 'An owned wallet operation keeps its existing surface');
+        modal.busy = false;
+        zkapiClient.config.prepared_withdrawal = { phase: 'submitted', transaction_hash: hash };
+        modal.render();
+        assert.equal(modal.view, 'withdraw');
+        assert.match(modal.overlay.innerHTML, /id="zkapi-sync-withdrawal-btn"/);
+        assert.doesNotMatch(modal.overlay.innerHTML, /id="zkapi-withdraw-btn"/);
+        zkapiClient.config.prepared_withdrawal = { phase: 'awaiting_wallet' };
+        modal.render();
+        assert.equal(modal.view, 'withdraw');
+        assert.match(modal.overlay.innerHTML, /id="zkapi-recover-withdrawal-btn"/);
+        zkapiClient.config.prepared_withdrawal = { phase: 'dropped_or_pending', transaction_hash: hash,
+            replacement_available: true };
+        modal.render();
+        assert.equal(modal.view, 'withdraw');
+        assert.match(modal.overlay.innerHTML, /id="zkapi-sync-withdrawal-btn"/);
+        assert.doesNotMatch(modal.overlay.innerHTML,
+            /Amount returned|id="zkapi-retry-dropped-withdrawal-btn"|id="zkapi-retry-withdrawal-btn"|id="zkapi-finalize-btn"|id="zkapi-withdraw-btn"/);
+        delete zkapiClient.config.prepared_withdrawal;
+        modal.render();
+        assert.equal(modal.view, 'balance');
+    } finally { Object.assign(zkapiClient, original); }
+});
+
 test('set-aside mutual balances stay independently withdrawable alongside a new note or deposit', () => {
     const original = { wallet: zkapiClient.wallet, config: zkapiClient.config, withdrawals: zkapiClient.withdrawals };
     const modal = Object.create(AccountModal.prototype);
@@ -868,7 +1024,7 @@ test('set-aside mutual balances stay independently withdrawable alongside a new 
             assert.doesNotMatch(pending, /The challenge|Challenge ·|data-withdraw-background/);
         }
         for (const phase of ['closed', 'closed_unconfirmed']) {
-            assert.equal(modal.withdrawalRecordLabel({ ...record, phase, startSubmissionId: 'old-claim' }), 'Returned');
+            assert.equal(modal.withdrawalRecordLabel({ ...record, phase, payoutVerified: true, startSubmissionId: 'old-claim' }), 'Returned');
         }
         Object.assign(record, { phase: 'submitted_unconfirmed', startSubmissionId: 'before-preflight',
             backgroundPreparationCancelable: true });
@@ -997,7 +1153,7 @@ test('welcome success is edge-triggered and retains focus across later state eve
     }
 });
 
-test('right-panel disclosures preserve both open and closed state across real rerenders', () => {
+test('right-panel progress disclosures preserve both open and closed state across real rerenders', () => {
     const originalDocument = globalThis.document;
     const basePrototype = Object.getPrototypeOf(RightPanel.prototype);
     const originalBaseRender = basePrototype.renderTopSectionOnly;
@@ -1012,19 +1168,12 @@ test('right-panel disclosures preserve both open and closed state across real re
             }
         };
     };
-    let current = {
-        experience: disclosure(true),
-        billing: disclosure(true)
-    };
-    let replacement = {
-        experience: disclosure(false),
-        billing: disclosure(false)
-    };
+    let current = disclosure(true);
+    let replacement = disclosure(false);
     let afterBaseRender = false;
     globalThis.document = {
         querySelector(selector) {
-            const set = afterBaseRender ? replacement : current;
-            return selector.includes('billing-explainer') ? set.billing : set.experience;
+            return selector.includes('zkapi-panel-experience') ? afterBaseRender ? replacement : current : null;
         }
     };
     basePrototype.renderTopSectionOnly = () => { afterBaseRender = true; };
@@ -1032,22 +1181,94 @@ test('right-panel disclosures preserve both open and closed state across real re
     const panel = Object.create(RightPanel.prototype);
     try {
         panel.renderTopSectionOnly();
-        assert.equal(replacement.experience.open, true);
-        assert.equal(replacement.billing.open, true);
+        assert.equal(replacement.open, true);
 
-        replacement.billing.toggle(false);
+        replacement.toggle(false);
         current = replacement;
-        replacement = {
-            experience: disclosure(false),
-            billing: disclosure(true)
-        };
+        replacement = disclosure(true);
         afterBaseRender = false;
         panel.renderTopSectionOnly();
-        assert.equal(replacement.experience.open, true);
-        assert.equal(replacement.billing.open, false, 'closing the billing disclosure must persist');
+        assert.equal(replacement.open, false, 'closing the progress disclosure must persist');
     } finally {
         basePrototype.renderTopSectionOnly = originalBaseRender;
         globalThis.document = originalDocument;
+    }
+});
+
+test('balance panel and modal expose billing and expiry help without the redundant bottom disclosure', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawal: zkapiClient.withdrawal, withdrawals: zkapiClient.withdrawals, lastError: zkapiClient.lastError };
+    Object.assign(zkapiClient, { wallet: { note: { note_id: 7, deposit_amount: 2_000_000,
+        current_balance: 1_500_000, expiry_ts: Math.floor(Date.now() / 1000) + 86400 } },
+    config: {}, withdrawal: null, withdrawals: [], lastError: null });
+    const panel = Object.create(RightPanel.prototype);
+    panel.app = { integration: { getTransition: () => null } };
+    panel.privateBalanceHelpOpen = { billing: true, expiry: true };
+    panel.escapeHtml = value => String(value ?? '');
+    const modal = Object.create(AccountModal.prototype);
+    modal.privateBalanceHelpOpen = { billing: false, expiry: true };
+    modal.view = 'balance';
+    modal.overlay = { innerHTML: '', querySelector: () => null, querySelectorAll: () => [] };
+    try {
+        const html = panel.billingSectionHTML();
+        assert.doesNotMatch(html, /zkapi-billing-explainer/);
+        assert.match(html, /Private balance:[\s\S]*?zkapi-panel-billing-help-toggle/);
+        assert.match(html, /data-zkapi-note-expiry>[^<]+<\/span><button id="zkapi-panel-expiry-help-toggle"/);
+        assert.match(html, /aria-controls="zkapi-panel-billing-help"/);
+        assert.doesNotMatch(html, /data-zkapi-help-content="(?:billing|expiry)" hidden/);
+        modal.render();
+        assert.match(modal.overlay.innerHTML, /zkapi-modal-billing-help-toggle/);
+        assert.match(modal.overlay.innerHTML, /data-zkapi-balance-expiry>[^<]+<\/span><button id="zkapi-modal-expiry-help-toggle"/);
+        assert.match(modal.overlay.innerHTML, /data-zkapi-help-content="billing" hidden/);
+        assert.doesNotMatch(modal.overlay.innerHTML, /data-zkapi-help-content="expiry" hidden/);
+        modal.render();
+        assert.doesNotMatch(modal.overlay.innerHTML, /data-zkapi-help-content="expiry" hidden/,
+            'Semantic updates retain the chosen open state');
+    } finally {
+        Object.assign(zkapiClient, original);
+    }
+});
+
+test('expiry alone keeps funds withdrawable; a confirmed treasury claim shows zero without labeling it inference usage', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawal: zkapiClient.withdrawal, withdrawals: zkapiClient.withdrawals,
+        deposits: zkapiClient.deposits, lastError: zkapiClient.lastError };
+    Object.assign(zkapiClient, { wallet: { note: { note_id: 7, deposit_amount: 2_000_000,
+        current_balance: 1_500_000, expiry_ts: 1 } }, config: {},
+    withdrawal: null, withdrawals: [], deposits: [], lastError: null });
+    const panel = Object.create(RightPanel.prototype);
+    panel.app = { integration: { getTransition: () => null } };
+    panel.escapeHtml = value => String(value ?? '');
+    const modal = Object.create(AccountModal.prototype);
+    try {
+        const unclaimedPanel = panel.billingSectionHTML();
+        const unclaimedModal = modal.renderBalance();
+        assert.match(unclaimedPanel, /Private balance:.*?\$1\.50/);
+        assert.match(unclaimedPanel, /id="zkapi-panel-withdraw"/);
+        assert.match(unclaimedModal, /\$1\.50/);
+        assert.match(unclaimedModal, /id="zkapi-withdraw-view-btn"[^>]*>Withdraw/);
+        assert.match(unclaimedModal, /data-private-balance-expired-notice >/);
+        assert.match(unclaimedModal, /still try withdrawing while it remains unclaimed/);
+        assert.doesNotMatch(unclaimedModal, /id="zkapi-archive-expired-balance-btn"/);
+        assert.doesNotMatch(unclaimedModal, /expires in expired/);
+
+        zkapiClient.deposits = [{ noteId: 7, status: 'confirmed',
+            expiryClaim: { transactionHash: `0x${'ab'.repeat(32)}`, amount: 2_000_000 } }];
+        const claimedPanel = panel.billingSectionHTML();
+        const claimedModal = modal.renderBalance();
+        assert.match(claimedPanel, /Private balance:.*?\$0\.00/);
+        assert.match(claimedPanel, />claimed<\/span>/);
+        assert.match(claimedModal, /Available<\/p>\s*<p[^>]*>\$0\.00/);
+        for (const html of [claimedPanel, claimedModal]) {
+            assert.match(html, /Claimed after expiry/);
+            assert.doesNotMatch(html, /\$[\d.]+ used/);
+        }
+        assert.doesNotMatch(claimedPanel, /id="zkapi-panel-withdraw"/);
+        assert.doesNotMatch(claimedModal, /id="zkapi-withdraw-view-btn"/);
+        assert.match(claimedModal, /No refund was made/);
+        assert.match(claimedModal, /id="zkapi-archive-expired-balance-btn"[^>]*>Start a new balance/);
+    } finally {
+        Object.assign(zkapiClient, original);
     }
 });
 

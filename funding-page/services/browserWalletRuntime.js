@@ -24,6 +24,7 @@ import {
     parkBrowserWithdrawal,
     projectBrowserDeposits,
     readBrowserWalletSnapshot,
+    recordBrowserExpiryClaims,
     releaseBrowserWithdrawalFinalization,
     releaseBrowserWithdrawalFinalizationReplacementClaim,
     releaseBrowserWithdrawalStartSubmission,
@@ -603,7 +604,8 @@ class BrowserWalletRuntime extends EventTarget {
             config,
             runtime: this.runtime,
             activeLease: active,
-            deposits: this.deposits.map(record => ({ ...record })),
+            deposits: this.deposits.map(record => ({ ...record,
+                ...(record.expiryClaim ? { expiryClaim: { ...record.expiryClaim } } : {}) })),
             withdrawals: this.withdrawals.map(record => {
                 const {
                     state: _state,
@@ -665,6 +667,25 @@ class BrowserWalletRuntime extends EventTarget {
             this.manifest.deployment_id, options.depositConfirmation);
         this.notify();
         return this.runtime;
+    }
+
+    async getDepositHistory() {
+        await this.init();
+        return withBrowserWalletLock(this.manifest.deployment_id, async () => {
+            await this.reload();
+            return this.snapshot().deposits;
+        });
+    }
+
+    async rememberExpiryClaims(claims) {
+        await this.init();
+        return withBrowserWalletLock(this.manifest.deployment_id, async () => {
+            await this.reload();
+            const updated = await recordBrowserExpiryClaims(this.manifest.deployment_id, claims);
+            await this.reload();
+            if (updated.length) this.notify();
+            return updated;
+        });
     }
 
     async walletStatus() {
@@ -3093,6 +3114,7 @@ class BrowserWalletRuntime extends EventTarget {
                 finalBalance: Number(details.finalBalance),
                 transactionHash: details.transactionHash || null,
                 closeBlockNumber: Number(details.closeBlockNumber || 0),
+                payoutVerified: details.payoutVerified === true,
                 lastObservedBlock: Number(details.lastObservedBlock || 0),
                 clearanceReserved: details.clearanceReserved === true,
                 createdAt: Number(details.createdAt || Date.now()),
@@ -3515,8 +3537,15 @@ class BrowserWalletRuntime extends EventTarget {
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
             await this.reload();
             const noteId = expectedNoteId ?? this.runtime.state?.note_id;
+            if (reason === 'expiry-claimed' && this.activeLease?.inFlight > 0) {
+                throw new Error('Finish the current response before starting a new private balance.');
+            }
             this.runtime = await archiveBrowserWallet(reason, noteId);
             this.withdrawals = await listBrowserWithdrawals(this.manifest.deployment_id);
+            if (reason === 'expiry-claimed' && this.settlementTimer) {
+                clearTimeout(this.settlementTimer);
+                this.settlementTimer = null;
+            }
             this.activeLease = null;
             this.notify();
             return this.walletStatus();

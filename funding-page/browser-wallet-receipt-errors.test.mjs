@@ -151,6 +151,7 @@ test('mutual-close recovery of a mined payment completes through event and vault
         return { status: 'closed', observed_block: 25913660 };
     });
     t.mock.method(runtime, 'currentPreparedWithdrawal', async () => plan);
+    t.mock.method(runtime, 'getDepositHistory', async () => []);
     t.mock.method(runtime, 'snapshot', () => ({ runtime: { preparedWithdrawal: plan } }));
     const detached = [];
     t.mock.method(runtime, 'detachClosedWithdrawal', async record => { detached.push(record); });
@@ -168,6 +169,7 @@ test('mutual-close recovery of a mined payment completes through event and vault
     assert.equal(detached[0].transactionHash, HASH);
     assert.equal(detached[0].finalBalance, 1972567);
     assert.equal(detached[0].closeBlockNumber, Number(BigInt(mined.blockNumber)));
+    assert.equal(detached[0].payoutVerified, true);
     assert.equal(client.withdrawal, null);
 
     // The matching payment is already mined; an unavailable second RPC must

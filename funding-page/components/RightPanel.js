@@ -3,6 +3,11 @@ import zkapiClient from '../services/zkapiClient.js';
 import { getZkapiExperience, renderZkapiPanelExperience } from './ZkapiStateExperience.js';
 import { CHAT_SPENDING_TIER_USD } from '../services/zkapiRequestCompat.mjs';
 import { formatEstimatedCost, formatUsageTokens } from '../services/modelPricing.mjs';
+import {
+    attachPrivateBalanceHelp, capturePrivateBalanceHelpFocus, privateBalanceExpiryLabel,
+    privateBalanceExpired, privateBalanceHelpButton, privateBalanceHelpContent,
+    restorePrivateBalanceHelpFocus, updatePrivateBalanceExpiryState
+} from './PrivateBalanceHelp.js';
 
 /**
  * OA's System Panel with its ticket purchase/redemption section replaced by
@@ -34,8 +39,9 @@ export default class RightPanel extends SharedRightPanel {
     handleZkapiClock() {
         const expiry = document.querySelector('#right-panel [data-zkapi-note-expiry]');
         if (expiry && zkapiClient.note) {
-            expiry.textContent = `expires in ${zkapiClient.formatExpiry(zkapiClient.note.expiry_ts)}`;
+            expiry.textContent = privateBalanceExpiryLabel(zkapiClient, zkapiClient.note.expiry_ts);
         }
+        updatePrivateBalanceExpiryState(document.querySelector('#right-panel'), zkapiClient.note);
     }
 
     onRuntimePresentationChange() {
@@ -50,14 +56,11 @@ export default class RightPanel extends SharedRightPanel {
     }
 
     renderTopSectionOnly() {
+        const helpFocus = capturePrivateBalanceHelpFocus(document.querySelector('#right-panel'));
         const existingExperienceDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
-        const existingBillingDisclosure = document.querySelector('#right-panel .zkapi-billing-explainer');
         const experienceWasOpen = existingExperienceDisclosure
             ? Boolean(existingExperienceDisclosure.open)
             : Boolean(this.zkapiDisclosureOpen);
-        const billingWasOpen = existingBillingDisclosure
-            ? Boolean(existingBillingDisclosure.open)
-            : Boolean(this.zkapiBillingDisclosureOpen);
         super.renderTopSectionOnly();
 
         const experienceDisclosure = document.querySelector('#right-panel .zkapi-panel-experience--disclosure');
@@ -71,16 +74,7 @@ export default class RightPanel extends SharedRightPanel {
             this.zkapiDisclosureOpen = false;
         }
 
-        const billingDisclosure = document.querySelector('#right-panel .zkapi-billing-explainer');
-        if (billingDisclosure) {
-            billingDisclosure.open = billingWasOpen;
-            this.zkapiBillingDisclosureOpen = billingDisclosure.open;
-            billingDisclosure.addEventListener('toggle', () => {
-                this.zkapiBillingDisclosureOpen = billingDisclosure.open;
-            });
-        } else {
-            this.zkapiBillingDisclosureOpen = false;
-        }
+        restorePrivateBalanceHelpFocus(document.querySelector('#right-panel'), helpFocus);
     }
 
     loadSessionData() {
@@ -160,12 +154,14 @@ export default class RightPanel extends SharedRightPanel {
 
     billingSectionHTML() {
         const note = zkapiClient.note;
+        const claimed = Boolean(note && zkapiClient.noteExpiryClaim);
+        const expired = privateBalanceExpired(note);
         const pendingDeposit = zkapiClient.config?.pending_deposit;
-        const balance = note ? zkapiClient.formatMoney(note.current_balance) : '$0.00';
+        const balance = note && !claimed ? zkapiClient.formatMoney(note.current_balance) : '$0.00';
         const used = note
             ? zkapiClient.formatMoney(Math.max(0, Number(note.deposit_amount || 0) - Number(note.current_balance || 0)))
             : '$0.00';
-        const percent = note?.deposit_amount
+        const percent = note?.deposit_amount && !claimed
             ? Math.max(0, Math.min(100, Number(note.current_balance) / Number(note.deposit_amount) * 100))
             : 0;
         const hasError = !!zkapiClient.lastError;
@@ -208,13 +204,13 @@ export default class RightPanel extends SharedRightPanel {
             : '';
         const actionableState = ['withdrawal', 'escape-wait', 'deposit-recovery']
             .includes(experience.primary.phase);
-        const statusBadge = experience.primary.tone === 'error'
+        const statusBadge = claimed ? 'claimed' : experience.primary.tone === 'error'
             ? 'attention'
             : experience.primary.busy
                 ? experience.primary.compact
                 : actionableState
                     ? experience.primary.compact
-                : note
+                : expired ? 'expired' : note
                     ? 'ready'
                     : 'not funded';
 
@@ -224,27 +220,26 @@ export default class RightPanel extends SharedRightPanel {
                     <div class="flex items-center gap-1.5">
                         <svg class="h-3.5 w-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m3-9.5C15 7.12 13.66 6 12 6S9 7.12 9 8.5 10.34 11 12 11s3 1.12 3 2.5S13.66 16 12 16s-3-1.12-3-2.5M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
                         <span class="text-xs font-medium">Private balance: <span class="font-semibold">${balance}</span></span>
+                        ${privateBalanceHelpButton('panel', 'billing', this.privateBalanceHelpOpen?.billing)}
                     </div>
-                    <span class="max-w-[8.5rem] truncate rounded-full px-2 py-0.5 text-[9px] font-medium ${hasError || experience.primary.tone === 'error' ? 'bg-destructive/10 text-destructive' : experience.primary.busy || actionableState ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200' : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${hasError ? 'unavailable' : this.escapeHtml(statusBadge)}</span>
+                    <span ${note && !claimed && !hasError && !experience.primary.busy && !actionableState && experience.primary.tone !== 'error' ? 'data-private-balance-readiness' : ''} class="max-w-[8.5rem] truncate rounded-full px-2 py-0.5 text-[9px] font-medium ${claimed ? 'bg-muted text-muted-foreground' : hasError || experience.primary.tone === 'error' ? 'bg-destructive/10 text-destructive' : experience.primary.busy || actionableState || expired ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200' : note ? 'badge-status-success' : 'bg-muted text-muted-foreground'}">${claimed ? 'claimed' : hasError ? 'unavailable' : this.escapeHtml(statusBadge)}</span>
                 </div>
+                ${privateBalanceHelpContent('panel', 'billing', this.privateBalanceHelpOpen?.billing)}
                 <div class="mt-3 h-1 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-blue-600 transition-all" style="width:${percent}%"></div></div>
-                <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${used} used</span><span ${note ? 'data-zkapi-note-expiry' : ''}>${note ? `expires in ${zkapiClient.formatExpiry(note.expiry_ts)}` : pendingDeposit ? 'Private note saved locally' : 'Fund with MetaMask to chat'}</span></div>
+                <div class="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>${claimed ? 'Claimed after expiry' : `${used} used`}</span><span class="inline-flex items-center gap-1"><span ${note ? 'data-zkapi-note-expiry' : ''}>${note ? privateBalanceExpiryLabel(zkapiClient, note.expiry_ts) : pendingDeposit ? 'Private note saved locally' : 'Fund with MetaMask to chat'}</span>${note ? privateBalanceHelpButton('panel', 'expiry', this.privateBalanceHelpOpen?.expiry) : ''}</span></div>
+                ${note ? privateBalanceHelpContent('panel', 'expiry', this.privateBalanceHelpOpen?.expiry) : ''}
                 <div data-chat-usage-estimate class="mt-2 rounded-md bg-muted/50 px-2 py-1.5 ${usage.visible ? '' : 'hidden'}" title="Running model-usage estimate. OpenRouter's reported cost is used when available; zkAPI settlement is final.">
                     <div class="flex items-center justify-between gap-2 text-[10px]"><span class="text-muted-foreground">Estimated this chat</span><strong data-chat-usage-cost class="font-medium text-foreground">${this.escapeHtml(usage.costLabel)}</strong></div>
                     <div class="mt-1 flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span data-chat-usage-tokens>${this.escapeHtml(usage.tokenLabel)}</span><span data-chat-usage-key-limit>${this.escapeHtml(usage.keyLimitLabel)} per key</span></div>
                 </div>
                 ${experienceHtml}
                 ${withdrawalRecoveryCount ? `<button id="zkapi-panel-withdrawals" class="btn-ghost-hover mt-2 flex w-full items-center justify-between rounded-md bg-muted/40 px-2.5 py-2 text-[10px] text-muted-foreground transition-colors" type="button"><span>Payment history</span><strong class="font-medium text-foreground">${withdrawalStatusLabel}</strong></button>` : ''}
-                <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
+                <div class="mt-3 grid ${note && !claimed ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
                     <button id="zkapi-panel-fund" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">${note ? 'Balance details' : pendingDeposit ? 'Deposit status' : 'Fund with MetaMask'}</button>
-                    ${note ? '<button id="zkapi-panel-withdraw" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">Withdraw</button>' : ''}
+                    ${note && !claimed ? '<button id="zkapi-panel-withdraw" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">Withdraw</button>' : ''}
                 </div>
                 ${hasError ? `<p class="mt-2 text-[10px] leading-snug text-destructive">${this.escapeHtml(zkapiClient.lastError.message)}</p>` : ''}
             </div>
-            <details class="zkapi-billing-explainer mx-3 mb-3 rounded-lg bg-muted/10 px-2.5 py-2">
-                <summary>How private billing works</summary>
-                <p>MetaMask funds a private prepaid note. OA Chat proves that at least $1 is available, then creates one $1 temporary key for the title, response, and follow-ups in this chat. Your wallet address is not attached to model requests.</p>
-            </details>
         `;
     }
 
@@ -281,6 +276,7 @@ export default class RightPanel extends SharedRightPanel {
     attachTopSectionEventListeners() {
         // Preserve OA's ephemeral-key, verifier, and network-proxy controls.
         super.attachTopSectionEventListeners();
+        attachPrivateBalanceHelp(document.querySelector('#right-panel'), this);
         document.getElementById('zkapi-panel-fund')?.addEventListener('click', () => {
             window.dispatchEvent(new CustomEvent('zkapi-payment-required', {
                 detail: { view: zkapiClient.note ? 'balance' : 'fund' }

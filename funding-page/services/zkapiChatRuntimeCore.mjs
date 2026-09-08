@@ -168,7 +168,9 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (signal?.aborted) throw abortError();
             await client.init();
             if (signal?.aborted) throw abortError();
-            if (client.withdrawalBlocksChat || !client.hasNote) {
+            const expired = Number(client.note?.expiry_ts) > 0
+                && Number(client.note.expiry_ts) * 1000 <= Date.now();
+            if (client.withdrawalBlocksChat || !client.hasNote || expired || client.noteExpiryClaim) {
                 if (shouldOpenFunding()) context?.openFunding();
                 return false;
             }

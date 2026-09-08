@@ -250,6 +250,7 @@ test('successful mainnet return survives reload and finishes at the finalized bo
     assert.equal(client.note, null, 'a returned note no longer blocks funding a new balance');
     assert.equal(await client.reconcileBrowserWalletInBackground(), true);
     assert.equal((await record()).phase, 'closed_unconfirmed');
+    assert.equal((await record()).payoutVerified, true, 'matching mutual-close receipt proves a payout');
     assert.deepEqual((await record()).state, state, 'retain recovery material before finality');
     assert.equal((await record()).transactionHash, TX_HASH);
 
@@ -266,6 +267,7 @@ test('successful mainnet return survives reload and finishes at the finalized bo
     assert.equal(await client.reconcileBrowserWalletInBackground(), true);
     const completed = await record();
     assert.equal(completed.phase, 'closed');
+    assert.equal(completed.payoutVerified, true, 'receipt evidence survives durable finality sanitation');
     assert.equal(completed.finalizedBlockNumber, CLOSE_BLOCK);
     assert.equal(completed.state, undefined);
     assert.equal(completed.preparedWithdrawal, undefined);
@@ -311,11 +313,13 @@ test('reopening an already-finalized mainnet return uses its matching receipt bl
     chain.finalized = CLOSE_BLOCK + 50;
     const client = await reloadClient();
     assert.equal((await client.syncWithdrawal()).status, 'closed');
+    assert.equal((await record()).payoutVerified, true, 'selected-note detachment persists matched receipt evidence');
     assert.equal((await record()).closeBlockNumber, CLOSE_BLOCK,
         'refreshing an old return must not start a fresh finality wait');
     const reopened = await reloadClient();
     assert.equal(await reopened.reconcileBrowserWithdrawalsOnLoad(), true);
     assert.equal((await record()).phase, 'closed');
+    assert.equal((await record()).payoutVerified, true);
     assert.equal((await record()).state, undefined);
 });
 
@@ -326,8 +330,37 @@ test('an unrelated successful receipt cannot accelerate close finality', async (
     chain.receipt.logs[0].topics[1] = `0x${zkapiWallet.abiWord(19)}`;
     const client = await reloadClient();
     assert.equal((await client.syncWithdrawal()).status, 'closed');
+    assert.equal((await record()).payoutVerified, false, 'canonical closure does not prove a user payout');
     assert.equal((await record()).closeBlockNumber, chain.head);
     assert.equal(await client.reconcileBrowserWithdrawalsOnLoad(), true);
     assert.equal((await record()).phase, 'closed_unconfirmed');
     assert.deepEqual((await record()).state, state);
+    chain.finalized = chain.head;
+    assert.equal(await client.reconcileBrowserWalletInBackground(), true);
+    assert.equal((await record()).phase, 'closed');
+    assert.equal((await record()).payoutVerified, false, 'finality alone must not invent a payout');
+});
+
+test('matched escape-finalization evidence persists through background recovery and finality', async () => {
+    const { chain, reloadClient, record } = await scenario();
+    const pending = await record();
+    assert.equal(pending.payoutVerified, false, 'a detached Closed observation starts without payout evidence');
+    await runtime.updateWithdrawal(pending.recordId, {
+        mode: 'escape', preparedWithdrawal: null,
+        transactionHash: null, transactionHashes: [],
+        finalizeTransactionHash: TX_HASH, finalizeTransactionHashes: [TX_HASH]
+    });
+    chain.receipt.logs[0].topics[0] = zkapiWallet.ABI.escapeFinalizedEvent;
+    const client = await reloadClient();
+    await client.syncEscapeWithdrawals();
+    assert.equal((await record()).phase, 'closed_unconfirmed');
+    assert.equal((await record()).payoutVerified, true);
+    chain.finalized = CLOSE_BLOCK;
+    await client.reconcileBrowserWalletInBackground();
+    const closed = await record();
+    assert.equal(closed.phase, 'closed');
+    assert.equal(closed.payoutVerified, true);
+    assert.equal(closed.state, undefined);
+    assert.equal(closed.finalizeTransactionHash, undefined);
+    assert.ok(!chain.methods.includes('eth_sendTransaction'));
 });

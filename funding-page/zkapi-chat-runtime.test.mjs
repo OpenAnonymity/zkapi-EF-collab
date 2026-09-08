@@ -264,6 +264,22 @@ test('funding gate respects cancellation, unavailable funds and withdrawal recov
     assert.equal(h.calls.funding, 1);
 });
 
+test('expired and treasury-claimed balances open recovery without granting private access', async () => {
+    const h = harness();
+    h.client.note = { expiry_ts: Math.floor(Date.now() / 1000) - 1 };
+    assert.equal(await h.runtime.checkCanSend(), false);
+    assert.equal(h.calls.funding, 1);
+    assert.equal(await h.runtime.checkCanSend({ shouldOpenFunding: () => false }), false);
+    assert.equal(h.calls.funding, 1, 'a stale private preflight cannot reopen funding after switching to Tickets');
+    h.client.note.expiry_ts = Math.floor(Date.now() / 1000) + 60;
+    assert.equal(await h.runtime.checkCanSend(), true);
+    h.client.noteExpiryClaim = { claimedAt: Date.now() };
+    assert.equal(await h.runtime.checkCanSend(), false, 'saved finality evidence also blocks access if the local clock moves back');
+    assert.equal(h.calls.funding, 2);
+    assert.equal(h.calls.settlement, 0);
+    h.detach();
+});
+
 test('clock ticks do not re-render the UI and detaching suppresses settlement completion renders', async () => {
     const settlement = deferred();
     const h = harness({ settle: () => settlement.promise });

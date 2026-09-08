@@ -116,7 +116,7 @@ globalThis.window = new EventTarget();
 globalThis.window.location = { search: '', hostname: 'localhost' };
 globalThis.indexedDB = memoryIndexedDb();
 const {
-    archiveBrowserWallet, readBrowserWallet, readBrowserWalletSnapshot,
+    archiveBrowserWallet, readBrowserWallet, readBrowserWalletSnapshot, recordBrowserExpiryClaims,
     updateBrowserWithdrawal, writeBrowserWallet
 } = await import('./services/browserWalletStore.js');
 const { default: singleton } = await import('./services/browserWalletRuntime.js');
@@ -329,4 +329,149 @@ test('different operations sharing a vault slot retain separate attempts while r
     const reloaded = makeRuntime();
     await reloaded.reload();
     assert.deepEqual(reloaded.snapshot().deposits, rows);
+});
+
+const EXPIRY_TS = 2_000_000;
+const BLOCK_HASH = `0x${'ef'.repeat(32)}`;
+const expiryClaim = (extra = {}) => ({
+    noteId: 7, amount: 2_000_000, transactionHash: HASH,
+    blockHash: BLOCK_HASH, blockNumber: 50, claimedAt: EXPIRY_TS * 1000,
+    ...extra
+});
+
+test('expiry metadata migrates from active, archived and background states and preserves unknown legacy expiry', async () => {
+    seedRuntime({ state: { ...state(), expiry_ts: EXPIRY_TS } });
+    indexedDB.stores.get('archives').set('old-expiry', {
+        archiveId: `${DEPLOYMENT}:8:4000`, archivedAt: 4001,
+        state: { ...state(8), expiry_ts: EXPIRY_TS + 1 }
+    });
+    indexedDB.stores.get('withdrawals').set('expiry-withdrawal', {
+        recordId: 'expiry-withdrawal', deploymentId: DEPLOYMENT,
+        state: { ...state(9), expiry_ts: EXPIRY_TS + 2 }
+    });
+    indexedDB.stores.get('deposits').set(`${DEPLOYMENT}:deposit:7`, {
+        recordId: `${DEPLOYMENT}:deposit:7`, deploymentId: DEPLOYMENT,
+        type: 'deposit', status: 'confirmed', noteId: 7, amount: 2_000_000,
+        transactionHash: HASH, confirmedAt: 1000
+    });
+    indexedDB.stores.get('deposits').set(`${DEPLOYMENT}:deposit:10`, {
+        recordId: `${DEPLOYMENT}:deposit:10`, deploymentId: DEPLOYMENT,
+        type: 'deposit', status: 'confirmed', noteId: 10, amount: 2_000_000
+    });
+    const rows = (await readBrowserWalletSnapshot(DEPLOYMENT)).deposits;
+    assert.deepEqual(new Map(rows.map(row => [row.noteId, row.expiryTs])), new Map([
+        [7, EXPIRY_TS], [8, EXPIRY_TS + 1], [9, EXPIRY_TS + 2], [10, null]
+    ]));
+    assert.equal(rows.find(row => row.noteId === 7).transactionHash, HASH);
+    await writeBrowserWallet({ deploymentId: DEPLOYMENT, state: state() });
+    indexedDB.stores.get('archives').clear();
+    indexedDB.stores.get('withdrawals').clear();
+    assert.deepEqual((await readBrowserWalletSnapshot(DEPLOYMENT)).deposits, rows);
+    assert.deepEqual(await recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim({ noteId: 10 })]), []);
+    assert.equal((await readBrowserWalletSnapshot(DEPLOYMENT)).deposits.find(row => row.noteId === 10).expiryClaim, undefined);
+});
+
+test('expiry claims persist sanitized evidence without changing selected wallet or private recovery state', async () => {
+    seedRuntime({ state: { ...state(), expiry_ts: EXPIRY_TS },
+        journal: { privateRecovery: 'private-note-secret' },
+        lease: { sessionId: 'chat-a', client_request_id: 'request-a' },
+        preparedWithdrawal: { proof: 'private-proof' } });
+    const before = await readBrowserWallet();
+    const runtime = makeRuntime();
+    let notifications = 0;
+    runtime.addEventListener('change', () => { notifications += 1; });
+    const updated = await runtime.rememberExpiryClaims([expiryClaim({
+        transactionHash: HASH.toUpperCase().replace('0X', '0x'),
+        blockHash: BLOCK_HASH.toUpperCase().replace('0X', '0x'),
+        secret: 'private-note-secret', proof: 'private-proof', state: state(),
+        withdrawalNullifier: 'private-nullifier'
+    })]);
+    assert.equal(updated.length, 1);
+    assert.deepEqual(updated[0].expiryClaim, {
+        transactionHash: HASH, blockHash: BLOCK_HASH, blockNumber: 50,
+        claimedAt: EXPIRY_TS * 1000, amount: 2_000_000
+    });
+    assert.deepEqual(await readBrowserWallet(), before);
+    assert.equal(indexedDB.stores.get('archives').size, 0, 'recording evidence never archives a note');
+    assert.equal(notifications, 1);
+    assert.deepEqual(await runtime.rememberExpiryClaims([expiryClaim()]), []);
+    assert.equal(notifications, 1, 'repeated observations do not create duplicate updates');
+    const reloaded = makeRuntime();
+    const history = await reloaded.getDepositHistory();
+    assertSanitized(history);
+    assert.deepEqual(history[0].expiryClaim, updated[0].expiryClaim);
+    history[0].expiryClaim.amount = 1;
+    assert.equal(reloaded.snapshot().deposits[0].expiryClaim.amount, 2_000_000,
+        'public snapshots cannot mutate nested runtime evidence');
+    await writeBrowserWallet({ ...before, state: { ...before.state, current_balance: 1 } });
+    assert.deepEqual((await readBrowserWalletSnapshot(DEPLOYMENT)).deposits[0].expiryClaim, updated[0].expiryClaim);
+});
+
+test('expiry claims reject mismatched evidence atomically and cannot create or cross deployment history', async () => {
+    await writeBrowserWallet({ deploymentId: DEPLOYMENT, state: { ...state(), expiry_ts: EXPIRY_TS } });
+    indexedDB.stores.get('deposits').set(`${OTHER_DEPLOYMENT}:deposit:7`, {
+        recordId: `${OTHER_DEPLOYMENT}:deposit:7`, deploymentId: OTHER_DEPLOYMENT,
+        type: 'deposit', status: 'confirmed', noteId: 7, amount: 2_000_000, expiryTs: EXPIRY_TS
+    });
+    const before = clone([...indexedDB.stores.get('deposits').entries()]);
+    for (const changes of [
+        { amount: 1 }, { transactionHash: '0x123' }, { blockHash: '0x123' },
+        { blockNumber: 0 }, { blockNumber: 1.5 }, { claimedAt: EXPIRY_TS * 1000 - 1 },
+        { claimedAt: null }, { noteId: -1 }, { deploymentId: OTHER_DEPLOYMENT }
+    ]) {
+        await assert.rejects(recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim(), expiryClaim(changes)]),
+            /invalid deployment or note identity|does not match/);
+        assert.deepEqual([...indexedDB.stores.get('deposits').entries()], before);
+    }
+    assert.deepEqual(await recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim({ noteId: 55 })]), []);
+    assert.deepEqual(await recordBrowserExpiryClaims('unrelated-deployment', [expiryClaim()]), []);
+    await recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim()]);
+    assert.equal((await readBrowserWalletSnapshot(OTHER_DEPLOYMENT)).deposits[0].expiryClaim, undefined);
+    await assert.rejects(recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim({ transactionHash: REPLACED_HASH })]),
+        /different finalized expiry claim/);
+    assert.equal((await readBrowserWalletSnapshot(DEPLOYMENT)).deposits[0].expiryClaim.transactionHash, HASH);
+});
+
+test('an expiry history storage failure retains all recovery state and leaves the observation retryable', async () => {
+    await writeBrowserWallet({ deploymentId: DEPLOYMENT,
+        state: { ...state(), expiry_ts: EXPIRY_TS }, journal: { recovery: 'private-note-secret' } });
+    const before = await readBrowserWalletSnapshot(DEPLOYMENT);
+    indexedDB.failNextDepositWrite();
+    await assert.rejects(recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim()]), /history storage failure/);
+    assert.deepEqual(await readBrowserWalletSnapshot(DEPLOYMENT), before);
+    assert.equal((await recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim()])).length, 1);
+});
+
+test('explicit claimed-note archive preserves private recovery material and durable payment evidence', async () => {
+    await writeBrowserWallet({ deploymentId: DEPLOYMENT,
+        state: { ...state(), expiry_ts: EXPIRY_TS },
+        journal: { recovery: 'private-note-secret' },
+        lease: { sessionId: 'chat-a', client_request_id: 'request-a' },
+        preparedWithdrawal: { proof: 'private-proof' } });
+    const before = await readBrowserWallet();
+    await assert.rejects(archiveBrowserWallet('expiry-claimed', 7), /no matching confirmed expiry claim/);
+    assert.deepEqual(await readBrowserWallet(), before);
+    await recordBrowserExpiryClaims(DEPLOYMENT, [expiryClaim()]);
+    await assert.rejects(archiveBrowserWallet('expiry-claimed', 8), /selected private note changed/);
+    const runtime = makeRuntime();
+    runtime.activeLease = { sessionId: 'chat-a', inFlight: 1 };
+    await assert.rejects(runtime.archiveNote('expiry-claimed', 7), /Finish the current response/);
+    assert.deepEqual(await readBrowserWallet(), before);
+    runtime.activeLease.inFlight = 0;
+    await runtime.archiveNote('expiry-claimed', 7);
+    const archives = [...indexedDB.stores.get('archives').values()];
+    assert.equal(archives.length, 1);
+    for (const field of ['state', 'journal', 'lease', 'preparedWithdrawal', 'pendingDeposit']) {
+        assert.deepEqual(archives[0][field], before[field]);
+    }
+    const empty = await readBrowserWallet();
+    assert.equal(empty.state, null);
+    assert.equal(empty.journal, null);
+    assert.equal(empty.lease, null);
+    assert.equal(runtime.activeLease, null);
+    await writeBrowserWallet({ deploymentId: DEPLOYMENT, state: { ...state(8), expiry_ts: EXPIRY_TS + 1 } });
+    const rows = (await readBrowserWalletSnapshot(DEPLOYMENT)).deposits;
+    assert.equal(rows.length, 2);
+    assert.equal(rows.find(row => row.noteId === 7).expiryClaim.transactionHash, HASH);
+    assertSanitized(rows);
 });
