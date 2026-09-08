@@ -250,15 +250,12 @@ export default class AccountModal {
     renderWithdrawalStatusLink() {
         const records = zkapiClient.withdrawals;
         const lateAttempts = zkapiClient.unresolvedLateWithdrawals;
-        if (!records.length && !lateAttempts.length) return '';
         const open = records.filter(record => !['closed', 'closed_unconfirmed'].includes(record.phase));
         const toCheck = open.length + lateAttempts.length;
-        const label = toCheck
-            ? `${toCheck} withdrawal${toCheck === 1 ? '' : 's'} to check`
-            : 'Withdrawal history';
         return `
-            <button id="zkapi-withdrawal-status-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>
-                ${label}
+            <button id="zkapi-withdrawal-status-btn" class="zkapi-secondary-button flex w-full items-center justify-between gap-2" type="button" ${this.busy ? 'disabled' : ''}>
+                <span>Payment history</span>
+                ${toCheck ? `<span class="text-[11px] text-muted-foreground">${toCheck} withdrawal${toCheck === 1 ? '' : 's'} to check</span>` : ''}
             </button>`;
     }
 
@@ -316,11 +313,47 @@ export default class AccountModal {
         const hash = record.mode === 'escape'
             ? record.finalizeTransactionHash
             : record.transactionHash;
+        return this.paymentTransactionUrl(hash);
+    }
+
+    paymentTransactionUrl(hash) {
         if (!/^0x[0-9a-fA-F]{64}$/.test(hash || '')) return null;
         const chainId = Number(zkapiClient.config?.funding?.chain_id);
         const origin = chainId === 1 ? 'https://etherscan.io'
             : chainId === 11155111 ? 'https://sepolia.etherscan.io' : null;
         return origin ? `${origin}/tx/${hash}` : null;
+    }
+
+    paymentDate(timestamp) {
+        if (!Number.isFinite(Number(timestamp)) || Number(timestamp) <= 0) return 'Date unavailable';
+        const date = new Date(Number(timestamp));
+        return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+        });
+    }
+
+    renderDepositRecord(record) {
+        const confirmed = record.status === 'confirmed';
+        const status = confirmed ? 'Added' : record.status === 'failed' ? 'Failed'
+            : record.pendingPhase === 'awaiting_wallet' ? 'Waiting for MetaMask'
+            : record.pendingPhase === 'ambiguous' ? 'Status unknown'
+            : record.pendingPhase === 'dropped_or_pending' ? 'Check transaction' : 'Pending';
+        const transactionUrl = this.paymentTransactionUrl(record.transactionHash);
+        const currentDeposit = !confirmed && record.operationId
+            && record.operationId === zkapiClient.config?.pending_deposit?.operation_id;
+        return `
+            <section class="rounded-lg border border-border bg-muted/20 p-3" data-deposit-record="${this.escapeHtml(record.recordId)}">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <p class="text-xs font-medium text-foreground">Deposit</p>
+                        <p class="mt-0.5 text-[11px] text-muted-foreground">${confirmed ? '+' : ''}${zkapiClient.formatMoney(record.amount)}${confirmed ? ' added to private balance' : ''}</p>
+                        <p class="mt-1 text-[11px] text-muted-foreground">${this.escapeHtml(this.paymentDate(record.confirmedAt || record.createdAt))}</p>
+                    </div>
+                    <span class="rounded-full ${confirmed ? 'badge-status-success' : 'bg-muted text-muted-foreground'} px-2 py-1 text-[10px]">${status}</span>
+                </div>
+                ${transactionUrl ? `<a class="mt-2 inline-flex text-[11px] text-muted-foreground underline underline-offset-2" href="${this.escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer">View transaction</a>` : ''}
+                ${currentDeposit ? `<button data-view-current-deposit class="zkapi-secondary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>View deposit</button>` : ''}
+            </section>`;
     }
 
     backgroundStartReplacementAvailable(record) {
@@ -352,10 +385,15 @@ export default class AccountModal {
 
     renderWithdrawalRecords() {
         const records = zkapiClient.withdrawals;
+        const deposits = zkapiClient.deposits || [];
         const lateAttempts = zkapiClient.unresolvedLateWithdrawals;
-        if (!records.length && !lateAttempts.length) {
-            return '<div class="p-5 text-sm text-muted-foreground">No previous withdrawals are waiting.</div>';
+        if (!records.length && !lateAttempts.length && !deposits.length) {
+            return '<div class="p-5 space-y-4"><p class="text-sm text-muted-foreground">Your deposits and withdrawals will appear here.</p><button id="zkapi-back-balance-btn" class="zkapi-secondary-button w-full" type="button">Back to balance</button></div>';
         }
+        const payments = [...deposits.map(record => ({ type: 'deposit', record })),
+            ...records.map(record => ({ type: 'withdrawal', record }))];
+        const timestamp = ({ record }) => Number(record.confirmedAt || record.createdAt || record.updatedAt || 0);
+        payments.sort((left, right) => timestamp(right) - timestamp(left));
         const hasSelectedNote = Boolean(zkapiClient.note);
         const hasPendingDeposit = Boolean(zkapiClient.config?.pending_deposit);
         const hasPendingReturn = lateAttempts.length > 0
@@ -381,7 +419,8 @@ export default class AccountModal {
                             <button data-sync-late-withdrawal="${this.escapeHtml(attempt.transaction_hash)}" class="zkapi-primary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>Check transaction</button>
                         </section>`;
                     }).join('')}
-                    ${records.map(record => {
+                    ${payments.map(({ type, record }) => {
+                        if (type === 'deposit') return this.renderDepositRecord(record);
                         const deadline = Number(record.challengeDeadline || 0);
                         const ready = deadline > 0 && Date.now() >= deadline * 1000;
                         const returned = ['closed', 'closed_unconfirmed'].includes(record.phase);
@@ -411,8 +450,9 @@ export default class AccountModal {
                             <section class="rounded-lg border border-border bg-muted/20 p-3" data-withdrawal-record="${this.escapeHtml(record.recordId)}">
                                 <div class="flex items-start justify-between gap-3">
                                     <div>
-                                        <p class="text-xs font-medium text-foreground">${record.mode === 'escape' ? 'Escape hatch' : 'Mutual close'}</p>
+                                        <p class="text-xs font-medium text-foreground">Withdrawal · ${record.mode === 'escape' ? 'Escape hatch' : 'Mutual close'}</p>
                                         <p class="mt-0.5 text-[11px] text-muted-foreground">${zkapiClient.formatMoney(record.finalBalance)} ${returned ? 'returned to' : ['parked', 'restored'].includes(record.phase) ? 'set aside · to' : '· to'} ${record.destination ? zkapiClient.compact(record.destination, 6) : 'your saved destination'}</p>
+                                        <p class="mt-1 text-[11px] text-muted-foreground">${this.escapeHtml(this.paymentDate(record.createdAt))}</p>
                                     </div>
                                     <span class="rounded-full ${returned ? 'badge-status-success' : 'bg-muted text-muted-foreground'} px-2 py-1 text-[10px]" ${record.mode === 'escape' && open && deadline && record.phase === 'pending' ? `data-zkapi-withdrawal-countdown="${deadline}" data-record-id="${this.escapeHtml(record.recordId)}" data-record-phase="pending"` : ''}>${progressLabel ? '<span class="mr-1 inline-block size-2 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true"></span>' : ''}<span data-background-progress="${this.escapeHtml(record.recordId)}" ${progressLabel ? 'role="status"' : ''}>${this.escapeHtml(progressLabel || (parkedNeedsCheck ? 'Checking balance' : this.withdrawalRecordLabel(record)))}</span></span>
                                 </div>
@@ -441,7 +481,6 @@ export default class AccountModal {
 
     renderBalance() {
         const note = zkapiClient.note;
-        const tokenSymbol = this.escapeHtml(zkapiClient.billingTokenSymbol);
         const pendingDeposit = zkapiClient.config?.pending_deposit;
         const mainnetWarning = zkapiClient.isMainnetFunding
             ? '<div class="rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"><strong>Ethereum Mainnet:</strong> this deposits real USDC into experimental, unaudited zkAPI contracts and uses real ETH for gas. Private Merkle-tree updates are unusually gas-heavy on L1; zkAPI does not set the gas limit or fee rate, so review MetaMask’s maximum before confirming. Only use funds you can afford to lose.</div>'
@@ -496,7 +535,6 @@ export default class AccountModal {
                     <button id="zkapi-deposit-btn" class="zkapi-primary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>
                         ${this.busy ? 'Waiting for MetaMask…' : resumingDeposit ? 'Resume deposit with MetaMask' : 'Continue with MetaMask'}
                     </button>
-                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>Add ${tokenSymbol} to MetaMask</button>
                 </div>`;
         }
 
@@ -521,16 +559,8 @@ export default class AccountModal {
                     <button id="zkapi-refresh-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Refresh</button>
                     <button id="zkapi-withdraw-view-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Withdraw</button>
                 </div>
-                <div class="grid ${zkapiClient.config?.funding?.demo_mint_enabled ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
-                    <button id="zkapi-watch-token-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Add ${tokenSymbol} to MetaMask</button>
-                    ${zkapiClient.config?.funding?.demo_mint_enabled ? `<button id="zkapi-mint-token-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Get 10 test ZKAPI</button>` : ''}
-                </div>
+                ${zkapiClient.config?.funding?.demo_mint_enabled ? `<button id="zkapi-mint-token-btn" class="zkapi-secondary-button w-full" type="button" ${this.busy ? 'disabled' : ''}>Get 10 test ZKAPI</button>` : ''}
                 ${this.renderWithdrawalStatusLink()}
-                <dl class="zkapi-details">
-                    <div><dt>Network</dt><dd>${zkapiClient.networkName()}</dd></div>
-                    <div><dt>Request mode</dt><dd>${zkapiClient.isDirectMode ? 'Prompt-private' : 'Server proxy'}</dd></div>
-                    <div><dt>Vault</dt><dd>${zkapiClient.compact(zkapiClient.config?.funding?.contract_address, 8)}</dd></div>
-                </dl>
             </div>`;
     }
 
@@ -632,12 +662,12 @@ export default class AccountModal {
         const title = this.view === 'withdraw'
             ? 'Withdraw private balance'
             : this.view === 'withdrawals'
-                ? 'Withdrawal status'
+                ? 'Payment history'
                 : 'Private balance';
         const subtitle = this.view === 'withdraw'
             ? 'Return the remaining balance to MetaMask'
             : this.view === 'withdrawals'
-                ? 'Background withdrawals and recovery'
+                ? 'Deposits and withdrawals saved in this browser'
                 : 'OA Chat · private prepaid access';
         this.overlay.innerHTML = `
             <div role="dialog" aria-modal="true" aria-labelledby="zkapi-payment-title" class="${MODAL_CLASSES}">
@@ -693,9 +723,9 @@ export default class AccountModal {
                 this.setStatus('Deposit confirmed. Your private balance is ready.');
             }, { kind: 'deposit', title: 'Replacing pending deposit', phase: 'wallet', blocksSend: true });
         });
-        this.overlay.querySelector('#zkapi-watch-token-btn')?.addEventListener('click', () => this.run(async (report) => {
-            await zkapiClient.addBillingTokenToWallet(report);
-        }, { kind: 'token', title: 'Adding token to MetaMask', phase: 'wallet' }));
+        this.overlay.querySelectorAll('[data-view-current-deposit]').forEach(button => {
+            button.addEventListener('click', () => { this.view = 'balance'; this.render(); });
+        });
         this.overlay.querySelector('#zkapi-mint-token-btn')?.addEventListener('click', () => this.run(async (report) => {
             await zkapiClient.mintDemoTokens('10', report);
         }, { kind: 'token', title: 'Getting test ZKAPI', phase: 'wallet' }));

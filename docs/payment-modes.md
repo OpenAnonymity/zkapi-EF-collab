@@ -16,6 +16,27 @@ loading errors report that the mode changed but the balance could not be
 checked, rather than treating an unknown wallet as unfunded. Panel actions and
 send preflight also open the dialog and return focus to their initiating control.
 
+Balance details links to **Payment history**, combining deposits and withdrawals
+in one list with amounts, status, dates, and transaction links when known.
+Pending deposits remain visibly unconfirmed and link to their existing recovery
+flow. Withdrawal checks, finalization, and recovery actions remain available in
+the same history view. The list is local to this browser and deployment.
+
+The browser wallet stores confirmed deposit metadata separately from the active
+note so closing, withdrawing, or replacing a balance does not erase the deposit.
+Confirmation records and the confirmed wallet state are saved atomically.
+Existing notes, withdrawal-held notes, and archived notes contribute recoverable
+older deposits using their original deposit amount. Missing historical dates
+and transaction hashes remain unknown; history does not infer them from a later
+withdrawal or query the chain for a user's payment activity. Private note
+secrets, proofs, and recovery payloads are excluded from history records.
+
+The System Panel shows an extra status card only while the previous chat is
+closing. Completion removes it; ready and other states use the existing balance
+badge, response progress, and recovery controls. Balance details omits the
+network, request-mode, and vault-address rows. Token-add buttons are removed
+from all funding and balance views; the Sepolia test-token mint control remains.
+
 Both modes use the ordinary OA OpenRouter model catalog, display names, pinned
 and disabled models, and selection defaults. Tickets show the normal ticket
 cost; zkAPI shows USD per million input/output tokens, with exact per-token

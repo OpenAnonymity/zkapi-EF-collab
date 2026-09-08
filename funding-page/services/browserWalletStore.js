@@ -1,10 +1,11 @@
 import { isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
 
 const DB_NAME = 'zkapi-browser-wallet-v1';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const RUNTIME_STORE = 'runtime';
 const ARCHIVE_STORE = 'archives';
 const WITHDRAWAL_STORE = 'withdrawals';
+const DEPOSIT_STORE = 'deposits';
 const RUNTIME_KEY = 'active';
 const LATE_WITHDRAWAL_TERMINAL_STATUSES = new Set([
     'closed',
@@ -62,6 +63,9 @@ function openDatabase() {
             if (!database.objectStoreNames.contains(WITHDRAWAL_STORE)) {
                 database.createObjectStore(WITHDRAWAL_STORE, { keyPath: 'recordId' });
             }
+            if (!database.objectStoreNames.contains(DEPOSIT_STORE)) {
+                database.createObjectStore(DEPOSIT_STORE, { keyPath: 'recordId' });
+            }
         };
         request.onsuccess = () => {
             const database = request.result;
@@ -103,6 +107,118 @@ function durableTransaction(database, stores) {
     }
 }
 
+function positiveTimestamp(value) {
+    return Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+}
+
+function depositRecord(state, deploymentId, metadata = {}) {
+    const noteId = Number(state?.note_id);
+    const amount = Number(state?.deposit_amount);
+    if (!deploymentId || state?.note_id == null || !Number.isSafeInteger(noteId) || noteId < 0
+        || !Number.isSafeInteger(amount) || amount <= 0) return null;
+    // This explicit allowlist is also the public payment-history shape. Never
+    // copy a private state, commitment, secret, proof, or recovery plan here.
+    return {
+        recordId: `${deploymentId}:deposit:${noteId}`,
+        type: 'deposit',
+        deploymentId,
+        operationId: typeof metadata.operationId === 'string' ? metadata.operationId : null,
+        noteId,
+        amount,
+        status: 'confirmed',
+        createdAt: positiveTimestamp(metadata.createdAt),
+        confirmedAt: positiveTimestamp(metadata.confirmedAt),
+        transactionHash: /^0x[0-9a-fA-F]{64}$/.test(metadata.transactionHash || '')
+            ? metadata.transactionHash.toLowerCase() : null
+    };
+}
+
+function mergeDepositRecord(records, candidate, store) {
+    if (!candidate) return;
+    const previous = records.get(candidate.recordId);
+    const next = previous ? {
+        ...candidate,
+        // A migration has no date/hash evidence. It must not replace a receipt
+        // recorded by a newer client, or pretend the withdrawal date was the
+        // deposit date. A later verified receipt may fill missing metadata.
+        createdAt: previous.createdAt || candidate.createdAt,
+        confirmedAt: previous.confirmedAt || candidate.confirmedAt,
+        transactionHash: previous.transactionHash || candidate.transactionHash,
+        operationId: previous.operationId || candidate.operationId
+    } : candidate;
+    if (JSON.stringify(previous) !== JSON.stringify(next)) store?.put(next);
+    records.set(next.recordId, next);
+}
+
+function archiveDeploymentId(archive) {
+    if (archive.deploymentId) return archive.deploymentId;
+    // Older clients made separate clock reads for archiveId and archivedAt.
+    const parts = String(archive.archiveId || '').split(':');
+    const timestamp = parts.pop();
+    const noteId = parts.pop();
+    return /^\d+$/.test(timestamp || '') && String(archive.state?.note_id) === noteId
+        ? parts.join(':') || null : null;
+}
+
+function depositRecordMap(records) {
+    return new Map(records.map(record => depositRecord({
+        note_id: record.noteId, deposit_amount: record.amount
+    }, record.deploymentId, record)).filter(Boolean).map(record => [record.recordId, record]));
+}
+
+function pendingDepositRecords(runtime, deploymentId) {
+    const pending = !deploymentId || runtime.deploymentId === deploymentId ? runtime.pendingDeposit : null;
+    const candidates = [
+        ...(pending && (pending.phase !== 'prepared' || pending.submissionId
+            || pending.transactionHash || pending.transactionHashes?.length) ? [{
+                ...pending,
+                noteId: pending.next_note_id,
+                deploymentId: runtime.deploymentId,
+                status: 'pending',
+                pendingPhase: pending.phase || (pending.transactionHash ? 'submitted' : 'ambiguous'),
+                createdAt: pending.createdAt || pending.submissionStartedAt
+            }] : []),
+        ...(runtime.lateDepositAttempts || []).filter(attempt =>
+            (!deploymentId || attempt.deploymentId === deploymentId)
+            && !['confirmed', 'superseded'].includes(attempt.status)
+        ).map(attempt => ({ ...attempt,
+            status: attempt.status === 'reverted' ? 'failed' : 'pending',
+            pendingPhase: attempt.status,
+            createdAt: attempt.observedAt
+        }))
+    ];
+    const records = new Map();
+    for (const candidate of candidates) {
+        const record = depositRecord({ note_id: candidate.noteId, deposit_amount: candidate.amount },
+            candidate.deploymentId, candidate);
+        if (!record) continue;
+        const key = `${record.deploymentId}:deposit-pending:${record.operationId
+            || `${record.noteId}:${record.amount}:${record.transactionHash || 'legacy'}`}`;
+        // Several replacement hashes belong to one attempted deposit. Retain
+        // its unresolved state even when another attempt has reverted.
+        // The selected operation appears first, so a late callback for its old
+        // vault slot cannot overwrite the current amount or recovery action.
+        if (records.get(key)?.status === 'pending') continue;
+        records.set(key, { ...record, recordId: key, status: candidate.status,
+            pendingPhase: candidate.pendingPhase, confirmedAt: null });
+    }
+    return [...records.values()];
+}
+
+/** Project public rows without another fallible storage operation after commit. */
+export function projectBrowserDeposits(runtime, records, deploymentId, depositConfirmation = {}) {
+    const history = depositRecordMap((records || []).filter(record => record.status === 'confirmed'));
+    mergeDepositRecord(history, depositRecord(runtime.state, runtime.deploymentId, depositConfirmation));
+    const confirmed = [...history.values()].filter(record => !deploymentId || record.deploymentId === deploymentId);
+    const pending = pendingDepositRecords(runtime, deploymentId).filter(record => !confirmed.some(deposit =>
+        deposit.deploymentId === record.deploymentId
+        && (deposit.operationId && record.operationId
+            ? deposit.operationId === record.operationId
+            : deposit.noteId === record.noteId && deposit.amount === record.amount)));
+    return [...confirmed, ...pending].sort((left, right) =>
+        Number(right.createdAt || right.confirmedAt || 0) - Number(left.createdAt || left.confirmedAt || 0));
+}
+
 export async function readBrowserWallet() {
     const database = await openDatabase();
     const transaction = database.transaction(RUNTIME_STORE, 'readonly');
@@ -111,17 +227,31 @@ export async function readBrowserWallet() {
     return normalizeRuntime(value);
 }
 
-/** Read the selected wallet and its background withdrawals from one snapshot. */
+/** Read recovery state and payment history from one consistent snapshot. */
 export async function readBrowserWalletSnapshot(deploymentId = null) {
     const database = await openDatabase();
-    const transaction = database.transaction([RUNTIME_STORE, WITHDRAWAL_STORE], 'readonly');
-    const [runtime, records] = await Promise.all([
+    const transaction = durableTransaction(database,
+        [RUNTIME_STORE, WITHDRAWAL_STORE, ARCHIVE_STORE, DEPOSIT_STORE]);
+    const [runtimeValue, records, archives, deposits] = await Promise.all([
         requestResult(transaction.objectStore(RUNTIME_STORE).get(RUNTIME_KEY)),
-        requestResult(transaction.objectStore(WITHDRAWAL_STORE).getAll())
+        requestResult(transaction.objectStore(WITHDRAWAL_STORE).getAll()),
+        requestResult(transaction.objectStore(ARCHIVE_STORE).getAll()),
+        requestResult(transaction.objectStore(DEPOSIT_STORE).getAll())
     ]);
+    const runtime = normalizeRuntime(runtimeValue);
+    const depositStore = transaction.objectStore(DEPOSIT_STORE);
+    const history = depositRecordMap(deposits);
+    mergeDepositRecord(history, depositRecord(runtime.state, runtime.deploymentId), depositStore);
+    for (const record of records) {
+        mergeDepositRecord(history, depositRecord(record.state, record.deploymentId), depositStore);
+    }
+    for (const archive of archives) {
+        mergeDepositRecord(history, depositRecord(archive.state, archiveDeploymentId(archive)), depositStore);
+    }
     await transactionDone(transaction);
     return {
-        runtime: normalizeRuntime(runtime),
+        runtime,
+        deposits: projectBrowserDeposits(runtime, [...history.values()], deploymentId),
         withdrawals: records
             .filter(record => !deploymentId || record.deploymentId === deploymentId)
             .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
@@ -133,10 +263,18 @@ export async function readBrowserWalletSnapshot(deploymentId = null) {
  * must put a write-ahead journal here before transmitting a proved request and
  * clear it only in the same write that installs the verified next note state.
  */
-export async function writeBrowserWallet(next) {
+export async function writeBrowserWallet(next, { depositConfirmation = null } = {}) {
     const database = await openDatabase();
-    const transaction = durableTransaction(database, RUNTIME_STORE);
+    const transaction = durableTransaction(database, [RUNTIME_STORE, DEPOSIT_STORE]);
     const value = normalizeRuntime({ ...next, updatedAt: Date.now() });
+    const depositStore = transaction.objectStore(DEPOSIT_STORE);
+    const [current, deposits] = await Promise.all([
+        requestResult(transaction.objectStore(RUNTIME_STORE).get(RUNTIME_KEY)),
+        requestResult(depositStore.getAll())
+    ]);
+    const history = depositRecordMap(deposits);
+    mergeDepositRecord(history, depositRecord(current?.state, current?.deploymentId), depositStore);
+    mergeDepositRecord(history, depositRecord(value.state, value.deploymentId, depositConfirmation || {}), depositStore);
     transaction.objectStore(RUNTIME_STORE).put(value, RUNTIME_KEY);
     await transactionDone(transaction);
     return value;
@@ -157,6 +295,7 @@ export async function archiveBrowserWallet(reason = 'closed', expectedNoteId = n
             archiveId: `${current.deploymentId || 'deployment'}:${current.state.note_id}:${Date.now()}`,
             reason,
             archivedAt: Date.now(),
+            deploymentId: current.deploymentId,
             state: current.state
         });
     }
@@ -1553,7 +1692,7 @@ export async function updateBrowserWithdrawal(recordId, changes = {}, {
     expectedFinalizeTransactionHash = undefined
 } = {}) {
     const database = await openDatabase();
-    const transaction = durableTransaction(database, WITHDRAWAL_STORE);
+    const transaction = durableTransaction(database, [WITHDRAWAL_STORE, DEPOSIT_STORE]);
     const store = transaction.objectStore(WITHDRAWAL_STORE);
     const current = await requestResult(store.get(recordId));
     if (!current) {
@@ -1585,6 +1724,12 @@ export async function updateBrowserWithdrawal(recordId, changes = {}, {
         updatedAt: Date.now()
     };
     if (sanitize) {
+        // Preserve the original deposit before finality removes the last copy
+        // of a legacy note's private recovery state.
+        const depositStore = transaction.objectStore(DEPOSIT_STORE);
+        const deposits = await requestResult(depositStore.getAll());
+        mergeDepositRecord(depositRecordMap(deposits),
+            depositRecord(current.state, current.deploymentId), depositStore);
         if (next.phase === 'closed') {
             // Terminal chain finality releases the UI's live wallet claims.
             // Keep their minimal identities for callbacks from old wallet tabs,

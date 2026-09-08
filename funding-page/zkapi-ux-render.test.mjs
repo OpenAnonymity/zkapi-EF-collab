@@ -725,6 +725,73 @@ test('a canceled custom deposit resumes from its durable amount after modal stat
     }
 });
 
+test('balance views keep funding and payment history while omitting redundant wallet details', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    zkapiClient.config = { funding: { chain_id: 1, billing_token_symbol: 'USDC' } };
+    zkapiClient.withdrawals = [];
+    zkapiClient.deposits = [];
+    try {
+        for (const note of [null, { deposit_amount: 2_000_000, current_balance: 1_600_000 }]) {
+            zkapiClient.wallet = { has_note: Boolean(note), note };
+            const html = modal.renderBalance();
+            assert.match(html, /Payment history/);
+            assert.doesNotMatch(html, /zkapi-watch-token-btn|Add USDC to MetaMask|<dt>Network|<dt>Request mode|<dt>Vault/);
+            assert.match(html, note ? /Withdraw/ : /Continue with MetaMask/);
+        }
+        assert.match(modal.renderWithdrawalRecords(), /Your deposits and withdrawals will appear here/);
+        assert.match(modal.renderWithdrawalRecords(), /Back to balance/);
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('payment history combines deposits and withdrawals by date without inventing missing details', () => {
+    const original = { wallet: zkapiClient.wallet, config: zkapiClient.config,
+        withdrawals: zkapiClient.withdrawals, deposits: zkapiClient.deposits };
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    const hash = `0x${'ab'.repeat(32)}`;
+    zkapiClient.config = { funding: { chain_id: 1 } };
+    zkapiClient.wallet = { has_note: false, note: null };
+    zkapiClient.deposits = [
+        { recordId: 'old-deposit', status: 'confirmed', amount: 5_000_000, createdAt: null, confirmedAt: null },
+        { recordId: 'new-deposit', status: 'confirmed', amount: 2_000_000, confirmedAt: 3_000, transactionHash: hash }
+    ];
+    zkapiClient.withdrawals = [{ recordId: 'returned', mode: 'mutual', phase: 'closed',
+        finalBalance: 1_000_000, destination: '0x123456', createdAt: 2_000 }];
+    try {
+        const html = modal.renderWithdrawalRecords();
+        assert.ok(html.indexOf('data-deposit-record="new-deposit"') < html.indexOf('data-withdrawal-record="returned"'));
+        assert.ok(html.indexOf('data-withdrawal-record="returned"') < html.indexOf('data-deposit-record="old-deposit"'));
+        assert.match(html, /Deposit/);
+        assert.match(html, /added to private balance/);
+        assert.match(html, /Withdrawal · Mutual close/);
+        assert.match(html, /Date unavailable/);
+        assert.match(html, new RegExp(`https://etherscan.io/tx/${hash}`));
+        assert.equal((html.match(/View transaction/g) || []).length, 1);
+        assert.doesNotMatch(modal.renderDepositRecord({ recordId: '<script>', status: 'confirmed',
+            amount: 1, transactionHash: 'javascript:alert(1)' }), /<script>|href=/);
+    } finally { Object.assign(zkapiClient, original); }
+});
+
+test('unconfirmed deposits have honest status and link only to their current recovery flow', () => {
+    const original = zkapiClient.config;
+    const modal = Object.create(AccountModal.prototype);
+    modal.busy = false;
+    zkapiClient.config = { pending_deposit: { operation_id: 'current' } };
+    try {
+        const pending = modal.renderDepositRecord({ recordId: 'pending', operationId: 'current',
+            status: 'pending', pendingPhase: 'ambiguous', amount: 2_000_000 });
+        assert.match(pending, /Status unknown/);
+        assert.match(pending, /View deposit/);
+        assert.doesNotMatch(pending, /Added|added to private balance/);
+        assert.doesNotMatch(modal.renderDepositRecord({ recordId: 'older', operationId: 'other',
+            status: 'pending', amount: 2_000_000 }), /View deposit/);
+        assert.match(modal.renderDepositRecord({ recordId: 'failed', status: 'failed', amount: 2_000_000 }), /Failed/);
+    } finally { zkapiClient.config = original; }
+});
+
 test('a returned withdrawal is a success while network finality runs without user action', () => {
     const original = {
         wallet: zkapiClient.wallet,

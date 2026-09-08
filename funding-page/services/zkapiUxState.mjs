@@ -283,7 +283,7 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
                     ? 'Withdrawal needs attention'
                     : 'Checking submitted withdrawal',
                 detail: lateWithdrawalNeedsAttention
-                    ? lateWithdrawal.error || 'The saved transaction did not match this withdrawal. Open Withdrawal status to recheck the vault.'
+                    ? lateWithdrawal.error || 'The saved transaction did not match this withdrawal. Open Payment history to recheck the vault.'
                     : 'A wallet window returned after this tab changed state. The message will stay paused until the chain check completes.',
                 compact: lateWithdrawalNeedsAttention
                     ? 'Check withdrawal'
@@ -454,6 +454,18 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
         || accessActivityState
         || withdrawalState
         || primary;
+    // The System Panel only needs an extra card while the previous chat is
+    // closing. Keep the full states above for badges, pending responses and
+    // recovery, including when wallet activity runs alongside settlement.
+    const closingState = ['settling', 'waiting'].includes(transition?.phase)
+        ? transitionState
+        : settlementActivityState;
+    const closingPrimary = closingState ? {
+        ...closingState,
+        phase: 'closing',
+        title: 'Closing previous chat',
+        compact: 'Closing previous chat'
+    } : null;
 
     const showComposer = Boolean(
         transition
@@ -469,6 +481,7 @@ export function deriveZkapiUxState({ snapshot = {}, transition = null, sessionId
         composerPrimary,
         balancePrimary,
         panelPrimary,
+        closingPrimary,
         activities,
         runningActivities: running,
         currentActivity,

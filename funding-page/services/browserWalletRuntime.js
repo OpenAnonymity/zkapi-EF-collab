@@ -22,6 +22,7 @@ import {
     markBrowserBackgroundWithdrawalAmbiguous,
     markBrowserWithdrawalFinalizationMissingReceipts,
     parkBrowserWithdrawal,
+    projectBrowserDeposits,
     readBrowserWalletSnapshot,
     releaseBrowserWithdrawalFinalization,
     releaseBrowserWithdrawalFinalizationReplacementClaim,
@@ -249,6 +250,7 @@ class BrowserWalletRuntime extends EventTarget {
         this.config = null;
         this.runtime = null;
         this.withdrawals = [];
+        this.deposits = [];
         this.activeLease = null;
         this.initialized = false;
         this.initPromise = null;
@@ -573,6 +575,7 @@ class BrowserWalletRuntime extends EventTarget {
                     status: attempt.status
                 })),
             pending_deposit: pendingDeposit ? {
+                operation_id: pendingDeposit.operationId || null,
                 phase: pendingDeposit.phase || (pendingDeposit.transactionHash ? 'submitted' : 'ambiguous'),
                 amount: Number(pendingDeposit.amount),
                 next_note_id: Number(pendingDeposit.next_note_id),
@@ -600,6 +603,7 @@ class BrowserWalletRuntime extends EventTarget {
             config,
             runtime: this.runtime,
             activeLease: active,
+            deposits: this.deposits.map(record => ({ ...record })),
             withdrawals: this.withdrawals.map(record => {
                 const {
                     state: _state,
@@ -646,6 +650,7 @@ class BrowserWalletRuntime extends EventTarget {
             ? { ...storedRuntime, deploymentId: this.manifest.deployment_id }
             : storedRuntime;
         this.withdrawals = snapshot.withdrawals;
+        this.deposits = snapshot.deposits;
         return this.runtime;
     }
 
@@ -654,8 +659,10 @@ class BrowserWalletRuntime extends EventTarget {
         this.dispatchEvent(new Event('change'));
     }
 
-    async commit(next) {
-        this.runtime = await writeBrowserWallet({ ...next, deploymentId: this.manifest.deployment_id });
+    async commit(next, options = {}) {
+        this.runtime = await writeBrowserWallet({ ...next, deploymentId: this.manifest.deployment_id }, options);
+        this.deposits = projectBrowserDeposits(this.runtime, this.deposits,
+            this.manifest.deployment_id, options.depositConfirmation);
         this.notify();
         return this.runtime;
     }
@@ -808,6 +815,7 @@ class BrowserWalletRuntime extends EventTarget {
             const path = await this.nextDepositPath();
             const plan = {
                 operationId: uuid(),
+                createdAt: Date.now(),
                 phase: 'prepared',
                 amount: Number(amount),
                 secret: params.secret,
@@ -1392,6 +1400,16 @@ class BrowserWalletRuntime extends EventTarget {
                 journal: null,
                 pendingDeposit: null,
                 preparedWithdrawal: null
+            }, {
+                depositConfirmation: {
+                    operationId: pending.operationId,
+                    createdAt: pending.createdAt || pending.submissionStartedAt || null,
+                    confirmedAt: Date.now(),
+                    // A saved attempt may have been replaced. Only the receipt
+                    // caller identifies the actual mined transaction; recovery
+                    // from the vault alone intentionally leaves it unknown.
+                    transactionHash: args.transactionHash || null
+                }
             });
             return this.walletStatus();
         });

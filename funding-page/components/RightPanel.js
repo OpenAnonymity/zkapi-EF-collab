@@ -198,7 +198,14 @@ export default class RightPanel extends SharedRightPanel {
         })();
         const usage = this.usageEstimateView();
         const experience = getZkapiExperience(this.app, this.currentSession?.id);
-        const experienceHtml = renderZkapiPanelExperience(experience, value => this.escapeHtml(value));
+        const experienceHtml = experience.closingPrimary
+            ? renderZkapiPanelExperience({
+                ...experience,
+                proposal: 'quiet',
+                panelPrimary: experience.closingPrimary,
+                showComposer: true
+            }, value => this.escapeHtml(value))
+            : '';
         const actionableState = ['withdrawal', 'escape-wait', 'deposit-recovery']
             .includes(experience.primary.phase);
         const statusBadge = experience.primary.tone === 'error'
@@ -227,7 +234,7 @@ export default class RightPanel extends SharedRightPanel {
                     <div class="mt-1 flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span data-chat-usage-tokens>${this.escapeHtml(usage.tokenLabel)}</span><span data-chat-usage-key-limit>${this.escapeHtml(usage.keyLimitLabel)} per key</span></div>
                 </div>
                 ${experienceHtml}
-                ${withdrawalRecoveryCount ? `<button id="zkapi-panel-withdrawals" class="btn-ghost-hover mt-2 flex w-full items-center justify-between rounded-md bg-muted/40 px-2.5 py-2 text-[10px] text-muted-foreground transition-colors" type="button"><span>Withdrawal status</span><strong class="font-medium text-foreground">${withdrawalStatusLabel}</strong></button>` : ''}
+                ${withdrawalRecoveryCount ? `<button id="zkapi-panel-withdrawals" class="btn-ghost-hover mt-2 flex w-full items-center justify-between rounded-md bg-muted/40 px-2.5 py-2 text-[10px] text-muted-foreground transition-colors" type="button"><span>Payment history</span><strong class="font-medium text-foreground">${withdrawalStatusLabel}</strong></button>` : ''}
                 <div class="mt-3 grid ${note ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5">
                     <button id="zkapi-panel-fund" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">${note ? 'Balance details' : pendingDeposit ? 'Deposit status' : 'Fund with MetaMask'}</button>
                     ${note ? '<button id="zkapi-panel-withdraw" class="btn-ghost-hover inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium shadow-sm transition-all">Withdraw</button>' : ''}

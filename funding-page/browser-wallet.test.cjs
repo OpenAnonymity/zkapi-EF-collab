@@ -283,7 +283,7 @@ test('mainnet funding UX labels USDC and warns before using real funds', () => {
     assert.match(runtime, /billing_token_decimals/);
     assert.match(client, /symbol: this\.billingTokenSymbol/);
     assert.match(client, /this\.networkName\(\)/);
-    assert.match(account, /Add \$\{tokenSymbol\} to MetaMask/);
+    assert.doesNotMatch(account, /zkapi-watch-token-btn|Add \$\{tokenSymbol\} to MetaMask/);
     assert.match(account, /Ethereum Mainnet:/);
     assert.match(account, /real USDC/);
     assert.match(account, /does not set the gas limit or fee rate/);

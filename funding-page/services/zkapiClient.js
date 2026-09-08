@@ -145,6 +145,7 @@ class ZkapiClient extends EventTarget {
         this.walletAddress = null;
         this.withdrawal = readStoredWithdrawal();
         this.withdrawals = [];
+        this.deposits = [];
         this.challengePeriodSeconds = 24 * 60 * 60;
         this.loading = false;
         this.lastError = null;
@@ -378,6 +379,7 @@ class ZkapiClient extends EventTarget {
             walletAddress: this.walletAddress,
             withdrawal: this.withdrawal,
             withdrawals: this.withdrawals.map(record => ({ ...record })),
+            deposits: this.deposits.map(record => ({ ...record })),
             challengePeriodSeconds: this.challengePeriodSeconds,
             loading: this.loading,
             lastError: this.lastError,
@@ -398,6 +400,7 @@ class ZkapiClient extends EventTarget {
             wallet: this.wallet,
             withdrawal: this.withdrawal,
             withdrawals: this.withdrawals,
+            deposits: this.deposits,
             error
         });
     }
@@ -546,8 +549,10 @@ class ZkapiClient extends EventTarget {
                 browserSnapshot = browserWalletRuntime.snapshot();
                 this.config = browserSnapshot.config;
                 this.withdrawals = browserSnapshot.withdrawals || [];
+                this.deposits = browserSnapshot.deposits || [];
             } else {
                 this.withdrawals = [];
+                this.deposits = [];
             }
             this.lastError = null;
 
@@ -1067,6 +1072,7 @@ class ZkapiClient extends EventTarget {
             note_id: Number(deposited.noteId),
             amount: Number(plan.amount),
             commitment: plan.commitment,
+            transactionHash: receipt.transactionHash,
             expiry_ts: Number(deposited.expiryTs)
         });
         await this.refresh();
@@ -2863,7 +2869,7 @@ class ZkapiClient extends EventTarget {
                 'rpc_behind'
             ].includes(entry.status));
             onStatus(needsAttention
-                ? 'This withdrawal still needs attention. Open Withdrawal status for details.'
+                ? 'This withdrawal still needs attention. Open Payment history for details.'
                 : stillChecking
                     ? 'The withdrawal from another tab is still being checked.'
                     : 'Withdrawal recovery is up to date.');
