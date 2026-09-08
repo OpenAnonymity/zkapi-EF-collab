@@ -93,7 +93,10 @@ export default class AccountModal {
         document.getElementById(this.triggerId)?.setAttribute('aria-expanded', 'false');
         if (this.escapeHandler) document.removeEventListener('keydown', this.escapeHandler);
         this.escapeHandler = null;
-        this.returnFocusEl?.focus?.();
+        const returnFocus = this.returnFocusEl?.isConnected === false
+            ? this.returnFocusEl.id ? document.getElementById(this.returnFocusEl.id) : null
+            : this.returnFocusEl;
+        returnFocus?.focus?.();
         this.returnFocusEl = null;
     }
 

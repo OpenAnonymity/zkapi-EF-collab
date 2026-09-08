@@ -690,6 +690,33 @@ test('account clock patches preserve the modal and enable escape finalization at
     }
 });
 
+test('closing the balance dialog restores a remounted trigger and retains connected ID-less focus targets', () => {
+    const originalDocument = globalThis.document;
+    let liveFocus = 0;
+    let oldFocus = 0;
+    let connectedFocus = 0;
+    const liveTrigger = { focus: () => { liveFocus += 1; } };
+    globalThis.document = { getElementById: id => id === 'zkapi-panel-fund' ? liveTrigger : null };
+    const modal = Object.create(AccountModal.prototype);
+    modal.overlay = { classList: { add() {} }, innerHTML: '<div>Balance</div>' };
+    modal.returnFocusEl = { id: 'zkapi-panel-fund', isConnected: false, focus: () => { oldFocus += 1; } };
+    modal.isOpen = true;
+    try {
+        modal.close();
+        assert.equal(liveFocus, 1);
+        assert.equal(oldFocus, 0);
+        assert.equal(modal.returnFocusEl, null);
+        modal.isOpen = true;
+        modal.returnFocusEl = { isConnected: true, focus: () => { connectedFocus += 1; } };
+        modal.close();
+        assert.equal(connectedFocus, 1);
+        modal.isOpen = true;
+        modal.returnFocusEl = { isConnected: false, focus: () => assert.fail('A detached ID-less target cannot regain focus') };
+        modal.close();
+        assert.equal(liveFocus, 1, 'No unrelated fallback target is invented');
+    } finally { globalThis.document = originalDocument; }
+});
+
 test('a canceled custom deposit resumes from its durable amount after modal state changes', () => {
     const originalWallet = zkapiClient.wallet;
     const originalConfig = zkapiClient.config;

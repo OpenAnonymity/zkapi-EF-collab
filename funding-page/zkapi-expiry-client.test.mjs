@@ -263,6 +263,38 @@ test('withdrawal reloads persisted expiry evidence before attempting settlement 
     assert.deepEqual(h.client.wallet, beforeWallet);
 });
 
+test('withdrawal replacement checks the prepared note claim before connecting or changing its retry plan', async t => {
+    const h = harness(t);
+    h.deposits[0].expiryClaim = claim();
+    let prepared;
+    t.mock.method(wallet, 'currentPreparedWithdrawal', async () => prepared);
+    const connect = t.mock.method(h.client, 'connectWallet', async () => {
+        assert.fail('A claimed withdrawal must not open a wallet prompt');
+    });
+    const replacement = t.mock.method(wallet, 'claimPreparedWithdrawalReplacement', async () => {
+        assert.fail('A claimed withdrawal must not mutate its replacement plan');
+    });
+    const send = t.mock.method(h.client, 'sendContractTransaction', async () => {
+        assert.fail('A claimed withdrawal must not submit a replacement transaction');
+    });
+    for (const identity of [{ noteId: 7 }, { public_inputs: { note_id: 7 } }, {}]) {
+        prepared = { phase: 'dropped_or_pending', mode: 'mutual', ...identity };
+        // A historical plan must guard its own note even after another balance is selected.
+        h.client.wallet = { note: { note_id: Object.keys(identity).length ? 8 : 7 } };
+        h.client.deposits = [deposit()];
+        const beforePlan = structuredClone(prepared);
+        const beforeWallet = structuredClone(h.client.wallet);
+        await assert.rejects(h.client.retryDroppedWithdrawal(), /claimed after expiry.*start a new balance/);
+        assert.deepEqual(prepared, beforePlan);
+        assert.deepEqual(h.client.wallet, beforeWallet);
+    }
+    assert.equal(h.history.mock.calls.length, 3);
+    assert.equal(connect.mock.calls.length, 0);
+    assert.equal(replacement.mock.calls.length, 0);
+    assert.equal(send.mock.calls.length, 0);
+    assert.equal(h.calls.length, 0);
+});
+
 test('generic closed withdrawal records do not hide actual expiry payments from discovery', async t => {
     const h = harness(t);
     h.client.withdrawals = [{ deploymentId: DEPLOYMENT, noteId: 7,
