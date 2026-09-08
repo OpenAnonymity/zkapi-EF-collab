@@ -147,7 +147,9 @@ auto-attach and its context editor, Privacy Scrubber, Parallel, and Council
 review. Availability follows the current chat without changing saved global
 preferences or removing historical multi-model responses.
 
-The same controls explain their unavailability in zkAPI mode. Memory retrieval
+The same controls explain their unavailability in zkAPI mode.
+The scrubber shortcut area in the input stays empty in zkAPI mode and restores
+its normal hint when switching back to Tickets. Memory retrieval
 and background extraction, like the Privacy Scrubber, acquire separate Tinfoil
 keys through ticket redemption; they cannot currently be paid from the zkAPI
 balance. Parallel/Council also require multiple independent ephemeral keys.
