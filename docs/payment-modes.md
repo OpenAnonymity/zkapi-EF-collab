@@ -214,13 +214,38 @@ and mode without reopening the dismissed dialog. The funded Sepolia wallet
 both deployments passed all 153 asset hashes with no Vercel error logs.
 Wallet connection, deposit, and Tinfoil inference were not invoked.
 
+The payment-history and balance-cleanup release passed all 296 client tests
+and 10 composition tests, plus a fresh independent review of persistence,
+transaction rollback, operation deduplication, deployment isolation, withdrawal
+recovery, and UI rendering. Confirmed deposit metadata uses browser wallet
+schema version 3 and saves atomically with the private note.
+
+Live Chrome checks on the deployed Sepolia app showed the original $5.00
+deposit in Payment history while the remaining balance stayed $4.96. Reload
+and reopening history retained the single deposit; its historical date and
+transaction link remain unavailable because the earlier client did not save
+them. The funded balance dialog has no token-add control or network,
+request-mode, and vault-address rows. The System Panel retains its ordinary
+balance badge with no extra ready card; active-closing visibility is covered
+by the focused state/render tests.
+
+The deployed mainnet app still opens funding automatically when its unfunded
+historical chat switches to zkAPI. Payment history shows the empty state and
+returns to funding through Back to balance; Add USDC to MetaMask is absent.
+Both browser tabs loaded `assets/app-RQ5ACPPM.js`, reported zero browser
+errors, and returned to Tickets after verification. The existing mainnet
+transcript remained intact. This release's browser verification performed no
+wallet transactions, inference requests, or Tinfoil calls.
+All 153 published asset hashes matched on each trial app; health, catalog,
+redirects, security headers, and Vercel error-log checks passed.
+
 ## Shared staging OA services
 
 Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`1e60a43db5bcb3ee8e6a662e041006d3c642e791`, and the shared OA commit is
+`d720bc09f43c030b948e6c592c7f54bf93c3ed9b`, and the shared OA commit is
 `1ec19f1fc7a3f36b4fe0c7631943b4c9b498fca8`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -245,12 +270,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-ilresoh22-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-5uf1p7jxr-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_AumhJZNV3ssvGvv4SVfdJTNBSJgt` (READY).
+- Deployment: `dpl_FQs6zVGNmH22ZWXk8R6HX3jakQXX` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `d3ad57dc5cab0d3c94927effafde93d99a5d57864720cf965f55a69d058b9112`.
-- Validation: 281 client tests and 10 composition tests passed for this change;
+- Build fingerprint: `64015c6f9acba1d2a50bca58795eef40aa89031a160ebabd0d2882341d8c76c5`.
+- Validation: 296 client tests and 10 composition tests passed for this change;
   the unchanged OA code previously passed 602 tests and its final panel
   correction passed 10 focused tests;
   fresh adversarial review approved; all 153 published asset digests matched.
@@ -301,11 +326,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-qzp01bw37-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-qbxdzbxkf-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_9vSEpX6cs3adxJWeUbwCREtccJsy` (READY).
+- Deployment: `dpl_37UruaM1Cfih41UMCzpdCam83pFM` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `527f0b6c6eaf75588dfd68e16fe8c6cb635d4769ef4a5263d534e5dc2702e7be`.
+- Build fingerprint: `256e300fff33d48b7dffebe31bacdd0ac83525d8547b1d15c69dee0f5f83ca59`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
