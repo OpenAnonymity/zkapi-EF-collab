@@ -533,11 +533,11 @@ test('issueLease prepares one proof before delegating all transport attempts', a
     assert.equal(runtime.activeLease.sessionId, 'chat-session');
 });
 
-test('issueLease settles a durable legacy-cap journal before exposing a fixed-$1 key', { timeout: 2_000 }, async () => {
+for (const selectedCap of [1, 4.5, 6]) test(`issueLease settles the original journal before exposing a selected $${selectedCap} key`, { timeout: 2_000 }, async () => {
     const runtime = runtimeForLeaseRequests();
     runtime.manifest = { deployment_id: 'focused-test' };
     runtime.runtime = {
-        state: { note_id: 44, current_balance: 5_000_000 },
+        state: { note_id: 44, current_balance: 8_000_000 },
         journal: { prepared_request: { client_request_id: 'legacy-request' } }
     };
     runtime.ownerId = 'test-owner';
@@ -549,7 +549,7 @@ test('issueLease settles a durable legacy-cap journal before exposing a fixed-$1
     };
     const currentRequest = {
         client_request_id: 'fixed-request',
-        public_inputs: { solvency_bound: 1_000_000 }
+        public_inputs: { solvency_bound: selectedCap * 1_000_000 }
     };
     const prepared = [legacyRequest, currentRequest];
     runtime.prepareLeaseRequest = async () => prepared.shift();
@@ -586,16 +586,16 @@ test('issueLease settles a durable legacy-cap journal before exposing a fixed-$1
     };
     runtime.scheduleSettlement = () => {};
 
-    const lease = await runtime.issueLease('chat-session');
+    const lease = await runtime.issueLease('chat-session', undefined, null, selectedCap);
 
     assert.deepEqual(issued, ['legacy-request', 'fixed-request']);
     assert.equal(retiredLegacyRequestId, 'legacy-request');
     assert.notEqual(runtime.activeLease?.api_key, 'legacy-request-key');
     assert.equal(lease.api_key, 'fixed-request-key');
-    assert.equal(lease.spending_limit_usd, 1);
+    assert.equal(lease.spending_limit_usd, selectedCap);
     assert.deepEqual(verified, [
         { limit: 5_000_000, requestId: 'legacy-request' },
-        { limit: 1_000_000, requestId: 'fixed-request' }
+        { limit: selectedCap * 1_000_000, requestId: 'fixed-request' }
     ]);
 });
 
@@ -994,3 +994,98 @@ for (const code of ['lease_pending', 'lease_settlement_pending']) {
         assert.equal(sleeps, 0);
     });
 }
+
+
+test('model budget upgrades and downgrades settle before rekeying; same caps reuse', async () => {
+    const runtime = runtimeForLeaseRequests();
+    runtime.ownerId = 'tier-owner';
+    runtime.runtime = { lease: null };
+    runtime.init = async () => {};
+    runtime.reload = async () => runtime.runtime;
+    const events = [];
+    runtime.issueLease = async (sessionId, _progress, _signal, spendingLimitUsd) => {
+        events.push(`issue:${spendingLimitUsd}`);
+        runtime.activeLease = { sessionId, spending_limit_usd: spendingLimitUsd,
+            api_key: 'test-key', expires_at: Date.now() / 1000 + 300, inFlight: 0 };
+        return runtime.activeLease;
+    };
+    runtime.retireActiveLease = async () => {
+        events.push(`settle:${runtime.activeLease.spending_limit_usd}`);
+        runtime.activeLease = null;
+    };
+    const first = await runtime.ensureLease('chat', undefined, null, 1);
+    assert.equal(await runtime.ensureLease('chat', undefined, null, 1), first);
+    assert.equal((await runtime.ensureLease('chat', undefined, null, 4.5)).spending_limit_usd, 4.5);
+    assert.equal((await runtime.ensureLease('chat', undefined, null, 2)).spending_limit_usd, 2);
+    assert.deepEqual(events, ['issue:1', 'settle:1', 'issue:4.5', 'settle:4.5', 'issue:2']);
+    runtime.activeLease.inFlight = 1;
+    await assert.rejects(runtime.ensureLease('chat', undefined, null, 6), error => error.code === 'lease_requests_in_flight');
+    assert.equal(runtime.activeLease.spending_limit_usd, 2);
+});
+
+test('concurrent same-chat requests with different budgets never share the wrong proof', async () => {
+    const runtime = runtimeForLeaseRequests();
+    runtime.ownerId = 'tier-owner';
+    runtime.runtime = { lease: null };
+    runtime.init = async () => {};
+    runtime.reload = async () => runtime.runtime;
+    let release;
+    let started;
+    const issued = new Promise(resolve => { started = resolve; });
+    runtime.issueLease = async (_session, _progress, _signal, dollars) => {
+        assert.equal(dollars, 3);
+        started();
+        return new Promise(resolve => { release = () => resolve({ spending_limit_usd: 3 }); });
+    };
+    const first = runtime.ensureLease('chat', undefined, null, 3);
+    await issued;
+    await assert.rejects(runtime.ensureLease('chat', undefined, null, 1), error => error.code === 'lease_budget_conflict');
+    const second = runtime.ensureLease('chat', undefined, null, 3);
+    release();
+    assert.equal((await first).spending_limit_usd, 3);
+    assert.equal((await second).spending_limit_usd, 3);
+});
+
+test('selected cap reaches proof inputs and insufficient funds never start proving', async () => {
+    const runtime = runtimeForLeaseRequests();
+    runtime.config.wallet_core = { policy_charge_cap: 50_000 };
+    runtime.config.policy_enabled = true;
+    runtime.config.proving_keys = { request: {} };
+    runtime.runtime = { state: { note_id: 44, current_balance: 5_000_000 } };
+    runtime.treePath = async () => ({ active_root: 'root', siblings: [] });
+    runtime.commit = async next => { runtime.runtime = next; };
+    const proofInputs = [];
+    runtime.worker = { call: async (operation, payload) => {
+        assert.equal(operation, 'prepareRequest');
+        proofInputs.push(payload);
+        return { journal: { prepared_request: { public_inputs: { solvency_bound: payload.config.request_charge_cap } } },
+            request: { public_inputs: { solvency_bound: payload.config.request_charge_cap } } };
+    } };
+    await assert.rejects(runtime.prepareLeaseRequest(undefined, null, 6), error => error.required_credits === 6_000_000);
+    assert.equal(proofInputs.length, 0);
+    const prepared = await runtime.prepareLeaseRequest(undefined, null, 4.5);
+    assert.equal(prepared.public_inputs.solvency_bound, 4_500_000);
+    assert.equal(proofInputs[0].config.policy_charge_cap, 4_500_000);
+    assert.deepEqual(JSON.parse(proofInputs[0].args.payload), { mode: 'openrouter_ephemeral_lease', version: 1 });
+    const original = runtime.runtime.journal.prepared_request;
+    assert.equal(await runtime.prepareLeaseRequest(undefined, null, 1), original,
+        'durable proof must stay identical across a changed selection until recovery settles it');
+});
+
+test('checkout never exposes a key retired while ensureLease was resolving', async () => {
+    const runtime = runtimeForLeaseRequests();
+    const lease = { api_key: 'must-not-be-returned', inFlight: 0 };
+    runtime.activeLease = lease;
+    runtime.ensureLease = async () => {
+        queueMicrotask(() => { lease.retiring = true; });
+        return lease;
+    };
+    await assert.rejects(runtime.acquireEphemeralKey('chat', undefined, { spendingLimitUsd: 3 }),
+        error => error.code === 'lease_pending');
+    assert.equal(lease.inFlight, 0);
+    lease.retiring = false;
+    runtime.activeLease = { ...lease };
+    runtime.ensureLease = async () => lease;
+    await assert.rejects(runtime.acquireEphemeralKey('chat'), error => error.code === 'lease_pending');
+    assert.equal(lease.inFlight, 0);
+});

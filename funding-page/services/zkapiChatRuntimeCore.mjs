@@ -23,7 +23,7 @@ function waitFor(promise, signal) {
 }
 
 /** The entire private-payment lifecycle belongs to this product, not OA Chat. */
-export function createZkapiChatRuntimeCore({ client, backend, createInferenceService, modelConfiguration, retirementTimeoutMs = RETIREMENT_TIMEOUT_MS, retryDelay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+export function createZkapiChatRuntimeCore({ client, backend, createInferenceService, modelConfiguration, resolveModelBudget, retirementTimeoutMs = RETIREMENT_TIMEOUT_MS, retryDelay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
     if (!client || !backend || typeof createInferenceService !== 'function' || !modelConfiguration) {
         throw new Error('Private chat runtime dependencies are required.');
     }
@@ -164,7 +164,7 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             void client.init().then(publish, publish);
             return () => { disposed = true; unsubscribe(); };
         },
-        async checkCanSend({ signal, shouldOpenFunding = () => true } = {}) {
+        async checkCanSend({ signal, sessionId, modelId, reasoningEnabled, shouldOpenFunding = () => true } = {}) {
             if (signal?.aborted) throw abortError();
             await client.init();
             if (signal?.aborted) throw abortError();
@@ -173,6 +173,21 @@ export function createZkapiChatRuntimeCore({ client, backend, createInferenceSer
             if (client.withdrawalBlocksChat || !client.hasNote || expired || client.noteExpiryClaim) {
                 if (shouldOpenFunding()) context?.openFunding();
                 return false;
+            }
+            if (modelId && resolveModelBudget) {
+                const { spendingLimitUsd } = await resolveModelBudget(modelId, reasoningEnabled, signal);
+                if (signal?.aborted) throw abortError();
+                const lease = client.activeLease;
+                const reusesKey = lease?.session_id === sessionId
+                    && Number(lease.spending_limit_usd) === spendingLimitUsd
+                    && Number(lease.expires_at) * 1000 > Date.now() + 90_000
+                    && !lease.retiring && !lease.retired;
+                // An existing matching key has already proved its cap. Its
+                // remaining allowance is enforced upstream, not reproved here.
+                if (!reusesKey && Number(client.note?.current_balance) / client.creditsPerUsd < spendingLimitUsd) {
+                    context?.showToast?.(`This model requires $${spendingLimitUsd.toFixed(2)} in private balance for a new key. Choose a lower-cap model, or withdraw the remaining balance and fund a larger one.`, 'error', 9000);
+                    return false;
+                }
             }
             return true;
         },

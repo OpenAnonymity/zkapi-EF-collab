@@ -292,20 +292,25 @@ test('mainnet funding UX labels USDC and warns before using real funds', () => {
     assert.doesNotMatch(rootSync, /Sepolia vault root/);
 });
 
-test('browser chat leases prove exactly $1 without changing the trusted deployment minimum', async () => {
+test('browser chat leases prove only published model budgets without changing the deployment minimum', async () => {
     const compat = await import(pathToFileURL(path.join(__dirname, 'services/zkapiRequestCompat.mjs')));
     const sepolia = JSON.parse(fs.readFileSync(path.join(__dirname, 'browser-config.json'), 'utf8'));
     const mainnet = JSON.parse(fs.readFileSync(path.join(__dirname, 'browser-config.mainnet.json'), 'utf8'));
 
     assert.equal(sepolia.trusted_deployment.request_charge_cap, 50_000);
     assert.equal(mainnet.trusted_deployment.request_charge_cap, 50_000);
-    assert.deepEqual(compat.CHAT_SPENDING_TIER_USD, [1]);
+    assert.deepEqual(compat.CHAT_SPENDING_TIER_USD, [1, 2, 3, 4.5, 6]);
     assert.equal(compat.selectLeaseSpendingLimitCredits(1_000_000, 50_000), 1_000_000);
     assert.equal(compat.selectLeaseSpendingLimitCredits(2_000_000, 50_000), 1_000_000);
     assert.equal(compat.selectLeaseSpendingLimitCredits(100_000_000, 50_000), 1_000_000);
+    for (const dollars of compat.CHAT_SPENDING_TIER_USD) {
+        assert.equal(compat.selectLeaseSpendingLimitCredits(100_000_000, 50_000, 1_000_000, dollars), dollars * 1_000_000);
+        assert.throws(() => compat.selectLeaseSpendingLimitCredits(dollars * 1_000_000 - 1, 50_000, 1_000_000, dollars), error => error.required_credits === dollars * 1_000_000);
+    }
+    assert.throws(() => compat.selectLeaseSpendingLimitCredits(100_000_000, 50_000, 1_000_000, 1.234567), /budget configuration/);
 });
 
-test('browser chat leases give actionable guidance below the fixed $1 budget', async () => {
+test('browser chat leases give actionable guidance below the selected model budget', async () => {
     const compat = await import(pathToFileURL(path.join(__dirname, 'services/zkapiRequestCompat.mjs')));
 
     assert.throws(
@@ -313,7 +318,7 @@ test('browser chat leases give actionable guidance below the fixed $1 budget', a
         error => {
             assert.equal(error.code, 'insufficient_chat_balance');
             assert.equal(error.required_credits, 1_000_000);
-            assert.match(error.message, /add funds/i);
+            assert.match(error.message, /lower-cap model/i);
             assert.match(error.message, /at least \$1\.00/i);
             return true;
         }
@@ -368,7 +373,7 @@ test('browser inference separates zkAPI key checkout from OA streaming transport
     assert.doesNotMatch(runtime, /async inferenceFetch\(/);
     assert.match(client, /async acquireInferenceAccess\(sessionId, options = \{\}\)/);
     assert.doesNotMatch(client, /async inferenceFetch\(/);
-    assert.match(api, /await zkapiClient\.acquireInferenceAccess\(sessionId, options\)/);
+    assert.match(api, /await zkapiClient\.acquireInferenceAccess\(sessionId, \{/);
     assert.match(api, /fetch\('\/zkapi-model-catalog'/);
     assert.doesNotMatch(api, /fetch\('\/openrouter-models'/);
     const modelCatalogCache = fs.readFileSync(path.join(__dirname, '../oa-chat/chat/services/modelCatalogCache.js'), 'utf8');
@@ -486,7 +491,7 @@ test('OA System Panel is preserved with only ticket billing replaced', () => {
     assert.match(upstreamPanel, /Ephemeral Access Key/);
     assert.match(upstreamPanel, /Network Proxy/);
     assert.match(upstreamPanel, /Activity Timeline/);
-    assert.match(modelPicker, /presentation\?\.getModelPricing\?\.\(model\)/);
+    assert.match(modelPicker, /presentation\?\.getModelPricing\?\.\(model, \{ reasoningEnabled \}\)/);
     assert.match(composition, /formatModelPricing/);
     assert.match(composition, /formatExactTokenPricing/);
     assert.match(composition, /Pricing unavailable/);

@@ -2,7 +2,7 @@ import networkProxy from './networkProxy.js';
 import { sameFelt, waitForExpectedActiveRoot } from './zkapiWithdrawalRoot.mjs';
 import { isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
 import {
-    CHAT_SPENDING_TIER_USD,
+    leaseSpendingLimitCredits,
     selectLeaseSpendingLimitCredits
 } from './zkapiRequestCompat.mjs';
 import {
@@ -58,7 +58,7 @@ const LEASE_ISSUE_INITIAL_RETRY_MS = 5_000;
 const LEASE_ISSUE_MAX_RETRY_MS = 30_000;
 // Never begin a potentially long frontier-model stream on a key that is near
 // the server's independent settlement boundary. A follow-up inside this
-// window transparently closes the old key and obtains a fresh fixed-$1 key.
+// window transparently closes the old key and obtains a fresh key at the selected model tier.
 const MIN_REQUEST_LEASE_REMAINING_SECONDS = 90;
 const TAB_OWNER_STORAGE_KEY = 'zkapi-browser-tab-owner-v1';
 const LATE_WITHDRAWAL_TERMINAL_STATUSES = new Set([
@@ -257,6 +257,7 @@ class BrowserWalletRuntime extends EventTarget {
         this.initPromise = null;
         this.leasePromise = null;
         this.leasePromiseSession = null;
+        this.leasePromiseSpendingLimitUsd = null;
         this.leaseAbortController = null;
         this.leaseWaiterCount = 0;
         this.leaseProgressListeners = new Set();
@@ -1436,7 +1437,7 @@ class BrowserWalletRuntime extends EventTarget {
         });
     }
 
-    async prepareLeaseRequest(onProgress = () => {}, signal = null) {
+    async prepareLeaseRequest(onProgress = () => {}, signal = null, spendingLimitUsd = 1) {
         throwIfAborted(signal);
         if (!this.runtime.state) throw new Error('Fund a private balance before starting a chat.');
         if (unresolvedLateWithdrawalForNote(this.runtime, this.runtime.state.note_id)) {
@@ -1455,7 +1456,8 @@ class BrowserWalletRuntime extends EventTarget {
         const spendingLimitCredits = selectLeaseSpendingLimitCredits(
             this.runtime.state.current_balance,
             this.config.request_charge_cap,
-            this.config.credits_per_usd
+            this.config.credits_per_usd,
+            spendingLimitUsd
         );
         onProgress('proving', 'Proving this chat is funded…');
         const prepared = await this.worker.call('prepareRequest', {
@@ -1583,7 +1585,7 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async issueLease(sessionId, onProgress = () => {}, signal = null) {
+    async issueLease(sessionId, onProgress = () => {}, signal = null, spendingLimitUsd = 1) {
         return withBrowserWalletLock(this.manifest.deployment_id, async () => {
             throwIfAborted(signal);
             await this.reload();
@@ -1595,14 +1597,14 @@ class BrowserWalletRuntime extends EventTarget {
                 onProgress: reportRecovery,
                 signal
             });
-            let request = await this.prepareLeaseRequest(onProgress, signal);
+            let request = await this.prepareLeaseRequest(onProgress, signal, spendingLimitUsd);
 
             // A browser can restart with a durable proof made under an older
             // spending policy. Finish that byte-identical request safely, but
             // never expose its legacy-cap key to OA Chat. Settle it unused,
-            // install the signed receipt, then create a fresh fixed-$1 proof.
-            const desiredLimitCredits = Math.round(
-                CHAT_SPENDING_TIER_USD[0] * this.config.credits_per_usd
+            // install the signed receipt, then prove the selected model budget.
+            const desiredLimitCredits = leaseSpendingLimitCredits(
+                spendingLimitUsd, this.config.credits_per_usd
             );
             if (Number(request.public_inputs.solvency_bound) !== desiredLimitCredits) {
                 try {
@@ -1648,7 +1650,7 @@ class BrowserWalletRuntime extends EventTarget {
                     this.legacyMigrationInProgress = false;
                 }
                 await this.reload();
-                request = await this.prepareLeaseRequest(onProgress, signal);
+                request = await this.prepareLeaseRequest(onProgress, signal, spendingLimitUsd);
             }
             let lease;
             try {
@@ -1719,7 +1721,7 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async waitForLeasePromise(normalizedSessionId, onProgress, signal) {
+    async waitForLeasePromise(normalizedSessionId, onProgress, signal, spendingLimitUsd = 1) {
         const leasePromise = this.leasePromise;
         if (!leasePromise) return null;
         if (this.leasePromiseSession !== normalizedSessionId) {
@@ -1727,6 +1729,14 @@ class BrowserWalletRuntime extends EventTarget {
                 `Chat ${this.leasePromiseSession} is creating the current private key.`,
                 409,
                 'lease_session_conflict'
+            );
+        }
+
+        if (this.leasePromiseSpendingLimitUsd !== spendingLimitUsd) {
+            throw new BrowserWalletHttpError(
+                'A different model budget is being prepared. Retry when the current request finishes.',
+                409,
+                'lease_budget_conflict'
             );
         }
 
@@ -1759,20 +1769,21 @@ class BrowserWalletRuntime extends EventTarget {
         }
     }
 
-    async ensureLease(sessionId, onProgress = () => {}, signal = null) {
+    async ensureLease(sessionId, onProgress = () => {}, signal = null, spendingLimitUsd = 1) {
         throwIfAborted(signal);
         await this.init();
         throwIfAborted(signal);
         const normalized = String(sessionId || 'default').slice(0, 160);
+        spendingLimitUsd = Number(spendingLimitUsd);
+        const expectedLimitCredits = leaseSpendingLimitCredits(
+            spendingLimitUsd, this.config.credits_per_usd
+        );
         if (this.leasePromise) {
-            return this.waitForLeasePromise(normalized, onProgress, signal);
+            return this.waitForLeasePromise(normalized, onProgress, signal, spendingLimitUsd);
         }
         const now = Math.floor(Date.now() / 1000);
         const isSafeForNewRequest = this.activeLease
             && Number(this.activeLease.expires_at) > now + MIN_REQUEST_LEASE_REMAINING_SECONDS;
-        const expectedLimitCredits = Math.round(
-            CHAT_SPENDING_TIER_USD[0] * this.config.credits_per_usd
-        );
         const activeLimitCredits = this.activeLease
             ? Math.round(Number(this.activeLease.spending_limit_usd) * this.config.credits_per_usd)
             : null;
@@ -1795,7 +1806,7 @@ class BrowserWalletRuntime extends EventTarget {
         }
         if (this.activeLease?.inFlight > 0) {
             throw new BrowserWalletHttpError(
-                'The current private key expired while requests were still active. Retry after they finish.',
+                'Wait for the current requests to finish before renewing or changing the private key budget.',
                 409,
                 'lease_requests_in_flight'
             );
@@ -1811,9 +1822,10 @@ class BrowserWalletRuntime extends EventTarget {
             );
         }
         if (this.leasePromise) {
-            return this.waitForLeasePromise(normalized, onProgress, signal);
+            return this.waitForLeasePromise(normalized, onProgress, signal, spendingLimitUsd);
         }
         this.leasePromiseSession = normalized;
+        this.leasePromiseSpendingLimitUsd = spendingLimitUsd;
         this.lastLeaseProgress = null;
         const jobKind = this.activeLease ? 'renewal' : 'access';
         const controller = new AbortController();
@@ -1832,18 +1844,20 @@ class BrowserWalletRuntime extends EventTarget {
                     message,
                     kind === 'access' ? jobKind : kind
                 ),
-                controller.signal
+                controller.signal,
+                spendingLimitUsd
             );
         })().finally(() => {
             if (this.leasePromise === leasePromise) {
                 this.leasePromise = null;
                 this.leasePromiseSession = null;
+                this.leasePromiseSpendingLimitUsd = null;
                 this.leaseAbortController = null;
                 this.lastLeaseProgress = null;
             }
         });
         this.leasePromise = leasePromise;
-        return this.waitForLeasePromise(normalized, onProgress, signal);
+        return this.waitForLeasePromise(normalized, onProgress, signal, spendingLimitUsd);
     }
 
     scheduleSettlement(delayOverrideMs = null) {
@@ -2086,8 +2100,18 @@ class BrowserWalletRuntime extends EventTarget {
 
     async acquireEphemeralKey(sessionId, onProgress = () => {}, options = {}) {
         const signal = options.signal || null;
-        const lease = await this.ensureLease(sessionId, onProgress, signal);
+        const lease = await this.ensureLease(sessionId, onProgress, signal, options.spendingLimitUsd);
         throwIfAborted(signal);
+        // Rotation may have started between ensureLease resolving and this
+        // continuation. Retirement marks the old key synchronously, so check
+        // ownership before checking it out and exposing its credential.
+        if (this.activeLease !== lease || lease.retiring || lease.retired) {
+            throw new BrowserWalletHttpError(
+                'The previous private key is closing. Retry when its balance update finishes.',
+                409,
+                'lease_pending'
+            );
+        }
         lease.inFlight += 1;
         let released = false;
         return {

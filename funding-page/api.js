@@ -1,11 +1,13 @@
 // Product-owned model catalog and access policy; OA owns request/stream parsing.
 import { OpenRouterAPI } from '../oa-chat/chat/publicInferenceApi.js';
+import { modelTiers } from '../oa-chat/chat/publicRuntimeApi.js';
 import networkProxy from './services/networkProxy.js';
 import { loadModelCatalog, saveModelCatalog } from './services/modelCatalogCache.js';
 import { normalizeOpenRouterModelProviders } from './services/providerRegistry.js';
 import { getDefaultModelConfig } from './services/modelConfig.js';
 import zkapiClient from './services/zkapiClient.js';
 import { ensureDirectCompletionLimit } from './services/zkapiRequestCompat.mjs';
+import { getModelBudget } from './services/zkapiModelBudget.mjs';
 import {
     BUNDLED_MODEL_CATALOG,
     DEFAULT_MODEL_ID,
@@ -23,7 +25,13 @@ export class ZkapiAPI extends OpenRouterAPI {
         super({
             networkTransport: networkProxy,
             acquireRequestAccess: async (sessionId, options) => {
-                const access = await zkapiClient.acquireInferenceAccess(sessionId, options);
+                const { modelId, accessModelId, reasoningEnabled = true, ...accessOptions } = options;
+                await modelTiers.ensureModelTiersReady({ signal: accessOptions.signal });
+                const { spendingLimitUsd } = getModelBudget(accessModelId || modelId, reasoningEnabled);
+                const access = await zkapiClient.acquireInferenceAccess(sessionId, {
+                    ...accessOptions,
+                    spendingLimitUsd
+                });
                 return {
                     ...access,
                     proxyConfig: access.mode === 'daemon' ? { bypassProxy: true } : undefined

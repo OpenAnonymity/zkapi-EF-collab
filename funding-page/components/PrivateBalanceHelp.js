@@ -2,7 +2,7 @@ const HELP = {
     billing: {
         label: 'How private billing works',
         title: 'How private billing works',
-        text: 'Your deposit creates a private prepaid balance. Each chat uses a temporary key with a $1 limit. When that key closes, verified usage is deducted and unused funds remain in your balance. Your wallet address is not attached to model requests.'
+        text: 'Your deposit creates a private prepaid balance. The model list shows each model’s temporary-key spending cap and minimum balance. Your device proves you have at least that amount without revealing your exact balance. The cap covers all usage on that key; it is not a fee. When the key closes, verified usage is deducted and unused funds remain in your balance. Your wallet address is not attached to model requests.'
     },
     expiry: {
         label: 'What happens when my private balance expires?',

@@ -183,6 +183,8 @@ test('exact variant prices and output limits come from the shared catalog while 
     assert.equal(ui.presentation.getModelPricing(variant), null);
     runtime.inferenceService.setDefaultBackendId('zkapi');
     assert.deepEqual(ui.presentation.getModelPricing(variant), {
+        budgetLabel: '$1 key cap · $1 minimum balance',
+        budgetTooltip: 'A new key requires a private balance of at least $1 and can spend up to $1 in total. Only actual usage is deducted; the cap is not a fee.',
         label: '$1/M input · $4/M output',
         description: 'Input $0.000001/token · output $0.000004/token'
     });
@@ -227,6 +229,12 @@ function usageHarness(t, api, initialSession) {
 }
 
 function stubRoutedStream(t, events) {
+    t.mock.method(globalThis, 'fetch', async url => {
+        assert.match(url, /\/chat\/model-tickets$/);
+        return new Response(JSON.stringify({ 'openrouter/auto': 25 }), {
+            headers: { 'content-type': 'application/json' }
+        });
+    });
     t.mock.method(zkapiClient, 'acquireInferenceAccess', async sessionId => {
         assert.equal(sessionId, 'fixture-session-binding');
         return { baseUrl: 'https://inference.example.test/v1', headers: {}, spendingLimitUsd: 1, release() {} };

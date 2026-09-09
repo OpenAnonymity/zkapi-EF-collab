@@ -85,6 +85,57 @@ cost; zkAPI shows USD per million input/output tokens, with exact per-token
 rates in the pricing tooltip. Models without published token prices say
 `Pricing unavailable` in zkAPI mode.
 
+Model tiers also select a cumulative temporary-key cap and the minimum private
+balance to prove for a new key. The reviewed mapping reuses staging OA's existing
+child-key dollar budgets, rather than converting ticket counts to money:
+
+| OA ticket tier | zkAPI key cap / minimum proof balance |
+| --- | --- |
+| 1, 2 | $1 |
+| 3, 8 | $2 |
+| 5 | $3 |
+| 25 | $4.50 |
+| 100 | $6 |
+
+Tier 8 currently has no assigned models. Unknown ticket counts require an explicit
+budget review and fail closed. The browser uses the same live model assignments,
+`:online` normalization, and reasoning fallback as Tickets. New-key acquisition
+waits for live OA tier configuration; cached data is display-only during an outage.
+The picker shows the cap/minimum separately from token rates. A cap is not a fee:
+settlement deducts actual cumulative key usage. The System Panel shows the owned
+active key's real cap, or the selected model's cap when no key is active.
+
+Requests capture their selected model and reasoning mode before async access.
+Titles retain their cheap helper model but share the initiating chat model's cap.
+Only the coarse dollar cap reaches the wallet/protocol; model IDs, titles, and
+prompts do not enter lease authorization. Auto Router uses its configured $2 cap;
+response-model attribution changes usage estimates, not an existing key's budget.
+Same-cap model changes reuse a live key. Changing caps settles the old key before
+proving the new cap; requests in flight cannot be rekeyed. Insufficient balance
+blocks a new key with the required amount and a lower-cap/funding explanation.
+The product currently replaces a note by withdrawing and funding a larger one;
+it does not silently treat existing-note top-ups as supported.
+
+Durable pending proofs are retried byte-identically at their original bound.
+If that bound differs from the next requested tier, recovery closes the old key,
+installs its signed receipt, and then proves the new bound. Concurrent callers
+can share issuance only for the same session and cap. Cancellation of one waiter
+does not cancel another waiter's proof job. Key lifetime remains five minutes. This policy applies to the hosted browser-wallet
+lease path; the legacy local daemon retains its server-configured budget.
+
+Both live zkAPI servers already derive and enforce the exact cumulative key cap
+from the verified solvency bound; the advertised $0.05 remains the server floor.
+No proof circuit, trusted manifest, protocol database, contract, or vault changed.
+Both servers use the existing production OA issuer while Tickets use staging OA.
+On 2026-09-09 00:00:35 UTC, the production OA issuer's existing release `14dfb55`
+was gracefully restarted after changing only `ZKAPI_MAX_CREDIT_USD` from 5 to 6.
+The five-minute maximum, 120 requests/minute and $25/hour issuance budget remain
+unchanged. The hourly budget counts issued key caps, not eventual usage. Isolated
+validation using deployed source accepts each supported cap through $6 and rejects
+higher limits, mismatched credits and excessive duration for issuance and usage.
+Rollback may revert the client while retaining the $6 server maximum; lowering it
+before outstanding $6 leases settle would reject their usage reconciliation.
+
 Auto Router remains the chat's selected model, while each response displays
 the concrete model returned by OpenRouter. The System Panel's usage estimate
 uses that returned model's input/output rates, including exact priced variants.

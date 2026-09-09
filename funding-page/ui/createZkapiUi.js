@@ -4,6 +4,7 @@ import RightPanel from '../components/RightPanel.js';
 import { renderZkapiComposerStatus, updateZkapiBalanceControl } from '../components/ZkapiStateExperience.js';
 import { derivePendingIndicatorPresentation } from '../domain/streamingState.js';
 import { formatModelPricing, formatExactTokenPricing } from '../services/modelPricing.mjs';
+import { formatModelBudgetUsd, getModelBudget } from '../services/zkapiModelBudget.mjs';
 import { mountZkapiShell } from '../components/ZkapiShell.js';
 
 /** Compose payment surfaces with the shared OA renderer. No shared UI source is
@@ -36,9 +37,21 @@ export function createZkapiUi(runtime) {
                     : phase;
                 return derivePendingIndicatorPresentation(paymentPhase, progress);
             },
-            getModelPricing(model) {
+            getModelPricing(model, { reasoningEnabled = componentApp?.reasoningEnabled ?? true } = {}) {
+                let budget;
+                try { budget = getModelBudget(model?.id, reasoningEnabled); }
+                catch {
+                    return {
+                        label: 'Private-key budget unavailable',
+                        description: 'A private-key budget has not been configured for this model tier. Choose another model.'
+                    };
+                }
+                const limit = formatModelBudgetUsd(budget.spendingLimitUsd);
+                const rates = formatModelPricing(model?.pricing) || 'Pricing unavailable';
                 return {
-                    label: formatModelPricing(model?.pricing) || 'Pricing unavailable',
+                    budgetLabel: `${limit} key cap · ${limit} minimum balance`,
+                    budgetTooltip: `A new key requires a private balance of at least ${limit} and can spend up to ${limit} in total. Only actual usage is deducted; the cap is not a fee.`,
+                    label: rates,
                     description: formatExactTokenPricing(model?.pricing)
                         || 'The provider did not publish token pricing for this model.'
                 };

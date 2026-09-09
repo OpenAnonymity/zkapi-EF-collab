@@ -72,8 +72,8 @@ export function createPaymentModeUi(runtime) {
         presentation: {
             getPendingPresentation: (phase, progress) => runtime.getMode() === 'zkapi'
                 ? zkUi.presentation.getPendingPresentation(phase, progress) : null,
-            getModelPricing: model => runtime.getMode() === 'zkapi'
-                ? zkUi.presentation.getModelPricing(model) : null,
+            getModelPricing: (model, options) => runtime.getMode() === 'zkapi'
+                ? zkUi.presentation.getModelPricing(model, options) : null,
             getSessionStatus: session => runtime.getSessionStatus(session),
             renderComposer: renderControls
         }

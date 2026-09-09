@@ -656,7 +656,7 @@ class ZkapiClient extends EventTarget {
                 const access = await browserWalletRuntime.acquireEphemeralKey(
                     sessionId,
                     reportProgress,
-                    { signal }
+                    { signal, spendingLimitUsd: options.spendingLimitUsd }
                 );
                 if (signal?.aborted) {
                     access.release?.();

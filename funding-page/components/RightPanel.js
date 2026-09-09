@@ -1,7 +1,8 @@
 import { RightPanel as SharedRightPanel } from '../../oa-chat/chat/publicApi.js';
 import zkapiClient from '../services/zkapiClient.js';
 import { getZkapiExperience, renderZkapiPanelExperience } from './ZkapiStateExperience.js';
-import { CHAT_SPENDING_TIER_USD } from '../services/zkapiRequestCompat.mjs';
+import { formatModelBudgetUsd, getModelBudget } from '../services/zkapiModelBudget.mjs';
+import { onModelTiersUpdate } from '../../oa-chat/chat/publicModelTierApi.js';
 import { formatEstimatedCost, formatUsageTokens } from '../services/modelPricing.mjs';
 import {
     attachPrivateBalanceHelp, capturePrivateBalanceHelpFocus, privateBalanceExpiryLabel,
@@ -24,6 +25,7 @@ export default class RightPanel extends SharedRightPanel {
             this.handleZkapiClock();
         });
         this.usageEstimateUpdateTimer = null;
+        this.modelBudgetUnsubscribe = onModelTiersUpdate(() => this.updateUsageEstimate());
     }
 
     handleZkapiChange(detail = {}) {
@@ -48,7 +50,9 @@ export default class RightPanel extends SharedRightPanel {
         const transition = this.app.integration?.getTransition?.();
         const signature = JSON.stringify([
             transition?.phase || null, transition?.sessionId || null,
-            transition?.message || null, transition?.title || null
+            transition?.message || null, transition?.title || null,
+            this.currentSession?.model || this.app.state?.pendingModelName || null,
+            this.app.reasoningEnabled ?? true
         ]);
         if (this.runtimePresentationSignature === signature) return;
         this.runtimePresentationSignature = signature;
@@ -114,16 +118,24 @@ export default class RightPanel extends SharedRightPanel {
     usageEstimateView() {
         const summary = this.app.integration?.getSessionUsageSummary?.(this.currentSession);
         const cost = summary?.hasEstimate ? Number(summary.estimatedCostUsd || 0) : null;
+        const lease = zkapiClient.activeLease;
+        const ownsLease = this.currentSession?.id && lease?.session_id === this.currentSession.id;
+        let spendingLimitUsd = ownsLease ? Number(lease.spending_limit_usd) : null;
+        if (!ownsLease) {
+            const reference = this.currentSession?.model || this.app.state?.pendingModelName;
+            const model = this.app.state?.models?.find(entry => entry.id === reference || entry.name === reference);
+            const modelId = model?.id || (reference?.includes('/') ? reference : null)
+                || (!reference ? this.app.getDefaultModelId?.() : null);
+            if (modelId) {
+                try { spendingLimitUsd = getModelBudget(modelId, this.app.reasoningEnabled ?? true).spendingLimitUsd; }
+                catch { /* Unreviewed tiers must not display a fabricated cap. */ }
+            }
+        }
         return {
             visible: Boolean(this.currentSession && summary?.hasEstimate),
             costLabel: formatEstimatedCost(cost) || '$0.00',
             tokenLabel: `${formatUsageTokens(summary?.promptTokens || 0)} in · ${formatUsageTokens(summary?.completionTokens || 0)} out`,
-            keyLimitLabel: new Intl.NumberFormat(undefined, {
-                style: 'currency',
-                currency: 'USD',
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2
-            }).format(CHAT_SPENDING_TIER_USD[0])
+            keyLimitLabel: formatModelBudgetUsd(spendingLimitUsd)
         };
     }
 
@@ -141,7 +153,7 @@ export default class RightPanel extends SharedRightPanel {
         const keyLimit = card.querySelector('[data-chat-usage-key-limit]');
         if (cost) cost.textContent = view.costLabel;
         if (tokens) tokens.textContent = view.tokenLabel;
-        if (keyLimit) keyLimit.textContent = `${view.keyLimitLabel} per key`;
+        if (keyLimit) keyLimit.textContent = view.keyLimitLabel ? `${view.keyLimitLabel} per key` : '';
     }
 
     scheduleUsageEstimateUpdate() {
@@ -230,7 +242,7 @@ export default class RightPanel extends SharedRightPanel {
                 ${note ? privateBalanceHelpContent('panel', 'expiry', this.privateBalanceHelpOpen?.expiry) : ''}
                 <div data-chat-usage-estimate class="mt-2 rounded-md bg-muted/50 px-2 py-1.5 ${usage.visible ? '' : 'hidden'}" title="Running model-usage estimate. OpenRouter's reported cost is used when available; zkAPI settlement is final.">
                     <div class="flex items-center justify-between gap-2 text-[10px]"><span class="text-muted-foreground">Estimated this chat</span><strong data-chat-usage-cost class="font-medium text-foreground">${this.escapeHtml(usage.costLabel)}</strong></div>
-                    <div class="mt-1 flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span data-chat-usage-tokens>${this.escapeHtml(usage.tokenLabel)}</span><span data-chat-usage-key-limit>${this.escapeHtml(usage.keyLimitLabel)} per key</span></div>
+                    <div class="mt-1 flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span data-chat-usage-tokens>${this.escapeHtml(usage.tokenLabel)}</span><span data-chat-usage-key-limit>${usage.keyLimitLabel ? `${this.escapeHtml(usage.keyLimitLabel)} per key` : ''}</span></div>
                 </div>
                 ${experienceHtml}
                 ${withdrawalRecoveryCount ? `<button id="zkapi-panel-withdrawals" class="btn-ghost-hover mt-2 flex w-full items-center justify-between rounded-md bg-muted/40 px-2.5 py-2 text-[10px] text-muted-foreground transition-colors" type="button"><span>Payment history</span><strong class="font-medium text-foreground">${withdrawalStatusLabel}</strong></button>` : ''}
@@ -326,6 +338,8 @@ export default class RightPanel extends SharedRightPanel {
         this.zkapiUnsubscribe = null;
         this.zkapiClockUnsubscribe?.();
         this.zkapiClockUnsubscribe = null;
+        this.modelBudgetUnsubscribe?.();
+        this.modelBudgetUnsubscribe = null;
         super.destroy();
     }
 }

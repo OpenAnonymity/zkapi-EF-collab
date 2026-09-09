@@ -97,6 +97,39 @@ const { processMessagesForApi } = await import('../oa-chat/chat/domain/messageCo
 const { createZkapiUi } = await import('./ui/createZkapiUi.js');
 configureMessageTemplateServices({ presentation: createZkapiUi({}).presentation });
 
+test('private model pricing shows the key cap and balance proof threshold with token rates', () => {
+    const ui = createZkapiUi({});
+    const copy = ui.presentation.getModelPricing({
+        id: 'vendor/opus-unlisted', pricing: { prompt: '0.000001', completion: '0.000004' }
+    }, { reasoningEnabled: true });
+    assert.equal(copy.budgetLabel, '$2 key cap · $2 minimum balance');
+    assert.equal(copy.label, '$1/M input · $4/M output');
+    assert.match(copy.budgetTooltip, /at least \$2.*up to \$2 in total/);
+    assert.match(copy.budgetTooltip, /Only actual usage is deducted; the cap is not a fee/);
+    assert.match(copy.description, /Input \$0\.000001\/token/);
+});
+
+test('usage panel shows only the owning key cap, then the selected model cap after close', () => {
+    const config = zkapiClient.config;
+    const panel = Object.create(RightPanel.prototype);
+    panel.currentSession = { id: 'chat-a', model: 'Premium model' };
+    panel.app = {
+        reasoningEnabled: true,
+        state: { models: [{ id: 'vendor/opus-unlisted', name: 'Premium model' }] },
+        integration: { getSessionUsageSummary: () => ({ hasEstimate: true, estimatedCostUsd: 0.12 }) }
+    };
+    try {
+        zkapiClient.config = { active_lease: { session_id: 'chat-a', spending_limit_usd: 4.5, expires_at: Date.now() / 1000 + 300 } };
+        assert.equal(panel.usageEstimateView().keyLimitLabel, '$4.50');
+        zkapiClient.config = { active_lease: { session_id: 'chat-b', spending_limit_usd: 6, expires_at: Date.now() / 1000 + 300 } };
+        assert.equal(panel.usageEstimateView().keyLimitLabel, '$2', 'another conversation’s key must not affect the cap');
+        zkapiClient.config = {};
+        assert.equal(panel.usageEstimateView().keyLimitLabel, '$2');
+        panel.currentSession.model = 'Unresolved model name';
+        assert.equal(panel.usageEstimateView().keyLimitLabel, null, 'unresolved display names must not silently become $1');
+    } finally { zkapiClient.config = config; }
+});
+
 test('right-panel runtime completion advances once without clock-driven remounts', () => {
     let transition = { phase: 'settling', sessionId: 'old-chat', message: 'Closing previous chat' };
     const panel = Object.create(RightPanel.prototype);

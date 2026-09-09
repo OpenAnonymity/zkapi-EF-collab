@@ -299,3 +299,22 @@ test('clock ticks do not re-render the UI and detaching suppresses settlement co
     assert.equal(h.saved.length, 1, 'durable accounting may finish after view disposal');
     assert.equal(h.refreshed.length, 0, 'a disposed view cannot be repainted by a late result');
 });
+
+
+test('model minimum gates new keys but does not reprovision a matching live key', async () => {
+    const h = harness({ runtime: { resolveModelBudget: async () => ({ spendingLimitUsd: 3 }) } });
+    h.client.note = { current_balance: 2_900_000 };
+    h.client.creditsPerUsd = 1_000_000;
+    const warnings = [];
+    h.context.showToast = message => warnings.push(message);
+    const args = { sessionId: 'next', modelId: 'expensive', reasoningEnabled: true };
+    assert.equal(await h.runtime.checkCanSend(args), false);
+    assert.match(warnings[0], /\$3.00/);
+    h.client.activeLease = { session_id: 'next', spending_limit_usd: 3, expires_at: Date.now() / 1000 + 300 };
+    assert.equal(await h.runtime.checkCanSend(args), true);
+    h.client.activeLease.spending_limit_usd = 2;
+    assert.equal(await h.runtime.checkCanSend(args), false);
+    h.client.note.current_balance = 3_000_000;
+    assert.equal(await h.runtime.checkCanSend(args), true);
+    h.detach();
+});

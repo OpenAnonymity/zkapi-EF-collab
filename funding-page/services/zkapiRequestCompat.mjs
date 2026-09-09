@@ -1,10 +1,22 @@
-// Publishing the exact private-note balance as a proof input would make the
-// balance linkable. Every chat therefore proves the same cumulative $1 budget.
-// The child key enforces it across the title, response, and all follow-ups; it
-// is not a per-request token allowance.
-export const CHAT_SPENDING_TIER_USD = Object.freeze([
-    1
-]);
+import { TICKET_TIER_BUDGET_USD } from './zkapiModelBudget.mjs';
+
+// Publish a reviewed model-tier budget, never the user's exact private balance.
+// This is the key's cumulative cap across titles, responses and follow-ups.
+export const CHAT_SPENDING_TIER_USD = Object.freeze(
+    [...new Set(Object.values(TICKET_TIER_BUDGET_USD))].sort((a, b) => a - b)
+);
+
+export function leaseSpendingLimitCredits(spendingLimitUsd = 1, creditsPerUsd = 1_000_000) {
+    const scale = Number(creditsPerUsd);
+    const dollars = Number(spendingLimitUsd);
+    const credits = Math.round(dollars * scale);
+    if (!CHAT_SPENDING_TIER_USD.includes(dollars)
+        || !Number.isSafeInteger(scale) || scale <= 0
+        || !Number.isSafeInteger(credits) || credits <= 0) {
+        throw new Error('Invalid private-balance model budget configuration.');
+    }
+    return credits;
+}
 
 // A high, deliberately conservative frontier-model price. It keeps OpenRouter
 // from preflighting a model's entire context against the child key without
@@ -16,7 +28,8 @@ export const MAX_COMPATIBILITY_OUTPUT_TOKENS = 128_000;
 export function selectLeaseSpendingLimitCredits(
     currentBalance,
     minimumChargeCap,
-    creditsPerUsd = 1_000_000
+    creditsPerUsd = 1_000_000,
+    spendingLimitUsd = 1
 ) {
     const balance = Math.floor(Number(currentBalance));
     const minimum = Math.ceil(Number(minimumChargeCap));
@@ -27,14 +40,15 @@ export function selectLeaseSpendingLimitCredits(
         throw new Error('Invalid private-balance lease budget configuration.');
     }
 
-    const fixedChatBudget = Math.round(CHAT_SPENDING_TIER_USD[0] * scale);
+    const fixedChatBudget = leaseSpendingLimitCredits(spendingLimitUsd, scale);
     if (minimum > fixedChatBudget) {
-        throw new Error('This deployment requires more than the supported $1 private-chat budget.');
+        throw new Error('This model budget is below the deployment’s minimum private-chat budget.');
     }
     if (balance < fixedChatBudget) {
-        const error = new Error('Add funds until your private balance has at least $1.00 to start a new chat.');
+        const error = new Error(`This model requires at least $${Number(spendingLimitUsd).toFixed(2)} in private balance for a new key. Choose a lower-cap model, or withdraw the remaining balance and fund a larger one.`);
         error.code = 'insufficient_chat_balance';
         error.required_credits = fixedChatBudget;
+        error.required_balance_usd = Number(spendingLimitUsd);
         throw error;
     }
     return fixedChatBudget;
