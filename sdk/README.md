@@ -76,3 +76,18 @@ Run `npm run test:sdk` in this checkout. For an installed package, run
 `node --test node_modules/@openanonymity/zkapi-browser-sdk/sdk/test/*.test.mjs`
 from a host that provides esbuild as a development dependency. The tests use
 local fixtures and do not connect a wallet or broadcast transactions.
+
+## Confirmed test-token balances
+
+After a Sepolia faucet mint, an injected wallet can return a successful receipt
+before its cached `latest` balance read advances. Deposit preparation therefore
+reads the token balance at the receipt's explicit block, checks that the block
+hash is still canonical before and after the read, and rechecks the selected
+chain. Temporarily unavailable or lagging state is retried for a bounded period;
+only state reads are retried, never the mint transaction. A reorganization or
+network change stops preparation for an explicit wallet status check.
+
+This does not alter mainnet token funding, deposit/withdrawal proof validation,
+allowance handling, or the durable transaction recovery journal. The regression
+suite exercises the real deposit path with stale provider reads and asserts
+that only one mint and one vault deposit are submitted.
