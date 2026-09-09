@@ -419,8 +419,8 @@ Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`abe7218a1d9253025ab759aabcb37c0a89c159ec`, and the shared OA commit is
-`17547e02b3a78a828733efb8b6aaa60ee33a94c5`. Both repositories remain on
+`a7610210eb81e2b01337fe836695a75c09386512`, and the shared OA commit is
+`8e13e432fe6719e5cb9fe2bf2528b1da247f5189`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
 The existing staging services run oa-org
@@ -444,12 +444,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-5oc0zmt05-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-1ez6qul56-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_4uStgn5jKA9Xj5vGBEnW3Dqw3BBc` (READY).
+- Deployment: `dpl_7WiLEKLhPFQMSe5MDF6FgoGpk9dG` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `a650e45203d262bc4f4fe008b3069eaee020ee3594d70c33b2da23041ee7fe21`.
-- Validation: final model-tier test counts and live checks are recorded below;
+- Build fingerprint: `8a18ccc0623a41e83c451aa7336b8bb4ca829df999d720242ce4820868909a83`.
+- Validation: model-tier and compact balance badge checks are recorded below;
   fresh adversarial reviews approved both the access policy and panel refresh;
   all 153 published asset digests and immutable manifests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
@@ -499,11 +499,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-hnwaxrtdm-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-j0z2et9xf-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_9ihNajgbx7ZLs6Zo86sYXoiGhCez` (READY).
+- Deployment: `dpl_CbG6GWdnf44xaQ6t9TnXdStWkqhW` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `8570ba9c06d77bb3c8e6e77b38f856b4530fc335ca932956cf145c65730638de`.
+- Build fingerprint: `e1387ec35d4e65040b7a95dcb72979f2d1567b9a6d04742137a627b21e577cbb`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
@@ -535,8 +535,10 @@ using `vercel.mainnet.json` and the same isolated static deployment procedure.
 
 ## Model-tier cap verification — 2026-09-08
 
-The final browser bundles are `assets/app-BGU762LY.js`, with the source/OA pins
-above. Final full suites passed: 363 client tests, 607 OA tests, and 10
+The model-tier release used `assets/app-BGU762LY.js`, parent commit
+`abe7218a1d9253025ab759aabcb37c0a89c159ec`, and OA commit
+`17547e02b3a78a828733efb8b6aaa60ee33a94c5`. Its final full suites passed:
+363 client tests, 607 OA tests, and 10
 composition tests. Fresh adversarial review approved the proof/issuance/recovery/checkout
 changes, then independently approved the model-selection panel refresh fix.
 The checkout regression covers retirement starting between lease resolution and
@@ -576,3 +578,28 @@ Both browser error scans and both Vercel error scans were empty. Both published
 builds passed all 153 asset hashes, immutable manifests, health/config/catalog,
 security headers and trusted network/proof pins. Temporary Vercel environment
 files were removed from final and superseded deployment stages.
+
+## Compact minimum balance badges — 2026-09-08
+
+Both current trials use `assets/app-PJK33ZRW.js`. The model picker places the
+private minimum in the same position and CSS classes as the ticket badge,
+showing `≥ $1`, `≥ $2`, `≥ $3`, `≥ $4.50`, or `≥ $6`. The extra cap/minimum
+line was removed; token pricing remains beneath the model name. Hover and
+accessible labels explain that this is the balance required for a new key
+and only actual usage is deducted. Proof, issuance, and settlement behavior
+are unchanged by this presentation update.
+
+All 65 focused picker, UX-render, and payment-catalog tests passed. A fresh
+review approved the final badge rendering, escaping, and preserved ticket
+behavior. Chrome computer-use checks on both deployed trials confirmed all
+five badge values, no former budget rows, and no browser errors. Sepolia was
+also inspected at 390×844, then its viewport, Mini selection, and `explain https`
+draft were restored. Mainnet's unfunded zkAPI selection opened funding;
+switching back to Tickets restored numeric ticket badges and preserved the
+existing transcript, Mini selection, and empty draft. These checks performed
+no new inference or wallet transactions.
+
+Both deployments passed all 153 asset hashes, protected immutable manifests,
+config/health/catalog checks, security headers, and network/proof pins. Both
+Vercel error scans were empty. Temporary deployment environment handoffs
+were removed.
