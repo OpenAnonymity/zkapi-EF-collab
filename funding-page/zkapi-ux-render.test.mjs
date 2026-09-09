@@ -95,6 +95,8 @@ const {
 } = await import('../oa-chat/chat/components/MessageTemplates.js');
 const { processMessagesForApi } = await import('../oa-chat/chat/domain/messageContent.js');
 const { createZkapiUi } = await import('./ui/createZkapiUi.js');
+const { ChatApp } = await import('../oa-chat/chat/app.js');
+const { createModelPickerInterface } = await import('../oa-chat/chat/ui/appInterface.js');
 configureMessageTemplateServices({ presentation: createZkapiUi({}).presentation });
 
 test('private model pricing shows the key cap and balance proof threshold with token rates', () => {
@@ -128,6 +130,53 @@ test('usage panel shows only the owning key cap, then the selected model cap aft
         panel.currentSession.model = 'Unresolved model name';
         assert.equal(panel.usageEstimateView().keyLimitLabel, null, 'unresolved display names must not silently become $1');
     } finally { zkapiClient.config = config; }
+});
+
+test('choosing a new model updates the existing panel budget before sending without remounting', async t => {
+    const { ensureModelTiersReady } = await import('../oa-chat/chat/publicModelTierApi.js');
+    t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
+        'openai/gpt-4o-mini': 1, 'openai/gpt-6-astra-pro': 100
+    }), { status: 200 }));
+    await ensureModelTiersReady();
+    const originalDocument = globalThis.document;
+    const config = zkapiClient.config;
+    t.after(() => { globalThis.document = originalDocument; zkapiClient.config = config; });
+    let session = { id: 'model-change-chat', model: 'GPT-4o Mini' };
+    const app = Object.create(ChatApp.prototype);
+    const panel = Object.create(RightPanel.prototype);
+    const keyLabel = { textContent: '' };
+    const card = { classList: { toggle() {} },
+        querySelector: selector => selector === '[data-chat-usage-key-limit]' ? keyLabel : null };
+    globalThis.document = { querySelector: () => card };
+    Object.assign(app, {
+        state: { models: [{ id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
+            { id: 'openai/gpt-6-astra-pro', name: 'GPT-6 Astra Pro' }] },
+        elements: {}, reasoningEnabled: true, rightPanel: panel,
+        getCurrentSession: () => session, normalizeModelName: value => value,
+        beginSessionMutation: () => ({}), endSessionMutation() {}, updateCouncilLayoutMode() {},
+        integration: { getSessionUsageSummary: () => ({ hasEstimate: true, estimatedCostUsd: 0.02 }) }
+    });
+    panel.app = app;
+    panel.currentSession = { ...session };
+    panel.renderTopSectionOnly = () => { throw new Error('Model selection must not remount the panel'); };
+    zkapiClient.config = {};
+    const picker = createModelPickerInterface(app, {
+        chatDBImpl: { saveSetting: async () => {}, saveSession: async () => {} }
+    });
+    panel.updateUsageEstimate();
+    assert.equal(keyLabel.textContent, '$1 per key');
+    await picker.actions.selectModel('GPT-6 Astra Pro');
+    assert.equal(keyLabel.textContent, '$6 per key');
+    assert.equal(panel.currentSession, session, 'same-chat snapshots are refreshed from the live selection');
+
+    zkapiClient.config = { active_lease: { session_id: session.id,
+        spending_limit_usd: 4.5, expires_at: Date.now() / 1000 + 300 } };
+    await picker.actions.selectModel('GPT-4o Mini');
+    assert.equal(keyLabel.textContent, '$4.50 per key', 'a live owned key still displays its actual cap');
+
+    session = { id: 'another-chat', model: 'GPT-6 Astra Pro' };
+    app.renderCurrentModel();
+    assert.equal(keyLabel.textContent, '$4.50 per key', 'navigation waits for its own panel update');
 });
 
 test('right-panel runtime completion advances once without clock-driven remounts', () => {

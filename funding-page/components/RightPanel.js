@@ -115,6 +115,15 @@ export default class RightPanel extends SharedRightPanel {
         this.loadSessionData();
     }
 
+    onModelSelectionChange() {
+        const session = this.app.getCurrentSession();
+        // Navigation has its own full panel update. Refresh only the selected
+        // chat's budget here, preserving help, focus and key controls.
+        if (session?.id !== this.currentSession?.id) return;
+        this.currentSession = session;
+        this.updateUsageEstimate();
+    }
+
     usageEstimateView() {
         const summary = this.app.integration?.getSessionUsageSummary?.(this.currentSession);
         const cost = summary?.hasEstimate ? Number(summary.estimatedCostUsd || 0) : null;
