@@ -73,10 +73,6 @@ pub fn build_router(service: Arc<AuthService>) -> Router {
         .route("/funding/api/reset", post(wallet_reset))
         .route("/funding", get(funding_index))
         .route("/funding/", get(funding_index))
-        .route("/funding/OA_CHAT_LICENSE", get(funding_oa_license))
-        .route("/funding/styles.css", get(funding_styles))
-        .route("/funding/wallet.js", get(funding_wallet))
-        .route("/funding/app.js", get(funding_app))
         .route("/funding/api/status", get(wallet_status))
         .route("/funding/api/demo", get(demo_overview))
         .route("/funding/api/deposit/prepare", post(prepare_deposit))
@@ -550,12 +546,6 @@ async fn funding_config(State(service): State<Arc<AuthService>>) -> Json<Value> 
 
 async fn funding_index(State(service): State<Arc<AuthService>>) -> Response {
     let mut response = Html(service.funding_index_html()).into_response();
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
-        ),
-    );
     add_local_asset_headers(&mut response);
     response
 }
@@ -572,28 +562,6 @@ async fn funding_favicon(State(service): State<Arc<AuthService>>) -> Response {
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
-}
-
-async fn funding_styles(State(service): State<Arc<AuthService>>) -> Response {
-    static_asset(service.funding_styles_css(), "text/css; charset=utf-8")
-}
-
-async fn funding_oa_license(State(service): State<Arc<AuthService>>) -> Response {
-    static_asset(service.funding_oa_license(), "text/plain; charset=utf-8")
-}
-
-async fn funding_app(State(service): State<Arc<AuthService>>) -> Response {
-    static_asset(
-        service.funding_app_js(),
-        "application/javascript; charset=utf-8",
-    )
-}
-
-async fn funding_wallet(State(service): State<Arc<AuthService>>) -> Response {
-    static_asset(
-        service.funding_wallet_js(),
-        "application/javascript; charset=utf-8",
-    )
 }
 
 async fn funding_asset(
@@ -682,16 +650,14 @@ fn session_id(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
 }
 
-fn static_asset(body: &'static str, content_type: &'static str) -> Response {
-    let mut response = body.into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    add_local_asset_headers(&mut response);
-    response
-}
-
 fn add_local_asset_headers(response: &mut Response) {
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+    );
+
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -793,97 +759,55 @@ mod tests {
             .is_some_and(|value| value.contains("script-src 'self'")));
         let body = funding.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("<title>oa-chat</title>"));
-        assert!(html.contains("id=\"new-chat-btn\""));
-        assert!(html.contains("id=\"message-input\""));
-        assert!(html.contains("id=\"right-panel\""));
-        assert!(html.contains("id=\"account-modal\""));
-        assert!(html.contains("href=\"styles.css\""));
-        assert!(html.contains("src=\"wallet.js\""));
-        assert!(html.contains("<base href=\"/funding/\">"));
-        assert!(html.contains("name=\"oa-chat-revision\""));
-        assert!(!html.contains("zkAPI chat"));
-        assert!(!html.contains("id=\"private-key\""));
-        assert!(!html.contains("https://cdn.jsdelivr.net"));
-
-        let wallet_script = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/funding/wallet.js")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(wallet_script.status(), StatusCode::OK);
-
-        for path in [
-            "/favicon.ico",
-            "/funding/zkapi.css",
-            "/funding/build.json",
-            "/funding/assets/zkapiWasmWorker.js",
-            "/funding/wasm/zkapi_browser_bg.wasm",
-            "/funding/vendor/marked/marked.min.js",
-            "/funding/fonts/fonts.css",
-        ] {
-            let asset = router
+        assert!(!html.is_empty());
+        if crate::service::EMBEDDED_FUNDING_IS_DEFAULT {
+            assert!(html.contains("<title>zkAPI local client</title>"));
+            assert!(html.contains("OA Chat is a separate app"));
+            assert!(html.contains("--fund-with-cast"));
+            assert!(html.contains("zkapi withdraw --destination"));
+            assert!(!html.contains("<script"));
+            assert!(!html.contains("id=\"message-input\""));
+            let stylesheet = router
                 .clone()
                 .oneshot(
                     axum::http::Request::builder()
-                        .uri(path)
+                        .uri("/funding/styles.css")
                         .body(Body::empty())
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(asset.status(), StatusCode::OK, "{path}");
-            assert_eq!(asset.headers()[header::CACHE_CONTROL], "no-store");
-            assert_eq!(asset.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(stylesheet.status(), StatusCode::OK);
+            assert_eq!(
+                stylesheet.headers()[header::CONTENT_TYPE],
+                "text/css; charset=utf-8"
+            );
+            assert_eq!(stylesheet.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(stylesheet.headers()["x-content-type-options"], "nosniff");
+            // Optional app assets are ordinary lookups, not panicking handlers
+            // that assume the daemon embeds a particular chat application.
+            for path in [
+                "/funding/wallet.js",
+                "/funding/app.js",
+                "/funding/OA_CHAT_LICENSE",
+                "/funding/build.json",
+                "/funding/.env",
+                "/funding/../Cargo.toml",
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            }
         }
-
-        let manifest_response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/funding/build.json")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let manifest_body = manifest_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let manifest: Value = serde_json::from_slice(&manifest_body).unwrap();
-        assert_eq!(manifest["builder"], "oa-zkapi-composition");
-        let inputs = manifest["sourceInputs"].as_array().unwrap();
-        assert!(inputs
-            .iter()
-            .any(|input| input == "oa-chat/chat/publicApi.js"));
-        assert!(!inputs.iter().any(|input| input == "funding-page/app.js"));
-        let app_path = format!("/funding/{}", manifest["app"].as_str().unwrap());
-        let app_bundle = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(&app_path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(app_bundle.status(), StatusCode::OK);
-        // Source trees, test fixtures and alternate uncomposed entry points are
-        // not part of the daemon's public static surface.
-        for path in [
-            "/funding/components/ChatInput.js",
-            "/funding/services/zkapiClient.js",
-            "/funding/ui.test.mjs",
-        ] {
+        for path in ["/", "/funding/", "/funding/index.html"] {
             let response = router
                 .clone()
                 .oneshot(
@@ -894,23 +818,14 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-        }
-
-        for path in ["/funding/OA_CHAT_LICENSE"] {
-            let asset = router
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(asset.status(), StatusCode::OK, "{path}");
-            assert_eq!(asset.headers()[header::CACHE_CONTROL], "no-store");
-            assert_eq!(asset.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("connect-src 'self'"));
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(bytes.as_ref(), html.as_bytes());
         }
 
         let models = router

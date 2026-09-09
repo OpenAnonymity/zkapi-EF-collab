@@ -1,23 +1,40 @@
 {
-  "name": "oa-zkapi-client",
-  "version": "0.1.0",
+  "name": "@openanonymity/zkapi-browser-sdk",
+  "version": "0.2.0",
   "private": true,
-  "description": "OA Chat composed with the zkAPI browser and daemon payment runtime",
+  "description": "Browser wallet, proofs, key lifecycle and withdrawals for zkAPI",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "build": "npm run build:browser",
-    "build:browser": "node scripts/compose-browser-client.mjs",
-    "build:mainnet": "node scripts/compose-browser-client.mjs --network mainnet --out-dir dist/browser-mainnet",
-    "test": "npm run test:client && npm run test:build",
-    "test:client": "node --test funding-page/*.test.cjs funding-page/*.test.mjs",
-    "test:build": "node --test scripts/compose-browser-client.test.mjs",
-    "test:e2e": "node scripts/payment-modes.e2e.mjs",
-    "lock:sources": "node scripts/lock-browser-sources.mjs"
+    "build:browser": "node scripts/build-sdk.mjs --network sepolia",
+    "build:mainnet": "node scripts/build-sdk.mjs --network mainnet",
+    "test": "npm run test:sdk",
+    "test:sdk": "node --test sdk/test/*.test.mjs",
+    "verify:assets": "node scripts/sync-sdk-assets.mjs --check"
   },
   "devDependencies": {
-    "esbuild": "0.27.2",
-    "playwright-core": "1.63.0"
+    "esbuild": "0.27.2"
+  },
+  "files": [
+    "sdk/"
+  ],
+  "exports": {
+    ".": "./sdk/index.js",
+    "./configure": "./sdk/configure.js",
+    "./client": "./sdk/services/zkapiClient.js",
+    "./runtime": "./sdk/services/browserWalletRuntime.js",
+    "./store": "./sdk/services/browserWalletStore.js",
+    "./wallet": "./sdk/wallet.js",
+    "./build": "./sdk/build.mjs",
+    "./request-compat": "./sdk/services/zkapiRequestCompat.mjs",
+    "./withdrawal-recovery": "./sdk/services/zkapiWithdrawalRecovery.mjs",
+    "./expiry-history": "./sdk/services/zkapiExpiryHistory.mjs",
+    "./withdrawal-root": "./sdk/services/zkapiWithdrawalRoot.mjs",
+    "./gas": "./sdk/services/zkapiGas.mjs",
+    "./contract-error": "./sdk/services/zkapiContractError.mjs",
+    "./wallet-error": "./sdk/services/zkapiWalletError.mjs",
+    "./package.json": "./package.json"
   }
 }

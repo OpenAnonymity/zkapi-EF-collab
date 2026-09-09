@@ -54,8 +54,8 @@ const DIRECT_LEASE_RETIRE_MAX_WAIT: Duration = Duration::from_secs(45);
 include!(concat!(env!("OUT_DIR"), "/embedded_funding_assets.rs"));
 
 fn embedded_funding_text(path: &str) -> &'static str {
-    let (bytes, _) = embedded_funding_asset(path).expect("composed funding asset is embedded");
-    std::str::from_utf8(bytes).expect("composed funding text asset is UTF-8")
+    let (bytes, _) = embedded_funding_asset(path).expect("frontend index is embedded");
+    std::str::from_utf8(bytes).expect("frontend index is UTF-8")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2190,22 +2190,6 @@ impl AuthService {
 
     pub fn funding_index_html(&self) -> &'static str {
         embedded_funding_text("index.html")
-    }
-
-    pub fn funding_styles_css(&self) -> &'static str {
-        embedded_funding_text("styles.css")
-    }
-
-    pub fn funding_oa_license(&self) -> &'static str {
-        embedded_funding_text("OA_CHAT_LICENSE")
-    }
-
-    pub fn funding_app_js(&self) -> &'static str {
-        embedded_funding_text("app.js")
-    }
-
-    pub fn funding_wallet_js(&self) -> &'static str {
-        embedded_funding_text("wallet.js")
     }
 
     pub fn funding_asset(&self, path: &str) -> Option<(&'static [u8], &'static str)> {

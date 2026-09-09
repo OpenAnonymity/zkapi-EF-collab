@@ -18,17 +18,15 @@ jobs:
 
       - uses: ./.github/actions/checkout-protocol
 
-      - uses: ./.github/actions/checkout-oa-chat
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
-      - name: Install composed UI build dependencies
+      - name: Install SDK test dependencies
         run: npm ci
 
-      - name: Test and build both browser configurations
+      - name: Test SDK and package both network asset sets
         run: |
           npm test
           npm run build:browser
@@ -135,8 +133,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/checkout-protocol
-
-      - uses: ./.github/actions/checkout-oa-chat
 
       - name: Build Docker image
         run: docker build -f docker/Dockerfile -t zkapi/ef-collaboration:ci .

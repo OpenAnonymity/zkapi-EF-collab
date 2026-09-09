@@ -121,8 +121,9 @@ enum Commands {
     /// Start a ready-to-use local OpenAI/Ollama-compatible client.
     ///
     /// By default this loads the experimental Ethereum Mainnet deployment,
-    /// reuses an existing local note or serves the MetaMask funding UI for a
-    /// new one, then listens on 127.0.0.1:11434.
+    /// reuses an existing local note, then listens on 127.0.0.1:11434. Use
+    /// --fund-with-cast to fund a new wallet before starting. The default page
+    /// provides local-client help; browser apps are built separately.
     Client {
         /// Deployment manifest URL or local JSON path.
         #[arg(long, default_value = PUBLIC_MAINNET_MANIFEST)]
@@ -142,9 +143,9 @@ enum Commands {
         /// Start without automatic cast funding or low-balance note rotation.
         #[arg(long, hide = true)]
         no_fund: bool,
-        /// Use the legacy interactive cast funding flow before starting. By
-        /// default the daemon starts immediately and the bundled UI funds with
-        /// MetaMask.
+        /// Use the interactive cast funding flow before starting. By default
+        /// the daemon starts immediately with its local help page. A separately
+        /// supplied frontend may provide browser funding controls.
         #[arg(long)]
         fund_with_cast: bool,
         /// Do not call a test deployment's optional faucet-style mint method.
@@ -813,7 +814,7 @@ async fn run_one_command_client(options: OneCommandClientOptions<'_>) -> anyhow:
     }
 
     println!("zkAPI local gateway: http://{listen}");
-    println!("  Chat + MetaMask funding:  http://{listen}/");
+    println!("  Local client page:        http://{listen}/");
     println!("  OpenAI Chat Completions: http://{listen}/v1/chat/completions");
     println!("  OpenAI Responses:        http://{listen}/v1/responses");
     println!("  Ollama Chat:              http://{listen}/api/chat");

@@ -8,7 +8,7 @@ members = [
     "crates/zkapi-auth",
 ]
 default-members = ["crates/zkapi-cli", "crates/zkapi-clientd"]
-exclude = ["protocol", "protocol/rust", "funding-page"]
+exclude = ["protocol", "protocol/rust", "sdk"]
 
 [workspace.package]
 edition = "2021"

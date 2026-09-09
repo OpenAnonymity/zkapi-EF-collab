@@ -1,20 +1,12 @@
 FROM rust:bookworm AS builder
 
-# Node is a build-time dependency only: the final daemon embeds the exact
-# composed OA assets produced by the browser build pipeline.
-COPY --from=node:24-bookworm /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:24-bookworm /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-
+# The Rust daemon embeds its small local help page. OA Chat builds separately
+# and consumes the browser SDK; no browser toolchain is required here.
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY package.json package-lock.json browser-sources.lock.json ./
-RUN node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci
 COPY crates ./crates
-COPY funding-page ./funding-page
 COPY protocol ./protocol
-COPY oa-chat ./oa-chat
-COPY scripts/compose-browser-client.mjs ./scripts/compose-browser-client.mjs
 
 RUN cargo build --release -p zkapi-cli -p zkapi-clientd -p zkapi-indexerd
 

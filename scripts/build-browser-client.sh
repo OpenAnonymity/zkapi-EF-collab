@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 protocol_rust="$repo_root/protocol/rust"
 wasm_target="$protocol_rust/target/wasm32-unknown-unknown/release/zkapi_browser.wasm"
-wasm_output="$repo_root/funding-page/wasm"
+wasm_output="$repo_root/sdk/wasm"
 dist_root="${1:-$repo_root/dist/browser}"
 
 wasm_bindgen_bin="${WASM_BINDGEN_BIN:-$(command -v wasm-bindgen || true)}"
@@ -31,7 +31,8 @@ mkdir -p "$wasm_output"
   --out-name zkapi_browser \
   --omit-default-module-path
 
-"$repo_root/scripts/package-browser-client.sh" "$dist_root"
+node "$repo_root/scripts/sync-sdk-assets.mjs"
+node "$repo_root/scripts/build-sdk.mjs" --out-dir "$dist_root"
 
-echo "Browser client built at $dist_root/funding/"
-echo "Serve $dist_root as an HTTPS origin and open /funding/."
+echo "Browser SDK assets built at $dist_root"
+echo "The host application owns the chat UI and deployment."

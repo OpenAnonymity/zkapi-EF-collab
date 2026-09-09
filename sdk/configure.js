@@ -1,0 +1,48 @@
+// Host integration is explicit: importing the SDK does not create a worker,
+// connect a wallet, fetch configuration, or enable an application proxy.
+let options = Object.freeze({ transport: null, configUrl: null, workerUrl: null, mode: 'browser' });
+let initializing = false;
+
+function absoluteUrl(value, label) {
+    if (value == null) return null;
+    const base = globalThis.location?.href;
+    const url = new URL(String(value), base);
+    if (!['https:', 'http:', 'file:'].includes(url.protocol)) {
+        throw new TypeError(`${label} must be an HTTP(S) or local file URL.`);
+    }
+    if (url.username || url.password) throw new TypeError(`${label} must not include credentials.`);
+    return url.href;
+}
+
+/** Configure the page's single wallet before calling client.init(). */
+export function configureBrowserSdk(next = {}) {
+    if (initializing) throw new Error('Configure the zkAPI browser SDK before initializing its wallet.');
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+        throw new TypeError('zkAPI browser SDK configuration must be an object.');
+    }
+    const unknown = Object.keys(next).filter(key => !['transport', 'configUrl', 'workerUrl', 'mode'].includes(key));
+    if (unknown.length) throw new TypeError(`Unknown zkAPI browser SDK option: ${unknown.join(', ')}.`);
+    const merged = { ...options, ...next };
+    if (merged.transport !== null && typeof merged.transport !== 'function') {
+        throw new TypeError('zkAPI transport must be a fetch-compatible function.');
+    }
+    if (!['browser', 'auto', 'daemon'].includes(merged.mode)) {
+        throw new TypeError('zkAPI mode must be browser, auto, or daemon.');
+    }
+    merged.configUrl = absoluteUrl(merged.configUrl, 'configUrl');
+    merged.workerUrl = absoluteUrl(merged.workerUrl, 'workerUrl');
+    options = Object.freeze(merged);
+    return options;
+}
+
+export function browserSdkOptions() { return options; }
+export function beginBrowserSdkInitialization() { initializing = true; }
+
+// Preserve the host's opt-in proxy policy without importing its implementation.
+// Protocol requests must remain unlinked from the host application's account
+// cookies, including when its same-origin route or optional privacy proxy is used.
+export function browserSdkTransport(url, init = {}, hints = {}) {
+    const privateInit = { ...init, credentials: 'omit' };
+    if (options.transport) return options.transport(url, privateInit, hints);
+    return globalThis.fetch(url, privateInit);
+}

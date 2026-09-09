@@ -1,6 +1,3 @@
 [submodule "protocol"]
 	path = protocol
 	url = https://github.com/mingyech/zkapi.git
-[submodule "oa-chat"]
-	path = oa-chat
-	url = https://github.com/OpenAnonymity/oa-chat.git

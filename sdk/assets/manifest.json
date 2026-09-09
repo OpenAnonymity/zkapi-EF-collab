@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "protocolRevision": "b542b1bb0e18329bb3e646c5a51d67d4af9c60e2",
+  "extractedFromRevision": "f7e3d089b32cd85954d9db268228c7bf640174e9",
+  "files": {
+    "wasm/zkapi_browser.js": "ca558abcc1e42611adba779134f400cc0c6eb459c6a3e18a69c023fc6c80eea7",
+    "wasm/zkapi_browser_bg.wasm": "dc00f568d3c702ed7d3047f30a0e59af4aae851f4ac9a01c1ee2f998e40b0841",
+    "assets/proofs/request.pk": "faa0e68954ade5e9709fa74baca3380cf0ff0d325ff06742385f33036123928e",
+    "assets/proofs/withdrawal.pk": "92a90139c87ae0e331fddc92a36e231047e1b4ae95474521d9a75f9b5a7bd0ab",
+    "assets/config/sepolia.json": "1c88fbe0df73dbc3cbbb255526170f837b86e327d469625763922f86a2b6d4cb",
+    "assets/config/mainnet.json": "3fb7a4cf6a2cb1ad96177cad59a1a1c93a1e784ce1bbfbc078b042423fdb1f93"
+  }
+}

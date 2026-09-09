@@ -1,3 +1,9 @@
+> Historical composed-app record. These deployments remain available, but the
+> current source architecture is OA Chat → zkAPI browser SDK. The UI and chat
+> runtime now live in OA Chat's `codex/zkapi-browser-sdk` branch. See
+> [SDK integration](../sdk/README.md) for the current SDK boundary. Details and
+> source paths below describe the earlier composed releases.
+
 # Ticket and zkAPI payment modes
 
 The composed OA chat app offers **Tickets** and **zkAPI** in the top toolbar.

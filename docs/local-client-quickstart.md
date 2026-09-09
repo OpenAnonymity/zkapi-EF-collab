@@ -1,6 +1,6 @@
 # Local client quickstart
 
-Prerequisite: Rust. Foundry's `cast` is optional for the headless funding flow.
+Prerequisite: Rust. Foundry's `cast` is required for the terminal funding flow below.
 Clone and build:
 
 ```bash
@@ -14,7 +14,7 @@ Start the prompt-private local API on Ethereum Mainnet (real USDC and ETH for ga
 
 ```bash
 ./target/release/zkapi --require-oa-org-key-source client \
-  --mode direct-openrouter --initial-credits 2000000
+  --mode direct-openrouter --initial-credits 2000000 --fund-with-cast
 ```
 
 The suggested deposit is 2,000,000 base units (`2 USDC`). The selected wallet must
@@ -27,19 +27,16 @@ Or use Sepolia (free test token, but Sepolia ETH is needed for gas):
 ```bash
 ./target/release/zkapi --require-oa-org-key-source client \
   --deployment https://d33l4w2z2nh4cg.cloudfront.net/config.json \
-  --mode direct-openrouter --initial-credits 5000000
+  --mode direct-openrouter --initial-credits 5000000 --fund-with-cast
 ```
 
-Open `http://127.0.0.1:11434/`, connect MetaMask, switch to the deployment's
-network when prompted, and deposit the suggested amount. The page shows the
-remaining and spent portions of the current note, its expiry, and a low-balance
-warning. It never asks for or stores a private key. For a headless environment,
-add `--fund-with-cast` to use the interactive terminal flow instead.
-On the public Sepolia deployment, the same button mints free ZKAPI test credits
-when the connected address needs them; the address still needs Sepolia ETH for
-transaction gas. About `0.02 Sepolia ETH` provides reasonable headroom for a
-complete mint, approve, deposit, chat, and mutual-withdrawal test at typical
-testnet gas prices.
+Follow the terminal funding prompts. The default `http://127.0.0.1:11434/`
+page contains local-client help and links to status; OA Chat is a separate app.
+The CLI securely prompts for the funding signer rather than accepting a key in
+its arguments or saving it in daemon state. On the public Sepolia deployment,
+the funding flow can mint free test credits when needed; the address still needs
+Sepolia ETH for gas. Preserve the deployment and state-directory settings when
+restarting an existing wallet.
 
 The larger Sepolia test-token deposit supports proof-backed, cumulative
 dollar-budget lease windows. A child key belongs to one chat session. Its
@@ -56,7 +53,7 @@ OpenRouter. Start prompt-private mode with:
 Add the same `--deployment ...` argument shown above after `client` when using
 Sepolia.
 
-Keep the client running, then use the bundled chat or call its local
+Keep the client running, then connect a compatible application or call its local
 OpenAI-compatible API. Supply a stable session ID when an application can
 identify a conversation:
 
@@ -112,21 +109,10 @@ In direct mode, calls with the same session ID share one bounded ephemeral key
 and may execute concurrently. Until that key expires and settles, a different
 session receives `409 lease_session_conflict` instead of being linkable to it.
 
-## Withdraw in the browser
+## Optional browser application
 
-Open the system panel and choose **Withdraw balance**. The recommended mutual
-close obtains server clearance and returns the note's remaining billing tokens
-in one MetaMask transaction. The UI verifies the vault event before archiving
-the local note.
-
-The escape hatch is the unilateral recovery path. Its first transaction freezes
-the note and starts the vault's configured safety window (24 hours by default).
-The UI reads that duration from the vault and shows the exact deadline. Keep the
-daemon state directory: the note secret remains there until finalization, and
-the pending screen is restored after a browser or daemon restart. After the
-displayed deadline, reconnect the same destination account and choose
-**Finalize in MetaMask**. Anyone can submit that final transaction, but the
-tokens always go to the destination committed by the withdrawal proof. If the
-server challenges the escape during the window, **Check on-chain status**
-restores the active note. Chat requests are rejected while either withdrawal
-path is prepared or pending so the proven balance cannot be spent twice.
+A downstream app may embed a separately built frontend in the daemon using
+`ZKAPI_FRONTEND_DIST`. See [Local daemon frontend](daemon-frontend.md) for the
+build contract. Browser funding and withdrawal controls are provided by that
+application; the default daemon page does not initiate transactions. OA Chat
+now owns its chat UI and consumes the zkAPI browser SDK independently.

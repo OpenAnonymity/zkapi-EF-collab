@@ -16,84 +16,47 @@ The current protocol uses:
 - a 32-level active-note Merkle tree and state-derived nullifiers;
 - OpenAI-compatible chat and responses endpoints on the local client daemon.
 
-## Build and test
+## Browser SDK and OA Chat
 
-```bash
-git clone git@github.com:OpenAnonymity/zkapi-ef.git
-cd zkapi-ef
-git submodule update --init --recursive
-npm ci # Node.js 24+; builds the shared browser UI embedded in the daemon
-cargo build --release --bin zkapi
-cargo test --workspace
-node --test funding-page/wallet.test.cjs
-node --test funding-page/browser-wallet.test.cjs
-(cd protocol/contracts && forge test)
-```
+This repository provides `@openanonymity/zkapi-browser-sdk`. OA Chat consumes
+that SDK and owns the chat UI, payment switch, model pricing, and application
+runtime. The dependency runs from OA Chat to this package; this repository no
+longer checks out or builds OA Chat.
 
-### Use OA Chat directly from a website
-
-The chat renderer and static assets come from the pinned `oa-chat` submodule.
-`funding-page/` contains only zkAPI payment/runtime customizations, not another
-copy of OA Chat. Both hosted variants and the daemon use the same composed
-build; see [composition and source-update instructions](docs/browser-composition-build.md).
-
-The OA Chat client can also run the zkAPI v2 wallet and Groth16 prover entirely
-in the browser, with no local daemon. Build a deployable static directory with:
+The SDK owns wallet storage, proof generation, ephemeral keys, settlement,
+withdrawals, and public payment history. It contains the pinned public WASM
+and proving artifacts and has no runtime npm dependency. Consumers can install
+an immutable Git commit without initializing this repository's protocol
+submodule or installing Rust. See [SDK integration](sdk/README.md).
 
 ```bash
 npm ci
-cargo install wasm-bindgen-cli --version 0.2.117 --locked
-./scripts/build-browser-client.sh
-python3 -m http.server 4173 --directory dist/browser
+npm test
+npm run build:browser # SDK assets for Sepolia, not a chat application
+npm run build:mainnet # SDK assets for the existing mainnet vault
+npm pack             # installable browser SDK
 ```
 
-Open `http://127.0.0.1:4173/funding/`. The checked-in browser configuration
-uses the public Sepolia demo by default. A deployment can replace
-`funding/browser-config.json`. A manifest selected with `?zkapiDeployment=` is
-accepted only when its exact URL is also listed in that file's
-`allowed_deployment_manifest_urls`, preventing a shared link from silently
-substituting a different deployment. The manifest's vault, chain, billing
-token, server and indexer origins, signing keys, proving-key hashes, charge cap,
-OpenRouter origin, and OA verifier must also match `trusted_deployment`.
+The host's own build emits the SDK assets and configures its privacy transport,
+asset URLs, and selected network before wallet initialization. Mainnet uses
+real USDC and ETH; the existing contract and expiry behavior are unchanged.
+No setup ceremony or on-chain deployment is needed for this extraction.
 
-The initial static payload includes a 2.2 MB WASM module. The 5.4 MB request
-and 7.2 MB withdrawal proving keys are downloaded and integrity-checked only
-when the corresponding proof is needed, then cached by the browser. Proofs run
-in a Web Worker. Private note state and the write-ahead recovery journal are
-stored atomically in IndexedDB, mutations are serialized with Web Locks across
-tabs, and the site requests persistent browser storage. Clearing site data can
-still make an active note unrecoverable, so users should withdraw before
-clearing the OA Chat origin. Production hosting should use HTTPS, a strict CSP,
-no third-party scripts, and immutable integrity-pinned WASM/proving-key assets.
-
-The daemon remains supported. On a daemon-served OA Chat page it is selected
-automatically; `?zkapiMode=browser` forces the WebAssembly wallet and
-`?zkapiMode=daemon` disables browser fallback.
-
-The checked-in WASM bundle can also be packaged and deployed to Vercel without
-installing Rust in the remote builder:
+## Build and test the Rust clients
 
 ```bash
-./scripts/package-browser-client.sh
-vercel --prod --yes --local-config vercel.browser.json
+git submodule update --init --recursive protocol
+cargo build --release --bin zkapi
+cargo test --workspace
+(cd protocol/contracts && forge test)
 ```
 
-The Vercel configuration redirects `/` to `/funding/` and serves the same OA Chat
-client with the browser wallet selected automatically when no local daemon is
-available.
-
-A separate Ethereum Mainnet build is pinned to the existing zkAPI mainnet
-deployment and Circle's Ethereum USDC contract. It disables the test-token
-faucet, defaults to a 2 USDC deposit, labels the billing token as USDC, and
-shows a real-funds warning before funding:
-
-```bash
-./scripts/package-browser-client-mainnet.sh
-vercel --prod --yes --local-config vercel.mainnet.json
-```
-
-The mainnet vault and proving system are experimental and unaudited. Deposits
-use real USDC and all wallet transactions use real ETH for gas.
+The daemon is independent of Node and OA Chat. Its default `/funding/` is a
+small help page. An application may optionally supply a prebuilt frontend with
+`ZKAPI_FRONTEND_DIST`; see [local client setup](docs/local-client-quickstart.md).
+To deliberately rebuild the SDK's public WASM from the pinned protocol source,
+use `scripts/build-browser-client.sh`; review and commit the updated artifact
+hashes. Ordinary SDK consumers do not need that step.
 
 The selected proving keys are stored in `protocol/setup/v2`. Do not run the
 `setup` command merely to use an existing deployment: it creates a new,
