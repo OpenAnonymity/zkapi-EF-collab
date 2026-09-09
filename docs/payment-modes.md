@@ -416,8 +416,8 @@ Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`9da54aee2115c411e8912871c55bd70752064219`, and the shared OA commit is
-`c6debe6c979020c41ad6ae4ea40ee1bfd5003368`. Both repositories remain on
+`abe7218a1d9253025ab759aabcb37c0a89c159ec`, and the shared OA commit is
+`17547e02b3a78a828733efb8b6aaa60ee33a94c5`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
 The existing staging services run oa-org
@@ -441,14 +441,14 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-ldfqzxwi7-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-5oc0zmt05-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_2K6FRn6ioQG6cEv6CeukGqNJ8XK4` (READY).
+- Deployment: `dpl_4uStgn5jKA9Xj5vGBEnW3Dqw3BBc` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `05b434eedf2e815555409a89f572c5e2a5f8f99c24a8a31ae4cb980a4962fce9`.
-- Validation: 603 OA tests and 10 composition tests passed for this change;
-  the preceding client release passed 350 tests;
-  fresh adversarial review approved; all 153 published asset digests matched.
+- Build fingerprint: `a650e45203d262bc4f4fe008b3069eaee020ee3594d70c33b2da23041ee7fe21`.
+- Validation: final model-tier test counts and live checks are recorded below;
+  fresh adversarial reviews approved both the access policy and panel refresh;
+  all 153 published asset digests and immutable manifests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
   ticket, verifier, wallet, and provider boundaries and zero uncaught
   application errors. These results are separate from the live tests below.
@@ -496,11 +496,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-ekfpdgvis-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-hnwaxrtdm-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_2sN11N1DYVggCt7wfU7kemLT8DPN` (READY).
+- Deployment: `dpl_9ihNajgbx7ZLs6Zo86sYXoiGhCez` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `6ba10f720f583f08b157411b408016661d8a5d2263c895f2a29d452df3ee4d98`.
+- Build fingerprint: `8570ba9c06d77bb3c8e6e77b38f856b4530fc335ca932956cf145c65730638de`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
@@ -528,3 +528,48 @@ fingerprint was verified unchanged. This frontend uses the existing
 experimental, unaudited mainnet vault; deploying it adds no contracts. Redeploy
 its explicitly selected mainnet/staging-OA artifact from `dist/browser-mainnet`
 using `vercel.mainnet.json` and the same isolated static deployment procedure.
+
+
+## Model-tier cap verification — 2026-09-08
+
+The final browser bundles are `assets/app-BGU762LY.js`, with the source/OA pins
+above. Final full suites passed: 363 client tests, 607 OA tests, and 10
+composition tests. Fresh adversarial review approved the proof/issuance/recovery/checkout
+changes, then independently approved the model-selection panel refresh fix.
+The checkout regression covers retirement starting between lease resolution and
+credential checkout; the UI regression drives a real picker selection and verifies
+the existing panel label refreshes without remounting controls.
+
+Live Chrome computer-use tests on Sepolia used the existing private balance:
+
+- Selecting GPT-6 Astra Pro showed the $6 cap/minimum and blocked Send against
+  a $4.95 balance, preserving the draft and transcript and issuing no key.
+- An Auto Router $2 key returned the existing `blue-heron-62` marker. Its
+  response was attributed to DeepSeek V4 Flash 0731 and estimated at that rate.
+- The same chat upgraded to GPT-6 Astra ($4.50), then downgraded to GPT-4o-mini
+  ($1). Each old key settled before the new cap was proved; both responses
+  returned the original marker and history remained in the same conversation.
+- A new Claude Opus 5 chat ($3) returned `cedar-tier-37` and generated its title,
+  proving title and main response share the initiating model's budget.
+- Switching that chat to Tickets returned immediately during settlement; its
+  composer could send and normal memory controls were available. No Tinfoil
+  request was performed. Eight staging tickets remain.
+- Read-only station database checks confirmed all four keys were actually
+  issued at $2/$4.50/$1/$3 with five-minute lifetimes, then finalized with the
+  same caps. Signed actual usage was 7,323/61,293/7,475/15,704 credits respectively
+  at 1,000,000 credits per dollar. The test balance finished at about $4.86;
+  no new deposit or withdrawal transaction was needed.
+- The final deployed UI immediately changed the historical chat's panel from
+  $1 to $6 before Send. At 390×844, cap/minimum and token-rate rows were readable
+  without clipping; the temporary viewport was reset. The original Mini model
+  and `explain https` draft were restored after testing.
+
+Mainnet Chrome loaded the same final app bundle. Switching to zkAPI on its
+unfunded wallet opened the mainnet funding popup. The model picker showed all
+five dollar caps and their minimums; switching back restored normal ticket
+counts, with no dollar-budget rows. The existing transcript and one staging
+ticket remain. Mainnet was checked without connecting a wallet or transacting.
+Both browser error scans and both Vercel error scans were empty. Both published
+builds passed all 153 asset hashes, immutable manifests, health/config/catalog,
+security headers and trusted network/proof pins. Temporary Vercel environment
+files were removed from final and superseded deployment stages.
