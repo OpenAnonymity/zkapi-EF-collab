@@ -701,14 +701,12 @@ test('right-panel clock ticks update countdown text without replacing interactiv
 
 test('account clock patches preserve the modal and enable escape finalization at its deadline', () => {
     const originalWallet = zkapiClient.wallet;
-    const originalConfig = zkapiClient.config;
     const originalWithdrawal = zkapiClient.withdrawal;
     const originalFormatExpiry = zkapiClient.formatExpiry;
     const originalActiveElement = globalThis.document.activeElement;
     const countdown = { textContent: '' };
     const finalizeButton = { textContent: '', disabled: true };
     const noteExpiry = { textContent: '' };
-    const leaseExpiry = { textContent: '' };
     const withdrawalCheckbox = { checked: true };
     let overlayWrites = 0;
     const overlay = {
@@ -718,14 +716,12 @@ test('account clock patches preserve the modal and enable escape finalization at
             if (selector === '[data-zkapi-escape-countdown]') return countdown;
             if (selector === '#zkapi-finalize-btn') return finalizeButton;
             if (selector === '[data-zkapi-balance-expiry]') return noteExpiry;
-            if (selector === '[data-zkapi-active-lease-expiry]') return leaseExpiry;
             if (selector === '#zkapi-withdraw-confirm') return withdrawalCheckbox;
             return null;
         }
     };
     const deadline = 2_000_000_000;
     zkapiClient.wallet = { note: { expiry_ts: deadline + 10_000 } };
-    zkapiClient.config = { active_lease: { expires_at: deadline } };
     zkapiClient.withdrawal = { phase: 'pending', challengeDeadline: deadline };
     let expiryLabel = '1m';
     zkapiClient.formatExpiry = () => expiryLabel;
@@ -758,14 +754,12 @@ test('account clock patches preserve the modal and enable escape finalization at
         modal.view = 'balance';
         modal.handleZkapiClock(deadline * 1000);
         assert.equal(noteExpiry.textContent, 'expires in 1m');
-        assert.equal(leaseExpiry.textContent, '1m');
         expiryLabel = 'expired';
         modal.handleZkapiClock(deadline * 1000 + 1);
-        assert.equal(leaseExpiry.textContent, 'expired');
+        assert.equal(noteExpiry.textContent, 'expired');
         assert.equal(overlayWrites, 0);
     } finally {
         zkapiClient.wallet = originalWallet;
-        zkapiClient.config = originalConfig;
         zkapiClient.withdrawal = originalWithdrawal;
         zkapiClient.formatExpiry = originalFormatExpiry;
         globalThis.document.activeElement = originalActiveElement;

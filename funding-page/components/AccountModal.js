@@ -141,11 +141,6 @@ export default class AccountModal {
             setText(noteExpiry, privateBalanceExpiryLabel(zkapiClient, zkapiClient.note.expiry_ts));
         }
         updatePrivateBalanceExpiryState(this.overlay, zkapiClient.note, now);
-        const leaseExpiry = this.overlay.querySelector('[data-zkapi-active-lease-expiry]');
-        const rawLease = zkapiClient.config?.active_lease;
-        if (leaseExpiry && rawLease) {
-            setText(leaseExpiry, zkapiClient.formatExpiry(rawLease.expires_at));
-        }
 
         const withdrawal = zkapiClient.withdrawal;
         if (this.view === 'withdraw' && withdrawal?.phase === 'pending') {
@@ -605,7 +600,6 @@ export default class AccountModal {
                 </div>
                 ${claimed ? '<p class="rounded-lg border border-border bg-muted/5 p-3 text-xs leading-relaxed text-muted-foreground">After expiry, the original deposit was paid to the service treasury. No refund was made.</p>' : `<div data-private-balance-expired-notice ${expired ? '' : 'hidden'}><p class="rounded-lg border border-amber-300/60 bg-amber-50/60 p-3 text-xs leading-relaxed text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">This private balance has expired. You can still try withdrawing while it remains unclaimed.</p></div>`}
                 ${!claimed && zkapiClient.withdrawalBlocksChat ? `<div class="rounded-lg border border-amber-300/60 bg-amber-50/60 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">${['submitted', 'late_submitted'].includes(zkapiClient.activeWithdrawal?.phase) ? 'Your withdrawal transaction was submitted. Check its status before using this balance.' : zkapiClient.activeWithdrawal?.phase === 'dropped_or_pending' ? 'The saved transaction has no receipt yet. Open Withdraw to check or safely resubmit it with the same nonce.' : zkapiClient.activeWithdrawal?.phase === 'awaiting_wallet' ? 'MetaMask may still be open. Open Withdraw to check or recover the prompt.' : zkapiClient.activeWithdrawal?.phase === 'ambiguous' ? 'MetaMask did not return a transaction ID. Open Withdraw to check the vault or retry.' : 'No transaction is moving. This balance is ready to finish withdrawing.'}</div>` : ''}
-                ${!claimed && zkapiClient.activeLease ? `<div class="rounded-lg border border-blue-300/60 bg-blue-50/60 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"><p>The current chat key can be settled now; there is no need to wait <span data-zkapi-active-lease-expiry>${zkapiClient.formatExpiry(zkapiClient.activeLease.expires_at)}</span> for expiry.</p><button id="zkapi-settle-key-btn" class="zkapi-secondary-button mt-3 w-full" type="button" ${this.busy ? 'disabled' : ''}>Settle key now</button></div>` : ''}
                 <div class="grid ${claimed ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
                     <button id="zkapi-refresh-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Refresh</button>
                     ${claimed ? '' : `<button id="zkapi-withdraw-view-btn" class="zkapi-secondary-button" type="button" ${this.busy ? 'disabled' : ''}>Withdraw</button>`}
@@ -818,10 +812,6 @@ export default class AccountModal {
             await zkapiClient.archiveClaimedBalance();
             this.view = 'balance';
             this.setStatus('Closed balance archived. Its payment history is preserved.');
-        }));
-        this.overlay.querySelector('#zkapi-settle-key-btn')?.addEventListener('click', () => this.run(async () => {
-            await zkapiClient.settleActiveLease(message => this.setStatus(message));
-            this.setStatus('Private key settled. Balance updated.');
         }));
         this.overlay.querySelector('#zkapi-withdraw-view-btn')?.addEventListener('click', () => {
             this.view = 'withdraw';

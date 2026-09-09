@@ -16,6 +16,10 @@ loading errors report that the mode changed but the balance could not be
 checked, rather than treating an unknown wallet as unfunded. Panel actions and
 send preflight also open the dialog and return focus to their initiating control.
 
+Balance details has no manual settlement card or button. Withdrawing automatically
+settles any active chat key and waits for an in-progress settlement before preparing
+the wallet transaction.
+
 Balance details links to **Payment history**, combining deposits, withdrawals, and expiry events
 in one list with amounts, status, dates, and transaction links when known.
 Pending deposits remain visibly unconfirmed and link to their existing recovery

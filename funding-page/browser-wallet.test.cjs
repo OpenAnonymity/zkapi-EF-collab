@@ -648,7 +648,7 @@ test('browser withdrawal settles an active key instead of waiting for expiry', (
     const modal = fs.readFileSync(path.join(__dirname, 'components/AccountModal.js'), 'utf8');
     assert.match(client, /await this\.settleActiveLease\(onStatus\)/);
     assert.match(runtime, /await this\.settleActiveLease\(\);\s*return withBrowserWalletLock/);
-    assert.match(modal, /Settle key now/);
+    assert.doesNotMatch(modal, /Settle key now|zkapi-settle-key-btn|there is no need to wait/);
     assert.doesNotMatch(modal, /withdrawButton\.disabled = .*activeLease/);
     assert.match(modal, /withdrawalAmount\.textContent = zkapiClient\.formatMoney/);
     assert.match(modal, /data-active-lease-notice/);
