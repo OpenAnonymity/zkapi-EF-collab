@@ -933,12 +933,56 @@ class ZkapiClient extends EventTarget {
         return this.walletAddress;
     }
 
-    async readContractUint(to, data) {
+    async readContractUint(to, data, blockTag = 'latest') {
         const value = await globalThis.ethereum.request({
             method: 'eth_call',
-            params: [{ to, data }, 'latest']
+            params: [{ to, data }, blockTag]
         });
         return BigInt(value || '0x0');
+    }
+
+    async readContractUintAtReceipt(to, data, receipt, minimum = 0n) {
+        const blockTag = receipt?.blockNumber;
+        const blockHash = receipt?.blockHash;
+        if (receipt?.status !== '0x1' || !/^0x[0-9a-f]+$/i.test(blockTag || '')
+            || !/^0x[0-9a-f]{64}$/i.test(blockHash || '')) {
+            throw new Error('The token transaction did not return a valid confirmed block. Check its status in MetaMask.');
+        }
+        // An injected provider can return a mined receipt before its cached
+        // `latest` eth_call view advances. Read the receipt's explicit block
+        // instead, and retry only reads while the RPC nodes catch up. Never
+        // mint again merely because a post-transaction balance read is stale.
+        const canonicalBlock = async () => {
+            const block = await globalThis.ethereum.request({
+                method: 'eth_getBlockByNumber', params: [blockTag, false]
+            });
+            if (!block) throw new Error('The confirmed block is not available from MetaMask yet.');
+            if (block.hash?.toLowerCase() !== blockHash.toLowerCase()) {
+                const error = new Error('The token transaction’s block changed. Check its status in MetaMask before trying again.');
+                error.code = 'wallet_receipt_reorg';
+                throw error;
+            }
+        };
+        let lastError;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await this.assertFundingChain();
+            try {
+                await canonicalBlock();
+                const value = await this.readContractUint(to, data, blockTag);
+                await canonicalBlock();
+                await this.assertFundingChain();
+                if (value >= minimum) return value;
+            } catch (error) {
+                if (error?.code === 'wrong_network' || error?.code === 'wallet_receipt_reorg'
+                    || isWalletRejection(error) || isDefinitelyPreBroadcastSendFailure(error)) throw error;
+                lastError = error;
+            }
+            if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        const error = new Error('The token transaction was mined, but the required balance could not be confirmed. Check your wallet balance and try again.');
+        error.code = 'wallet_state_pending';
+        error.cause = lastError;
+        throw error;
     }
 
     async loadChallengePeriod() {
@@ -1547,18 +1591,18 @@ class ZkapiClient extends EventTarget {
                 throw new Error(`Your wallet has ${formatTokenAmount(tokenBalance)} ${this.billingTokenSymbol}; this deposit needs ${formatTokenAmount(amount)} ${this.billingTokenSymbol}.`);
             }
             onStatus('Minting free test billing tokens… confirm in MetaMask.');
-            await this.sendContractTransaction(
+            const mintReceipt = await this.sendContractTransaction(
                 address,
                 tokenAddress,
                 callData(ABI.mint, [addressWord(address), abiWord(amount - tokenBalance)])
             );
-            tokenBalance = await this.readContractUint(
+            onStatus('Test tokens minted. Checking the confirmed balance…');
+            tokenBalance = await this.readContractUintAtReceipt(
                 tokenAddress,
-                callData(ABI.balanceOf, [addressWord(address)])
+                callData(ABI.balanceOf, [addressWord(address)]),
+                mintReceipt,
+                amount
             );
-            if (tokenBalance < amount) {
-                throw new Error('The test-token mint completed, but the balance is still too low.');
-            }
         }
 
         onStatus('Generating the private note commitment locally…');
