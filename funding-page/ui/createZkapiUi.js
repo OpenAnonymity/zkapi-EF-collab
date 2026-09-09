@@ -49,8 +49,8 @@ export function createZkapiUi(runtime) {
                 const limit = formatModelBudgetUsd(budget.spendingLimitUsd);
                 const rates = formatModelPricing(model?.pricing) || 'Pricing unavailable';
                 return {
-                    budgetLabel: `${limit} key cap · ${limit} minimum balance`,
-                    budgetTooltip: `A new key requires a private balance of at least ${limit} and can spend up to ${limit} in total. Only actual usage is deducted; the cap is not a fee.`,
+                    balanceBadgeLabel: `≥ ${limit}`,
+                    balanceBadgeTooltip: `Requires a private balance of at least ${limit} for a new key. Only actual usage is deducted.`,
                     label: rates,
                     description: formatExactTokenPricing(model?.pricing)
                         || 'The provider did not publish token pricing for this model.'

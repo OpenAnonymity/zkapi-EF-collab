@@ -101,9 +101,12 @@ Tier 8 currently has no assigned models. Unknown ticket counts require an explic
 budget review and fail closed. The browser uses the same live model assignments,
 `:online` normalization, and reasoning fallback as Tickets. New-key acquisition
 waits for live OA tier configuration; cached data is display-only during an outage.
-The picker shows the cap/minimum separately from token rates. A cap is not a fee:
-settlement deducts actual cumulative key usage. The System Panel shows the owned
-active key's real cap, or the selected model's cap when no key is active.
+The picker shows the required balance as a concise badge such as `≥ $2`, using
+the same right-aligned position and style as ticket counts. Its accessible
+tooltip explains the minimum private balance; token rates remain below the model
+name without an additional cap/minimum line. A cap is not a fee: settlement
+deducts actual cumulative key usage. The System Panel shows the owned active
+key's real cap, or the selected model's cap when no key is active.
 
 Requests capture their selected model and reasoning mode before async access.
 Titles retain their cheap helper model but share the initiating chat model's cap.

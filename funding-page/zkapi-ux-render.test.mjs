@@ -99,15 +99,15 @@ const { ChatApp } = await import('../oa-chat/chat/app.js');
 const { createModelPickerInterface } = await import('../oa-chat/chat/ui/appInterface.js');
 configureMessageTemplateServices({ presentation: createZkapiUi({}).presentation });
 
-test('private model pricing shows the key cap and balance proof threshold with token rates', () => {
+test('private model pricing shows a compact minimum-balance badge with token rates', () => {
     const ui = createZkapiUi({});
     const copy = ui.presentation.getModelPricing({
         id: 'vendor/opus-unlisted', pricing: { prompt: '0.000001', completion: '0.000004' }
     }, { reasoningEnabled: true });
-    assert.equal(copy.budgetLabel, '$2 key cap · $2 minimum balance');
+    assert.equal(copy.balanceBadgeLabel, '≥ $2');
     assert.equal(copy.label, '$1/M input · $4/M output');
-    assert.match(copy.budgetTooltip, /at least \$2.*up to \$2 in total/);
-    assert.match(copy.budgetTooltip, /Only actual usage is deducted; the cap is not a fee/);
+    assert.match(copy.balanceBadgeTooltip, /at least \$2 for a new key/);
+    assert.match(copy.balanceBadgeTooltip, /Only actual usage is deducted/);
     assert.match(copy.description, /Input \$0\.000001\/token/);
 });
 
