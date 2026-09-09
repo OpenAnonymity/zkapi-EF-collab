@@ -423,7 +423,7 @@ Both current trial builds explicitly pin `https://org-staging.openanonymity.ai`
 with the composer's `--oa-org-origin` option. Their `build.json` records this
 `oaOrgOrigin`; published runtime bundles contain the staging org origin and no
 production OA org origin. The pinned client commit is
-`a7610210eb81e2b01337fe836695a75c09386512`, and the shared OA commit is
+`fd1b0aee7ac7a930a2b5329413cec9361a427aa7`, and the shared OA commit is
 `8e13e432fe6719e5cb9fe2bf2528b1da247f5189`. Both repositories remain on
 `codex/unified-chat-payment-modes`; main is unchanged.
 
@@ -448,12 +448,12 @@ and proof assets retain their prior digests.
 ## Sepolia trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-1ez6qul56-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-3aa3nawy2-mingyech1.vercel.app/funding/
 - Vercel project: `oa-chat-payment-modes` (`prj_WStqLQHKBCkuugdRkrJCT74PNoIi`)
-- Deployment: `dpl_7WiLEKLhPFQMSe5MDF6FgoGpk9dG` (READY).
+- Deployment: `dpl_6J1h2KGUzcxAnBwejCxagXeNm7FA` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `8a18ccc0623a41e83c451aa7336b8bb4ca829df999d720242ce4820868909a83`.
-- Validation: model-tier and compact balance badge checks are recorded below;
+- Build fingerprint: `0035e57c7347b1f01c25d11744685be0793bf1dc24b1e686219ffe8c7de7f001`.
+- Validation: model-tier, compact balance badge, and settlement UI checks are recorded below;
   fresh adversarial reviews approved both the access policy and panel refresh;
   all 153 published asset digests and immutable manifests matched.
 - The earlier six-scenario browser E2E run passed with simulated external
@@ -503,11 +503,11 @@ selection would restore the production OA org and is not this trial's artifact.
 ## Mainnet trial deployment — 2026-09-08
 
 - App: https://oa-chat-payment-modes-mainnet.vercel.app/funding/
-- Immutable deployment: https://oa-chat-payment-modes-mainnet-j0z2et9xf-mingyech1.vercel.app/funding/
+- Immutable deployment: https://oa-chat-payment-modes-mainnet-m7dznikdn-mingyech1.vercel.app/funding/
 - New project: `oa-chat-payment-modes-mainnet` (`prj_DtdCXeSJ9ZnGc0dYaso3CWTCCihm`).
-- Deployment: `dpl_CbG6GWdnf44xaQ6t9TnXdStWkqhW` (READY).
+- Deployment: `dpl_CdhmKvYVdkRp1W5hCs7Yw2hN3Lna` (READY).
 - Source and OA org: the shared staging pins above.
-- Build fingerprint: `e1387ec35d4e65040b7a95dcb72979f2d1567b9a6d04742137a627b21e577cbb`.
+- Build fingerprint: `58abc01e97108f8e8953b217f20810a628ee39b4c2a75af91707568df95d223f`.
 - All 153 published assets matched. HTML, config, proxied deployment config,
   health, model catalog, root redirect, and security headers passed. Trusted
   pins match the existing chain 1 deployment. Vercel error scan found no logs.
@@ -585,7 +585,7 @@ files were removed from final and superseded deployment stages.
 
 ## Compact minimum balance badges — 2026-09-08
 
-Both current trials use `assets/app-PJK33ZRW.js`. The model picker places the
+The compact badge release used `assets/app-PJK33ZRW.js`. The model picker places the
 private minimum in the same position and CSS classes as the ticket badge,
 showing `≥ $1`, `≥ $2`, `≥ $3`, `≥ $4.50`, or `≥ $6`. The extra cap/minimum
 line was removed; token pricing remains beneath the model name. Hover and
@@ -607,3 +607,26 @@ Both deployments passed all 153 asset hashes, protected immutable manifests,
 config/health/catalog checks, security headers, and network/proof pins. Both
 Vercel error scans were empty. Temporary deployment environment handoffs
 were removed.
+
+
+## Automatic withdrawal settlement UI — 2026-09-08
+
+Both current trials use `assets/app-W3GZG7IX.js`. Balance details no longer
+shows the manual settlement card, countdown, or button. Its unused click
+handler and countdown updater were removed. Withdrawal still awaits the
+active lease settlement (including retirement already in progress) before
+opening the wallet or preparing the withdrawal proof; no runtime or server
+change was needed.
+
+All 73 focused wallet and UX-render checks passed, and an independent review
+approved the removal and confirmed the existing settlement ordering. Chrome
+computer-use checks on Sepolia verified the simplified funded balance dialog
+and its working Withdraw navigation. Mainnet loaded the same bundle and its
+unfunded zkAPI selection opened funding normally. Browser errors were empty;
+original modes, models, transcripts, and drafts were preserved. No new
+inference, withdrawal, or wallet transaction was performed for this UI change.
+
+Both deployments passed all 153 published asset hashes, protected immutable
+manifests, config/health/catalog checks, security headers, and network/proof
+pins. Both Vercel error scans were empty and temporary environment handoffs
+were removed. All changes remain on the feature branch; main is unchanged.
