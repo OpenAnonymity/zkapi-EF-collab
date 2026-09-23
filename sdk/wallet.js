@@ -141,7 +141,7 @@ function encodeWithdrawal(plan, expectedMode, expectedDestination, expectedVault
   const inputs = plan.public_inputs || {};
   const destination = destinationHex(inputs.destination);
   if (destination !== String(expectedDestination || "").toLowerCase()) {
-    throw new Error("The proof destination does not match the connected MetaMask account.");
+    throw new Error("The proof destination does not match the requested withdrawal address.");
   }
   if (expectedVault && String(inputs.contract_address).toLowerCase() !== String(expectedVault).toLowerCase()) {
     throw new Error("The withdrawal proof is bound to a different vault contract.");

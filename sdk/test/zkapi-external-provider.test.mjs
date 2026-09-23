@@ -115,6 +115,60 @@ test('explicit providers are instance scoped and never change the injected provi
     assert.throws(() => a.setWalletProvider({}), /request/);
 });
 
+test('withdrawal rejects invalid or known contract payout addresses before wallet or protocol work', async t => {
+    const c = client();
+    const check = t.mock.method(c, 'assertBalanceNotClaimed', async () => assert.fail('must validate first'));
+    for (const destination of ['', null, FROM + '0', '0x1234', `0x${'00'.repeat(20)}`, VAULT, TOKEN]) {
+        await assert.rejects(c.withdraw('mutual', () => {}, { destination }), /withdrawal address|vault or billing/);
+        await assert.rejects(c.performWithdrawal('escape', () => {}, { destination }), /withdrawal address|vault or billing/);
+    }
+    assert.equal(check.mock.calls.length, 0);
+});
+
+test('concurrent withdrawals cannot coalesce different payout destinations', async t => {
+    const c = client(); const wait = gate();
+    const perform = t.mock.method(c, 'performWithdrawal', async () => wait.promise);
+    const first = c.withdraw('mutual', () => {}, { destination: FROM });
+    const same = c.withdraw('mutual', () => {}, { destination: FROM.toUpperCase().replace('0X', '0x') });
+    await assert.rejects(c.withdraw('mutual', () => {}, { destination: `0x${'ab'.repeat(20)}` }), /already running/);
+    await assert.rejects(c.withdraw('mutual'), /already running/);
+    wait.resolve('done');
+    assert.deepEqual(await Promise.all([first, same]), ['done', 'done']);
+    assert.equal(perform.mock.calls.length, 1);
+});
+
+for (const mode of ['mutual', 'escape']) {
+    test(`${mode} withdrawal binds payout calldata independently of its gas-paying account`, async t => {
+        const h = recoveryHarness(t, 'withdrawal');
+        const destination = `0x${'ab'.repeat(20)}`;
+        h.c.wallet = { note: { note_id: 7 } };
+        h.plan.mode = mode;
+        h.plan.destination = destination;
+        h.plan.public_inputs.destination = destination;
+        h.plan.public_inputs.has_clearance = mode === 'mutual';
+        t.mock.method(h.c, 'assertBalanceNotClaimed', async () => {});
+        t.mock.method(h.c, 'settleActiveLease', async () => {});
+        t.mock.method(h.c, 'connectWallet', async () => FROM);
+        t.mock.method(runtime, 'currentPreparedWithdrawal', async () => null);
+        t.mock.method(runtime, 'prepareWithdrawal', async (requestedMode, requestedDestination) => {
+            assert.equal(requestedMode, mode); assert.equal(requestedDestination, destination); return h.plan;
+        });
+        t.mock.method(runtime, 'claimPreparedWithdrawalSubmission', async () => ({}));
+        t.mock.method(h.c, 'rememberWithdrawal', record => { h.c.withdrawal = record; });
+        t.mock.method(h.c, 'recoverFailedWithdrawalSubmission', async () => null);
+        const sent = t.mock.method(h.c, 'sendContractTransaction', async (from, to, data) => {
+            assert.equal(from, FROM); assert.equal(to, VAULT);
+            assert.equal(data, codec.encodeWithdrawal(h.plan, mode, destination, VAULT));
+            assert.notEqual(from, destination);
+            throw new Error('Stop before broadcasting');
+        });
+        await assert.rejects(h.c.withdraw(mode, () => {}, { destination }), /Stop before broadcasting/);
+        assert.equal(sent.mock.calls.length, 1);
+        assert.equal(h.c.withdrawal.destination, destination);
+        assert.equal(h.c.config.prepared_withdrawal.destination, destination);
+    });
+}
+
 test('provider changes are blocked across RPC waits, nested journal waits and pending saved transactions', async () => {
     const wait = gate(); const c = client(); const p = provider(); const next = provider();
     c.setWalletProvider(p);

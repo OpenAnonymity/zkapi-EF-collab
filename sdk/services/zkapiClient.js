@@ -60,6 +60,20 @@ function readStoredWithdrawal() {
     }
 }
 
+function normalizeWithdrawalDestination(destination, funding) {
+    if (destination === undefined) return null;
+    if (typeof destination !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(destination)
+        || /^0x0{40}$/i.test(destination)) {
+        throw new TypeError('Choose a valid nonzero Ethereum withdrawal address.');
+    }
+    const normalized = destination.toLowerCase();
+    if ([funding?.contract_address, funding?.demo_billing_token_address]
+        .some(address => address?.toLowerCase() === normalized)) {
+        throw new TypeError('The withdrawal address cannot be the vault or billing token contract.');
+    }
+    return normalized;
+}
+
 function walletErrorCode(error) {
     return error?.code
         ?? error?.cause?.code
@@ -1987,14 +2001,16 @@ class ZkapiClient extends EventTarget {
         return { noteId: Number(deposited.noteId), amount: Number(amount), receipt };
     }
 
-    async withdraw(mode, onStatus = () => {}) {
+    async withdraw(mode, onStatus = () => {}, { destination } = {}) {
+        const requestedDestination = normalizeWithdrawalDestination(destination, this.config?.funding);
+        const operationKey = `${mode}:${requestedDestination || ''}`;
         if (this.withdrawPromise) {
-            if (this.withdrawPromiseKey === mode) return this.withdrawPromise;
+            if (this.withdrawPromiseKey === operationKey) return this.withdrawPromise;
             throw new Error('A different withdrawal action is already running.');
         }
-        const operation = this.performWithdrawal(mode, onStatus);
+        const operation = this.performWithdrawal(mode, onStatus, { destination });
         this.withdrawPromise = operation;
-        this.withdrawPromiseKey = mode;
+        this.withdrawPromiseKey = operationKey;
         try {
             return await operation;
         } finally {
@@ -2005,7 +2021,8 @@ class ZkapiClient extends EventTarget {
         }
     }
 
-    async performWithdrawal(mode, onStatus = () => {}) {
+    async performWithdrawal(mode, onStatus = () => {}, { destination: requested } = {}) {
+        const requestedDestination = normalizeWithdrawalDestination(requested, this.config?.funding);
         const note = this.note;
         if (!note) throw new Error('There is no active private note to withdraw.');
         if (!['mutual', 'escape'].includes(mode)) throw new Error('Choose a valid withdrawal mode.');
@@ -2032,10 +2049,14 @@ class ZkapiClient extends EventTarget {
             }
             : this.config?.prepared_withdrawal;
         if (prepared?.transaction_hash) mode = prepared.mode;
+        if (requestedDestination && prepared?.destination
+            && prepared.destination.toLowerCase() !== requestedDestination) {
+            throw new Error('This withdrawal is already bound to a different destination. Resume it with its saved address.');
+        }
         // The connected account only pays gas. A resumed plan keeps its
         // original payout destination, so recovery remains permissionless and
         // a harmless account switch cannot strand the note.
-        const destination = prepared?.destination || from;
+        const destination = prepared?.destination || requestedDestination || from;
 
         const withdrawal = {
             phase: 'prepared',

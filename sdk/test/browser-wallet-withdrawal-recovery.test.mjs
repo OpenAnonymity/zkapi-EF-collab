@@ -851,7 +851,7 @@ test('browser withdrawal recovery invariants', async t => {
         }
     });
 
-    await t.test('mutual-close intent survives MetaMask cancellation and client/runtime reload', async () => {
+    await t.test('independent payout destination survives wallet cancellation and client/runtime reload', async () => {
         localStorage.clear();
         const durable = durableState(baseRuntime());
         attachDurableRuntime(browserWalletRuntime, durable);
@@ -893,9 +893,10 @@ test('browser withdrawal recovery invariants', async t => {
             withdrawal: null,
             withdrawals: [],
             settleActiveLease: async () => null,
-            connectWallet: async () => DESTINATION,
+            connectWallet: async () => `0x${'11'.repeat(20)}`,
             readContractUint: async () => 1n,
-            sendContractTransaction: async () => {
+            sendContractTransaction: async (from) => {
+                assert.equal(from, `0x${'11'.repeat(20)}`);
                 throw Object.assign(new Error('User rejected the request in MetaMask.'), { code: 4001 });
             },
             refresh: async () => zkapiClient.snapshot()
@@ -904,7 +905,7 @@ test('browser withdrawal recovery invariants', async t => {
         let rejection;
         try {
             await assert.rejects(
-                () => zkapiClient.performWithdrawal('mutual'),
+                () => zkapiClient.withdraw('mutual', () => {}, { destination: DESTINATION }),
                 error => {
                     rejection = error;
                     return error.code === 4001;
@@ -938,6 +939,14 @@ test('browser withdrawal recovery invariants', async t => {
                 transactionHash: null,
                 clearanceReserved: true
             });
+            await assert.rejects(
+                () => zkapiClient.withdraw('mutual', () => {}, { destination: `0x${'22'.repeat(20)}` }),
+                /already bound to a different destination/
+            );
+            // A retry without an explicit destination must never redirect the
+            // payout to the gas-paying account, even after the UI reloads.
+            await assert.rejects(() => zkapiClient.withdraw('mutual'), { code: 4001 });
+            assert.equal(durable.value.preparedWithdrawal.destination, DESTINATION);
         } finally {
             restoreClient();
         }

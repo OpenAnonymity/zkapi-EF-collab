@@ -59,9 +59,17 @@ always a no-op.
 A host can implement manual signing without a wallet extension: obtain the
 user's public account address for `eth_requestAccounts`, use a fixed public RPC
 for reads, and display the exact `eth_sendTransaction` payload for submission
-with the user's own wallet. The connected address funds deposits and is the
-destination of a newly prepared withdrawal; resuming an existing withdrawal
-retains its original destination. Plain ERC-20 transfers do not create private
+with the user's own wallet. The connected address funds deposits and pays
+withdrawal gas. By default it is also the destination of a newly prepared
+withdrawal. To choose an independent payout address, call
+`client.withdraw(mode, onStatus, { destination })`, where `mode` is `mutual` or
+`escape`. The destination must be a nonzero Ethereum address, distinct from the
+configured vault and billing token. The host must confirm the intended address
+and network with the user. The SDK binds it into the durable proof; an explicit
+different destination on a later call is rejected. Omitting the option when
+resuming always retains the saved destination, even if the gas-paying account
+changes. Concurrent withdrawals with different requested destinations cannot
+share an action. Plain ERC-20 transfers do not create private
 notes: deposits require the SDK's approval and vault calldata.
 
 For durable manual signing, the provider implements
