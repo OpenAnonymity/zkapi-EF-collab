@@ -88,6 +88,19 @@ Resumption is idempotent when a previous journal write succeeded but host
 acknowledgement was interrupted. The host owns the public pending-send record;
 private wallet material and all settlement and payout decisions stay in the SDK.
 
+To recover fee speed-ups while an approval or mint is still awaiting its receipt,
+providers may implement `getVerifiedTransactionHashes(originalHash)`,
+`beginTransactionReceiptWait(originalHash)`, and
+`endTransactionReceiptWait(originalHash)`. Return only hashes independently
+verified against the same original chain, sender, target, calldata, value and
+nonce. The SDK checks each candidate's own receipt and acknowledges the hash
+that actually mined; either the original or its replacement may win the nonce.
+The host should add newly verified hashes to the active receipt consumer rather
+than start a concurrent resume operation. Preserve that consumer's completed
+hash through cross-tab acknowledgment, and make repeated acknowledgments of
+completed transactions harmless to any newer pending transaction. These hooks
+apply only to token requests; deposit/withdrawal recovery remains journal-owned.
+
 In the host build:
 
 ```js

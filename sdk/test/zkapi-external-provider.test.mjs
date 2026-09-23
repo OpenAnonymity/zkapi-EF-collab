@@ -314,3 +314,72 @@ for (const kind of ['deposit', 'withdrawal', 'finalization']) {
         await h.resume(); assert.deepEqual(h.p.acks, [HASH]);
     });
 }
+
+test('manual token receipt follows verified fee replacements without changing receipt identity', async () => {
+    const c = client();
+    const replacement = `0x${'66'.repeat(32)}`;
+    const steps = [];
+    const p = provider({ eth_getTransactionReceipt: ({ params }) => {
+        steps.push(params[0]);
+        return { transactionHash: replacement, status: '0x1' };
+    } });
+    p.getVerifiedTransactionHashes = () => [replacement, HASH];
+    p.beginTransactionReceiptWait = hash => steps.push(`begin:${hash}`);
+    p.endTransactionReceiptWait = hash => steps.push(`end:${hash}`);
+    p.acknowledgeTransaction = async hash => steps.push(`ack:${hash}`);
+    c.setWalletProvider(p);
+    const receipt = await c.acknowledgeExternalTokenTransaction(HASH);
+    assert.equal(receipt.transactionHash, replacement);
+    assert.deepEqual(steps, [`begin:${HASH}`, replacement, `ack:${replacement}`, `end:${HASH}`]);
+    assert.equal(p.calls.some(call => call.method === 'eth_sendTransaction'), false);
+});
+
+test('manual token receipt can acknowledge the original when it wins the replacement nonce race', async () => {
+    const c = client();
+    const replacement = `0x${'66'.repeat(32)}`;
+    const reads = [];
+    const p = provider({ eth_getTransactionReceipt: ({ params }) => {
+        reads.push(params[0]);
+        return params[0] === HASH ? { transactionHash: HASH, status: '0x1' } : null;
+    } });
+    p.getVerifiedTransactionHashes = () => [replacement, HASH];
+    const acknowledgments = [];
+    p.acknowledgeTransaction = async hash => acknowledgments.push(hash);
+    c.setWalletProvider(p);
+    const receipt = await c.acknowledgeExternalTokenTransaction(HASH);
+    assert.equal(receipt.transactionHash, HASH);
+    assert.deepEqual(reads, [replacement, HASH]);
+    assert.deepEqual(acknowledgments, [HASH]);
+});
+
+test('replacement receipt mismatch cannot acknowledge any manual transaction', async () => {
+    const c = client();
+    const replacement = `0x${'66'.repeat(32)}`;
+    const p = provider({ eth_getTransactionReceipt: () => ({ transactionHash: HASH, status: '0x1' }) });
+    p.getVerifiedTransactionHashes = () => [replacement, HASH];
+    let acknowledged = false;
+    let ended = false;
+    p.acknowledgeTransaction = async () => { acknowledged = true; };
+    p.endTransactionReceiptWait = () => { ended = true; };
+    c.setWalletProvider(p);
+    await assert.rejects(c.acknowledgeExternalTokenTransaction(HASH), /different transaction hash/);
+    assert.equal(acknowledged, false);
+    assert.equal(ended, true);
+});
+
+test('reverted fee replacement finality uses the actual replacement hash', async t => {
+    const c = client();
+    const replacement = `0x${'66'.repeat(32)}`;
+    const p = provider({ eth_getTransactionReceipt: () => ({ transactionHash: replacement, status: '0x0' }) });
+    p.getVerifiedTransactionHashes = () => [replacement, HASH];
+    const acknowledged = [];
+    p.acknowledgeTransaction = async hash => acknowledged.push(hash);
+    c.setWalletProvider(p);
+    t.mock.method(c, 'browserRevertedReceiptFinality', async (hash, receipt) => {
+        assert.equal(hash, replacement);
+        assert.equal(receipt.transactionHash, replacement);
+        return { finalized: true };
+    });
+    await assert.rejects(c.acknowledgeExternalTokenTransaction(HASH), /reverted/);
+    assert.deepEqual(acknowledged, [replacement]);
+});

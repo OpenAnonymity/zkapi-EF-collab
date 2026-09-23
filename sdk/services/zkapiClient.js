@@ -1058,15 +1058,27 @@ class ZkapiClient extends EventTarget {
         }
     }
 
-    async waitForReceipt(hash) {
+    async waitForReceipt(hash, candidateHashes = null) {
         let consecutiveReadFailures = 0;
         for (let attempt = 0; attempt < 180; attempt += 1) {
             let receipt;
             try {
-                receipt = await this.ethereum.request({
-                    method: 'eth_getTransactionReceipt',
-                    params: [hash]
-                });
+                const candidates = candidateHashes ? candidateHashes(hash) : [hash];
+                if (candidateHashes && (!Array.isArray(candidates) || !candidates.length
+                    || candidates.some(candidate => !/^0x[0-9a-f]{64}$/i.test(candidate)))) {
+                    throw new Error('The external wallet returned invalid receipt candidates.');
+                }
+                for (const candidate of candidates) {
+                    receipt = await this.ethereum.request({
+                        method: 'eth_getTransactionReceipt',
+                        params: [candidate]
+                    });
+                    if (receipt && candidateHashes
+                        && String(receipt.transactionHash || '').toLowerCase() !== candidate.toLowerCase()) {
+                        throw new Error('The external transaction receipt has a different transaction hash.');
+                    }
+                    if (receipt) break;
+                }
                 consecutiveReadFailures = 0;
             } catch (failure) {
                 const error = normalizeWalletError(failure);
@@ -1119,17 +1131,28 @@ class ZkapiClient extends EventTarget {
     }
 
     async acknowledgeExternalTokenTransaction(hash) {
-        if (typeof this.ethereum.acknowledgeTransaction !== 'function') return this.waitForReceipt(hash);
+        const provider = this.ethereum;
+        if (typeof provider.acknowledgeTransaction !== 'function') return this.waitForReceipt(hash);
+        // A manual wallet can verify a fee replacement while this token
+        // approval/mint is awaiting its receipt. Check every verified version:
+        // either original or replacement may win the identical nonce, and a
+        // receipt must always retain the hash the RPC actually returned.
+        const candidates = typeof provider.getVerifiedTransactionHashes === 'function'
+            ? value => provider.getVerifiedTransactionHashes(value) : null;
+        provider.beginTransactionReceiptWait?.(hash);
         try {
-            const receipt = await this.waitForReceipt(hash);
-            await this.ethereum.acknowledgeTransaction?.(hash);
+            const receipt = await this.waitForReceipt(hash, candidates);
+            await provider.acknowledgeTransaction(candidates ? receipt.transactionHash : hash);
             return receipt;
         } catch (error) {
             if (error.transactionReceipt) {
-                const finality = await this.browserRevertedReceiptFinality(hash, error.transactionReceipt);
-                if (finality.finalized) await this.ethereum.acknowledgeTransaction?.(hash);
+                const receiptHash = candidates ? error.transactionReceipt.transactionHash : hash;
+                const finality = await this.browserRevertedReceiptFinality(receiptHash, error.transactionReceipt);
+                if (finality.finalized) await provider.acknowledgeTransaction(receiptHash);
             }
             throw error;
+        } finally {
+            provider.endTransactionReceiptWait?.(hash);
         }
     }
 
