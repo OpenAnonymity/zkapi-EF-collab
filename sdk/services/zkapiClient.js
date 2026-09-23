@@ -6,6 +6,8 @@ import { bufferedGasLimit } from './zkapiGas.mjs';
 import { normalizeWalletError, walletErrorMessage } from './zkapiWalletError.mjs';
 import { backgroundWithdrawalClaims, isUnsubmittedParkedMutualWithdrawal } from './zkapiWithdrawalRecovery.mjs';
 import { deriveExpiryRecords, readFinalizedExpiryClaims } from './zkapiExpiryHistory.mjs';
+import { externalRecoveryContext, sameAddress, externalTransactionNonce, assertExternalTransaction,
+    hasDurableTransactionHash } from './zkapiExternalTransactions.mjs';
 
 const WITHDRAWAL_STORAGE_KEY = 'zkapi-withdrawal-v2';
 const SESSION_HEADER = 'x-zkapi-session-id';
@@ -13,6 +15,10 @@ const SESSION_HEADER = 'x-zkapi-session-id';
 // supports it. A confirmation-depth fallback keeps recovery moving on older
 // providers without ever blocking the user from selecting a fresh note.
 const CLOSE_FINALITY_FALLBACK_BLOCKS = 64;
+
+// One provider is retained across all nested/concurrent asynchronous client
+// operations. In particular a manual signing prompt can outlive many RPCs.
+const walletProviders = new WeakMap();
 
 const {
     ABI,
@@ -139,6 +145,7 @@ function walletNonceNumber(value, depth = 0) {
 class ZkapiClient extends EventTarget {
     constructor() {
         super();
+        walletProviders.set(this, { override: null, active: null, operations: 0 });
         this.config = null;
         this.wallet = null;
         this.walletAddress = null;
@@ -229,10 +236,10 @@ class ZkapiClient extends EventTarget {
     }
 
     async reconcileBrowserWithdrawalsOnLoad() {
-        if (!globalThis.ethereum || !this.config?.funding?.chain_id) return false;
+        if (!this.ethereum || !this.config?.funding?.chain_id) return false;
         try {
             const currentChain = Number.parseInt(
-                await globalThis.ethereum.request({ method: 'eth_chainId' }),
+                await this.ethereum.request({ method: 'eth_chainId' }),
                 16
             );
             if (currentChain !== Number(this.config.funding.chain_id)) return false;
@@ -293,14 +300,14 @@ class ZkapiClient extends EventTarget {
         if (this.backgroundReconciliationPromise) return this.backgroundReconciliationPromise;
         const operation = (async () => {
             await this.refresh({ quiet: true });
-            if (!this.browserMode || !globalThis.ethereum || !this.config?.funding?.chain_id) {
+            if (!this.browserMode || !this.ethereum || !this.config?.funding?.chain_id) {
                 return false;
             }
             if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
                 return false;
             }
             const currentChain = Number.parseInt(
-                await globalThis.ethereum.request({ method: 'eth_chainId' }),
+                await this.ethereum.request({ method: 'eth_chainId' }),
                 16
             );
             if (currentChain !== Number(this.config.funding.chain_id)) return false;
@@ -364,17 +371,61 @@ class ZkapiClient extends EventTarget {
         return operation;
     }
 
+    get ethereum() {
+        const state = walletProviders.get(this);
+        return state.operations ? state.active : state.override || globalThis.ethereum;
+    }
+
+    get walletProviderBusy() {
+        return walletProviders.get(this).operations > 0;
+    }
+
+    setWalletProvider(provider = null) {
+        if (provider !== null && (typeof provider !== 'object' || typeof provider.request !== 'function')) {
+            throw new TypeError('The wallet provider must implement EIP-1193 request().');
+        }
+        const state = walletProviders.get(this);
+        if (state.override === provider) return this.ethereum;
+        if (state.operations || state.override?.hasPendingTransaction === true) {
+            const error = new Error('Wait for the current wallet action to finish before changing payment methods.');
+            error.code = 'wallet_provider_busy';
+            throw error;
+        }
+        this.detachWalletEvents();
+        state.override = provider;
+        this.walletAddress = null;
+        this.attachWalletEvents();
+        return this.ethereum;
+    }
+
+    detachWalletEvents() {
+        const attached = this.walletEventHandlers;
+        if (!attached) return;
+        if (typeof attached.provider.removeListener === 'function') {
+            attached.provider.removeListener('accountsChanged', attached.accountsChanged);
+            attached.provider.removeListener('chainChanged', attached.chainChanged);
+        }
+        this.walletEventHandlers = null;
+    }
+
     attachWalletEvents() {
-        if (!globalThis.ethereum?.on || this.walletEventsAttached) return;
-        this.walletEventsAttached = true;
-        globalThis.ethereum.on('accountsChanged', (accounts) => {
+        const provider = this.ethereum;
+        if (this.walletEventHandlers?.provider === provider) return;
+        this.detachWalletEvents();
+        if (typeof provider?.on !== 'function') return;
+        const accountsChanged = (accounts) => {
+            if (this.ethereum !== provider) return;
             this.walletAddress = accounts?.[0] || null;
             this.emitChange('wallet-account');
-        });
-        globalThis.ethereum.on('chainChanged', () => {
+        };
+        const chainChanged = () => {
+            if (this.ethereum !== provider) return;
             this.walletAddress = null;
             this.emitChange('wallet-network');
-        });
+        };
+        this.walletEventHandlers = { provider, accountsChanged, chainChanged };
+        provider.on('accountsChanged', accountsChanged);
+        provider.on('chainChanged', chainChanged);
     }
 
     snapshot() {
@@ -722,7 +773,7 @@ class ZkapiClient extends EventTarget {
             if (!deriveExpiryRecords(this.deposits).some(record => record.status === 'expired')) {
                 return { complete: true, claims: [] };
             }
-            if (!globalThis.ethereum?.request) throw new Error('Open MetaMask on the balance’s network to check expiry payments. No transaction is needed.');
+            if (!this.ethereum?.request) throw new Error('Open MetaMask on the balance’s network to check expiry payments. No transaction is needed.');
             const funding = this.config.funding;
             const deploymentId = browserWalletRuntime.manifest.deployment_id;
             const historyIdentity = JSON.stringify(this.deposits.filter(record => record.status === 'confirmed')
@@ -730,7 +781,7 @@ class ZkapiClient extends EventTarget {
             const scan = this.expiryScan?.deploymentId === deploymentId
                 && this.expiryScan.historyIdentity === historyIdentity ? this.expiryScan : null;
             const result = await readFinalizedExpiryClaims({
-                request: request => globalThis.ethereum.request(request),
+                request: request => this.ethereum.request(request),
                 vaultAddress: funding.contract_address,
                 chainId: funding.chain_id,
                 deposits: this.deposits,
@@ -888,17 +939,17 @@ class ZkapiClient extends EventTarget {
     async ensureNetwork() {
         const wanted = Number(this.config?.funding?.chain_id);
         if (!Number.isFinite(wanted)) throw new Error('The payment deployment did not advertise a chain ID.');
-        const current = Number.parseInt(await globalThis.ethereum.request({ method: 'eth_chainId' }), 16);
+        const current = Number.parseInt(await this.ethereum.request({ method: 'eth_chainId' }), 16);
         if (current === wanted) return;
         const chainId = `0x${wanted.toString(16)}`;
         try {
-            await globalThis.ethereum.request({
+            await this.ethereum.request({
                 method: 'wallet_switchEthereumChain',
                 params: [{ chainId }]
             });
         } catch (error) {
             if (error.code !== 4902) throw error;
-            await globalThis.ethereum.request({
+            await this.ethereum.request({
                 method: 'wallet_addEthereumChain',
                 params: [this.chainParameters(wanted, this.config?.funding?.demo_rpc_url)]
             });
@@ -907,9 +958,9 @@ class ZkapiClient extends EventTarget {
 
     async assertFundingChain() {
         const wanted = Number(this.config?.funding?.chain_id);
-        if (!Number.isFinite(wanted) || !globalThis.ethereum) return;
+        if (!Number.isFinite(wanted) || !this.ethereum) return;
         const current = Number.parseInt(
-            await globalThis.ethereum.request({ method: 'eth_chainId' }),
+            await this.ethereum.request({ method: 'eth_chainId' }),
             16
         );
         if (current !== wanted) {
@@ -920,11 +971,12 @@ class ZkapiClient extends EventTarget {
     }
 
     async connectWallet() {
-        if (!globalThis.ethereum) {
+        if (!this.ethereum) {
             throw new Error('MetaMask was not detected. Install or enable it, then reload this page.');
         }
+        this.attachWalletEvents();
         if (!this.config) await this.refresh();
-        const accounts = await globalThis.ethereum.request({ method: 'eth_requestAccounts' });
+        const accounts = await this.ethereum.request({ method: 'eth_requestAccounts' });
         await this.ensureNetwork();
         this.walletAddress = accounts?.[0] || null;
         if (!this.walletAddress) throw new Error('MetaMask did not return an account.');
@@ -934,7 +986,7 @@ class ZkapiClient extends EventTarget {
     }
 
     async readContractUint(to, data, blockTag = 'latest') {
-        const value = await globalThis.ethereum.request({
+        const value = await this.ethereum.request({
             method: 'eth_call',
             params: [{ to, data }, blockTag]
         });
@@ -953,7 +1005,7 @@ class ZkapiClient extends EventTarget {
         // instead, and retry only reads while the RPC nodes catch up. Never
         // mint again merely because a post-transaction balance read is stale.
         const canonicalBlock = async () => {
-            const block = await globalThis.ethereum.request({
+            const block = await this.ethereum.request({
                 method: 'eth_getBlockByNumber', params: [blockTag, false]
             });
             if (!block) throw new Error('The confirmed block is not available from MetaMask yet.');
@@ -987,7 +1039,7 @@ class ZkapiClient extends EventTarget {
 
     async loadChallengePeriod() {
         const vault = this.config?.funding?.contract_address;
-        if (!vault || !globalThis.ethereum) return;
+        if (!vault || !this.ethereum) return;
         // Both published v2 vaults expose the original CHALLENGE_PERIOD()
         // getter. Probe it first so MetaMask does not report a benign
         // `execution reverted` RPC warning while connecting. Keep the newer
@@ -1011,7 +1063,7 @@ class ZkapiClient extends EventTarget {
         for (let attempt = 0; attempt < 180; attempt += 1) {
             let receipt;
             try {
-                receipt = await globalThis.ethereum.request({
+                receipt = await this.ethereum.request({
                     method: 'eth_getTransactionReceipt',
                     params: [hash]
                 });
@@ -1044,7 +1096,7 @@ class ZkapiClient extends EventTarget {
 
     async submittedTransactionMetadata(transactionHash, fallbackFrom = null) {
         try {
-            const transaction = await globalThis.ethereum.request({
+            const transaction = await this.ethereum.request({
                 method: 'eth_getTransactionByHash',
                 params: [transactionHash]
             });
@@ -1062,13 +1114,173 @@ class ZkapiClient extends EventTarget {
         }
     }
 
+    externalRecoveryContext(recovery) {
+        return externalRecoveryContext(recovery, this.config?.funding, browserWalletRuntime.manifest?.deployment_id);
+    }
+
+    async acknowledgeExternalTokenTransaction(hash) {
+        if (typeof this.ethereum.acknowledgeTransaction !== 'function') return this.waitForReceipt(hash);
+        try {
+            const receipt = await this.waitForReceipt(hash);
+            await this.ethereum.acknowledgeTransaction?.(hash);
+            return receipt;
+        } catch (error) {
+            if (error.transactionReceipt) {
+                const finality = await this.browserRevertedReceiptFinality(hash, error.transactionReceipt);
+                if (finality.finalized) await this.ethereum.acknowledgeTransaction?.(hash);
+            }
+            throw error;
+        }
+    }
+
+    async resumeExternalTransaction({ transaction, hash, context }) {
+        if (!this.browserMode) throw new Error('External transaction recovery requires the browser wallet.');
+        if (this.depositPromise || this.withdrawPromise || this.finalizePromise
+            || this.backgroundWithdrawalPromises?.size) {
+            throw new Error('The original wallet action is still running. Return its transaction ID to that action.');
+        }
+        const funding = this.config?.funding;
+        if (context?.version !== 1 || context.deploymentId !== browserWalletRuntime.manifest?.deployment_id
+            || Number(context.chainId) !== Number(funding?.chain_id)
+            || !sameAddress(context.contractAddress, funding?.contract_address)
+            || !['token', 'deposit', 'withdrawal', 'background-withdrawal',
+                'background-replacement', 'finalization'].includes(context.kind)) {
+            throw new Error('The saved external transaction belongs to a different payment deployment.');
+        }
+        await this.assertFundingChain();
+        const actual = await this.ethereum.request({ method: 'eth_getTransactionByHash', params: [hash] });
+        const metadata = assertExternalTransaction(actual, transaction, hash, funding.chain_id);
+        await this.assertFundingChain();
+
+        if (context.kind === 'token') {
+            if (!sameAddress(transaction.to, funding.demo_billing_token_address)
+                || ![ABI.approve, ABI.mint].includes(transaction.data.slice(2, 10).toLowerCase())) {
+                throw new Error('The saved transaction is not a billing-token request.');
+            }
+            const receipt = await this.acknowledgeExternalTokenTransaction(hash);
+            return { kind: context.kind, transactionHash: hash, status: 'confirmed', receipt };
+        }
+
+        if (!sameAddress(transaction.to, funding.contract_address)) {
+            throw new Error('The external transaction targets a different private vault.');
+        }
+        await browserWalletRuntime.reload();
+        const runtime = browserWalletRuntime.runtime;
+        const records = browserWalletRuntime.withdrawals || [];
+        let known = [runtime?.pendingDeposit, runtime?.preparedWithdrawal,
+            ...(runtime?.lateDepositAttempts || []), ...(runtime?.lateWithdrawalAttempts || []),
+            ...(browserWalletRuntime.deposits || []), ...records]
+            .some(record => hasDurableTransactionHash(record, hash));
+        // A read-only recovery in this or another tab can already have moved
+        // the note out of its pending slot before the host supplies the hash.
+        // A matching successful event may acknowledge that completed work;
+        // it never creates a note or bypasses the normal confirmation path.
+        if (!known && context.kind === 'deposit') {
+            const recovered = (browserWalletRuntime.deposits || []).find(record =>
+                record.status === 'confirmed' && record.operationId === context.operationId
+                && Number(record.noteId) === Number(context.noteId)
+                && Number(record.amount) === Number(context.amount));
+            if (recovered) {
+                const receipt = await this.ethereum.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+                const event = receipt?.status === '0x1' && parseNoteDeposited(receipt, funding.contract_address);
+                known = Boolean(String(receipt?.transactionHash).toLowerCase() === hash.toLowerCase()
+                    && event?.noteId === BigInt(context.noteId) && event.amount === BigInt(context.amount)
+                    && BigInt(event.commitment) === BigInt(context.commitment));
+            }
+        }
+        if (!known) {
+            const sameClaim = (operationId, submissionId) => operationId === context.operationId
+                && submissionId === context.submissionId && Boolean(operationId && submissionId);
+            const sameMetadata = (from, nonce) => sameAddress(from, metadata.from)
+                && externalTransactionNonce(nonce) === metadata.nonce;
+            const retainedClaim = (operationId, submissionId, from, nonce, history = []) => {
+                if (sameClaim(operationId, submissionId)) return sameMetadata(from, nonce);
+                return history.some(claim => claim.submissionId === context.submissionId
+                    && (claim.operationId ?? operationId) === context.operationId
+                    && (claim.from == null || sameAddress(claim.from, metadata.from))
+                    && (claim.nonce == null || externalTransactionNonce(claim.nonce) === metadata.nonce)
+                    && (claim.generation == null || Number(claim.generation) === Number(context.generation)));
+            };
+            const sameData = data => data.toLowerCase() === transaction.data.toLowerCase();
+            const reference = { ...context };
+
+            if (context.kind === 'deposit') {
+                const plan = runtime?.pendingDeposit;
+                if (!plan || !retainedClaim(plan.operationId, plan.submissionId,
+                    plan.submissionFrom, plan.submissionNonce, plan.ambiguousSubmissions)
+                    || Number(context.noteId) !== Number(plan.next_note_id)
+                    || Number(context.amount) !== Number(plan.amount)
+                    || String(context.commitment).toLowerCase() !== String(plan.commitment).toLowerCase()
+                    || !sameData(encodeDeposit(plan, BigInt(plan.amount)))) {
+                    throw new Error('The external deposit no longer matches its saved private note.');
+                }
+                // Only the SDK rehydrates the note secret; the provider never receives it.
+                await browserWalletRuntime.rememberPendingDepositTransaction(hash,
+                    { ...reference, secret: plan.secret }, metadata);
+            } else if (context.kind === 'withdrawal') {
+                const selected = runtime?.preparedWithdrawal;
+                const plan = selected?.operationId === context.operationId ? selected
+                    : records.find(record => Number(record.noteId) === Number(context.noteId)
+                        && record.preparedWithdrawal?.operationId === context.operationId)?.preparedWithdrawal;
+                if (!plan || !retainedClaim(plan.operationId, plan.submissionId,
+                    plan.submissionFrom, plan.submissionNonce, plan.ambiguousSubmissions)
+                    || Number(context.noteId) !== Number(plan.noteId ?? plan.public_inputs?.note_id)
+                    || context.mode !== plan.mode || !sameAddress(context.destination, plan.destination)
+                    || Number(context.finalBalance) !== Number(plan.public_inputs?.final_balance)
+                    || !sameData(encodeWithdrawal(plan, plan.mode, plan.destination, funding.contract_address))) {
+                    throw new Error('The external withdrawal no longer matches its saved proof.');
+                }
+                await browserWalletRuntime.rememberPreparedWithdrawalTransaction(hash, reference, metadata);
+            } else if (['background-withdrawal', 'background-replacement'].includes(context.kind)) {
+                const record = records.find(entry => entry.recordId === context.recordId
+                    || (context.kind === 'background-replacement' && Number(entry.noteId) === Number(context.noteId)));
+                const plan = record?.preparedWithdrawal;
+                const history = [...(record?.dismissedStartSubmissionClaims || []),
+                    ...(record?.supersededStartSubmissionClaims || []),
+                    ...(record?.ambiguousStartReplacements || []), ...(record?.transactionAttempts || [])];
+                if (!record || !plan || !retainedClaim(record.startOperationId, record.startSubmissionId,
+                    record.startSubmissionFrom, record.startSubmissionNonce, history)
+                    || Number(context.noteId) !== Number(record.noteId)
+                    || context.mode !== plan.mode || !sameAddress(context.destination, plan.destination)
+                    || Number(context.finalBalance) !== Number(plan.public_inputs?.final_balance)
+                    || !sameData(encodeWithdrawal(plan, plan.mode, plan.destination, funding.contract_address))) {
+                    throw new Error('The external transaction no longer matches its saved background withdrawal.');
+                }
+                if (context.kind === 'background-replacement') {
+                    await browserWalletRuntime.rememberPreparedWithdrawalTransaction(hash, reference, metadata);
+                } else {
+                    await browserWalletRuntime.rememberBackgroundWithdrawalTransaction(hash, reference, metadata);
+                }
+            } else if (context.kind === 'finalization') {
+                const record = records.find(entry => entry.recordId === context.recordId);
+                const activeGeneration = Number(context.generation) === Number(record?.finalizeGeneration || 0);
+                if (!record || !retainedClaim(record.finalizeOperationId,
+                    activeGeneration ? record.finalizeSubmissionId : null,
+                    record.finalizeSubmissionFrom, record.finalizeSubmissionNonce,
+                    [...(record.ambiguousFinalizationSubmissions || []), ...(record.finalizeAttempts || [])])
+                    || Number(context.noteId) !== Number(record.noteId)
+                    || !sameAddress(context.destination, record.destination)
+                    || !sameData(encodeFinalizeEscape(record.noteId))) {
+                    throw new Error('The external transaction no longer matches its saved finalization.');
+                }
+                await browserWalletRuntime.rememberWithdrawalFinalization(record.recordId, hash, reference, metadata);
+            } else {
+                throw new Error('The external transaction has an unsupported recovery kind.');
+            }
+        }
+        await this.ethereum.acknowledgeTransaction?.(hash);
+        await this.refresh({ quiet: true });
+        return { kind: context.kind, transactionHash: hash, recordId: context.recordId || null, status: 'submitted' };
+    }
+
     async sendContractTransaction(
         from,
         to,
         data,
         onSubmitted = null,
         onPrepared = null,
-        preparedNonce = null
+        preparedNonce = null,
+        externalRecovery = null
     ) {
         const normalizedPreparedNonce = preparedNonce == null
             ? null
@@ -1098,7 +1310,7 @@ class ZkapiClient extends EventTarget {
             // create an invalid 21M-gas transaction. Preflight the exact call
             // and set only a bounded gas limit; MetaMask still chooses all
             // EIP-1559 fee fields and the user remains in control of the rate.
-            const estimate = await globalThis.ethereum.request({
+            const estimate = await this.ethereum.request({
                 method: 'eth_estimateGas',
                 params: [transaction]
             });
@@ -1120,7 +1332,7 @@ class ZkapiClient extends EventTarget {
             try {
                 let nonce = normalizedPreparedNonce;
                 if (nonce == null) {
-                    const pendingNonce = await globalThis.ethereum.request({
+                    const pendingNonce = await this.ethereum.request({
                         method: 'eth_getTransactionCount',
                         params: [from, 'pending']
                     });
@@ -1136,9 +1348,12 @@ class ZkapiClient extends EventTarget {
             }
         }
         try {
-            hash = await globalThis.ethereum.request({
+            hash = await this.ethereum.request({
                 method: 'eth_sendTransaction',
-                params: [transaction]
+                params: [transaction],
+                ...(typeof this.ethereum.acknowledgeTransaction === 'function'
+                    ? { zkapiRecovery: this.externalRecoveryContext(externalRecovery) }
+                    : {})
             });
         } catch (error) {
             if (isWalletRejection(error)) {
@@ -1155,12 +1370,16 @@ class ZkapiClient extends EventTarget {
             throw tagTransactionError(error, 'send', true);
         }
         try {
-            if (onSubmitted) await onSubmitted(hash);
+            if (onSubmitted) {
+                await onSubmitted(hash);
+                await this.ethereum.acknowledgeTransaction?.(hash);
+            }
         } catch (error) {
             throw tagTransactionError(error, 'journal', true, hash);
         }
         try {
-            return await this.waitForReceipt(hash);
+            return onSubmitted ? await this.waitForReceipt(hash)
+                : await this.acknowledgeExternalTokenTransaction(hash);
         } catch (error) {
             throw tagTransactionError(error, 'receipt', true, hash);
         }
@@ -1202,7 +1421,7 @@ class ZkapiClient extends EventTarget {
         onStatus('Connecting to MetaMask…');
         await this.connectWallet();
         onStatus('Confirm “Add token” in MetaMask…');
-        const added = await globalThis.ethereum.request({
+        const added = await this.ethereum.request({
             method: 'wallet_watchAsset',
             params: {
                 type: 'ERC20',
@@ -1250,7 +1469,7 @@ class ZkapiClient extends EventTarget {
     async readBrowserNote(noteId, requestedBlock = 'latest') {
         await this.assertFundingChain();
         const blockTag = requestedBlock || 'latest';
-        const encoded = await globalThis.ethereum.request({
+        const encoded = await this.ethereum.request({
             method: 'eth_call',
             params: [{
                 to: this.config.funding.contract_address,
@@ -1337,7 +1556,7 @@ class ZkapiClient extends EventTarget {
         for (const hash of hashes) {
             let receipt = null;
             try {
-                receipt = await globalThis.ethereum.request({
+                receipt = await this.ethereum.request({
                     method: 'eth_getTransactionReceipt',
                     params: [hash]
                 });
@@ -1492,7 +1711,8 @@ class ZkapiClient extends EventTarget {
                         metadata
                     );
                 },
-                submission.replacementNonce
+                submission.replacementNonce,
+                { kind: 'deposit', submission }
             );
         } catch (error) {
             if (error?.transactionHash) {
@@ -1684,7 +1904,9 @@ class ZkapiClient extends EventTarget {
                                 metadata
                             );
                         }
-                        : null
+                        : null,
+                    null,
+                    { kind: 'deposit', submission }
                 );
                 break;
             } catch (error) {
@@ -1912,7 +2134,9 @@ class ZkapiClient extends EventTarget {
                                     metadata
                                 );
                             }
-                            : null
+                            : null,
+                        null,
+                        { kind: 'withdrawal', submission }
                     );
                     break;
                 } catch (error) {
@@ -2054,7 +2278,7 @@ class ZkapiClient extends EventTarget {
         let receipt = null;
         if (operationHash) {
             try {
-                receipt = await globalThis.ethereum.request({
+                receipt = await this.ethereum.request({
                     method: 'eth_getTransactionReceipt',
                     params: [operationHash]
                 });
@@ -2215,7 +2439,8 @@ class ZkapiClient extends EventTarget {
                         metadata
                     );
                 },
-                submission.replacementNonce
+                submission.replacementNonce,
+                { kind: 'withdrawal', submission }
             );
         } catch (error) {
             await this.recoverFailedWithdrawalSubmission({
@@ -2310,7 +2535,9 @@ class ZkapiClient extends EventTarget {
                     async value => {
                         metadata = value;
                         await browserWalletRuntime.rememberBackgroundWithdrawalSubmissionMetadata(submission, value);
-                    }
+                    },
+                    null,
+                    { kind: 'background-withdrawal', submission }
                 );
                 break;
             } catch (failure) {
@@ -2417,7 +2644,8 @@ class ZkapiClient extends EventTarget {
                     onStatus(`Background replacement submitted ${this.compact(hash)} · checking confirmation…`);
                 },
                 null,
-                submission.replacementNonce
+                submission.replacementNonce,
+                { kind: 'background-replacement', submission }
             );
         } catch (error) {
             if (error?.transactionHash) {
@@ -2684,7 +2912,7 @@ class ZkapiClient extends EventTarget {
 
             let receipt = null;
             try {
-                receipt = await globalThis.ethereum.request({
+                receipt = await this.ethereum.request({
                     method: 'eth_getTransactionReceipt',
                     params: [attempt.transactionHash]
                 });
@@ -3057,7 +3285,7 @@ class ZkapiClient extends EventTarget {
             let payoutVerified = false;
             if (transactionHash && mode === 'mutual') {
                 try {
-                    const receipt = await globalThis.ethereum.request({
+                    const receipt = await this.ethereum.request({
                         method: 'eth_getTransactionReceipt',
                         params: [transactionHash]
                     });
@@ -3131,7 +3359,7 @@ class ZkapiClient extends EventTarget {
             for (const hash of hashes) {
                 let receipt = null;
                 try {
-                    receipt = await globalThis.ethereum.request({
+                    receipt = await this.ethereum.request({
                         method: 'eth_getTransactionReceipt',
                         params: [hash]
                     });
@@ -3384,7 +3612,7 @@ class ZkapiClient extends EventTarget {
         let finalityTag = null;
         let source = 'finalized';
         try {
-            const finalizedBlock = await globalThis.ethereum.request({
+            const finalizedBlock = await this.ethereum.request({
                 method: 'eth_getBlockByNumber',
                 params: ['finalized', false]
             });
@@ -3401,7 +3629,7 @@ class ZkapiClient extends EventTarget {
             source = 'confirmations';
             let head = Number(observedBlock || 0);
             try {
-                const latest = await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+                const latest = await this.ethereum.request({ method: 'eth_blockNumber' });
                 if (/^0x[0-9a-fA-F]+$/.test(String(latest || ''))) {
                     head = Math.max(head, Number(BigInt(latest)));
                 }
@@ -3459,7 +3687,7 @@ class ZkapiClient extends EventTarget {
         let checkedBlock = 0;
         let source = 'finalized';
         try {
-            const finalizedBlock = await globalThis.ethereum.request({
+            const finalizedBlock = await this.ethereum.request({
                 method: 'eth_getBlockByNumber',
                 params: ['finalized', false]
             });
@@ -3473,7 +3701,7 @@ class ZkapiClient extends EventTarget {
         if (!checkedBlock) {
             source = 'confirmations';
             try {
-                const latest = await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+                const latest = await this.ethereum.request({ method: 'eth_blockNumber' });
                 if (/^0x[0-9a-fA-F]+$/.test(String(latest || ''))) {
                     checkedBlock = Math.max(
                         0,
@@ -3489,7 +3717,7 @@ class ZkapiClient extends EventTarget {
         }
 
         try {
-            const canonicalReceipt = await globalThis.ethereum.request({
+            const canonicalReceipt = await this.ethereum.request({
                 method: 'eth_getTransactionReceipt',
                 params: [transactionHash]
             });
@@ -3534,7 +3762,7 @@ class ZkapiClient extends EventTarget {
         let blockTag = null;
         let source = 'finalized';
         try {
-            const finalizedBlock = await globalThis.ethereum.request({
+            const finalizedBlock = await this.ethereum.request({
                 method: 'eth_getBlockByNumber',
                 params: ['finalized', false]
             });
@@ -3549,7 +3777,7 @@ class ZkapiClient extends EventTarget {
             source = 'confirmations';
             let head = Number(observedBlock || 0);
             try {
-                const latest = await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+                const latest = await this.ethereum.request({ method: 'eth_blockNumber' });
                 if (/^0x[0-9a-fA-F]+$/.test(String(latest || ''))) {
                     head = Math.max(head, Number(BigInt(latest)));
                 }
@@ -3565,7 +3793,7 @@ class ZkapiClient extends EventTarget {
 
         try {
             const [transactionCount, status] = await Promise.all([
-                globalThis.ethereum.request({
+                this.ethereum.request({
                     method: 'eth_getTransactionCount',
                     params: [from, blockTag]
                 }),
@@ -3600,7 +3828,7 @@ class ZkapiClient extends EventTarget {
         let blockTag = null;
         let source = 'finalized';
         try {
-            const finalizedBlock = await globalThis.ethereum.request({
+            const finalizedBlock = await this.ethereum.request({
                 method: 'eth_getBlockByNumber',
                 params: ['finalized', false]
             });
@@ -3615,7 +3843,7 @@ class ZkapiClient extends EventTarget {
             source = 'confirmations';
             let head = 0;
             try {
-                const latest = await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+                const latest = await this.ethereum.request({ method: 'eth_blockNumber' });
                 if (/^0x[0-9a-fA-F]+$/.test(String(latest || ''))) {
                     head = Number(BigInt(latest));
                 }
@@ -3630,7 +3858,7 @@ class ZkapiClient extends EventTarget {
         }
         try {
             const [transactionCount, note] = await Promise.all([
-                globalThis.ethereum.request({
+                this.ethereum.request({
                     method: 'eth_getTransactionCount',
                     params: [from, blockTag]
                 }),
@@ -3655,7 +3883,7 @@ class ZkapiClient extends EventTarget {
         let blockTag = null;
         let source = 'finalized';
         try {
-            const finalizedBlock = await globalThis.ethereum.request({
+            const finalizedBlock = await this.ethereum.request({
                 method: 'eth_getBlockByNumber',
                 params: ['finalized', false]
             });
@@ -3669,7 +3897,7 @@ class ZkapiClient extends EventTarget {
         if (!blockTag) {
             source = 'confirmations';
             try {
-                const latest = await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+                const latest = await this.ethereum.request({ method: 'eth_blockNumber' });
                 if (/^0x[0-9a-fA-F]+$/.test(String(latest || ''))) {
                     const checkpoint = Number(BigInt(latest)) - CLOSE_FINALITY_FALLBACK_BLOCKS;
                     if (checkpoint > 0) blockTag = `0x${checkpoint.toString(16)}`;
@@ -3760,7 +3988,7 @@ class ZkapiClient extends EventTarget {
                 for (const startHash of startHashes) {
                     let startReceipt = null;
                     try {
-                        startReceipt = await globalThis.ethereum.request({
+                        startReceipt = await this.ethereum.request({
                             method: 'eth_getTransactionReceipt',
                             params: [startHash]
                         });
@@ -3987,7 +4215,7 @@ class ZkapiClient extends EventTarget {
                 for (const hash of finalizeHashes) {
                     let receipt = null;
                     try {
-                        receipt = await globalThis.ethereum.request({
+                        receipt = await this.ethereum.request({
                             method: 'eth_getTransactionReceipt',
                             params: [hash]
                         });
@@ -4070,7 +4298,7 @@ class ZkapiClient extends EventTarget {
                     try {
                         const finalizeReceiptBlocks = [];
                         for (const hash of successfulFinalizeHashes) {
-                            const receipt = await globalThis.ethereum.request({
+                            const receipt = await this.ethereum.request({
                                 method: 'eth_getTransactionReceipt',
                                 params: [hash]
                             });
@@ -4487,7 +4715,8 @@ class ZkapiClient extends EventTarget {
                         metadata
                     );
                 },
-                submission.replacementNonce
+                submission.replacementNonce,
+                { kind: 'finalization', submission }
             );
         } catch (error) {
             if (error?.transactionHash) {
@@ -4614,7 +4843,9 @@ class ZkapiClient extends EventTarget {
                                 metadata
                             );
                         }
-                        : null
+                        : null,
+                    null,
+                    { kind: 'finalization', submission }
                 );
             }
         } catch (error) {
@@ -4644,7 +4875,7 @@ class ZkapiClient extends EventTarget {
                 let chainReceipt = null;
                 if (submittedHash) {
                     try {
-                        chainReceipt = await globalThis.ethereum.request({
+                        chainReceipt = await this.ethereum.request({
                             method: 'eth_getTransactionReceipt',
                             params: [submittedHash]
                         });
@@ -4739,12 +4970,12 @@ class ZkapiClient extends EventTarget {
     async readBrowserWithdrawalStatus(noteId, requestedBlock = null) {
         if (noteId == null) return { status: 'no_note', challenge_deadline: null };
         await this.assertFundingChain();
-        const blockTag = requestedBlock || await globalThis.ethereum.request({ method: 'eth_blockNumber' });
+        const blockTag = requestedBlock || await this.ethereum.request({ method: 'eth_blockNumber' });
         if (!/^0x[0-9a-fA-F]+$/.test(String(blockTag || ''))) {
             throw new Error('The wallet provider returned an invalid block number.');
         }
         const observedBlock = Number(BigInt(blockTag));
-        const encodedNote = await globalThis.ethereum.request({
+        const encodedNote = await this.ethereum.request({
             method: 'eth_call',
             params: [{
                 to: this.config.funding.contract_address,
@@ -4758,7 +4989,7 @@ class ZkapiClient extends EventTarget {
         if (status === 1) return { status: 'active', note_id: Number(noteId), challenge_deadline: null, observed_block: observedBlock };
         if (status !== 2) throw new Error(`The vault returned unknown note status ${status}.`);
         await this.assertFundingChain();
-        const encodedPending = await globalThis.ethereum.request({
+        const encodedPending = await this.ethereum.request({
             method: 'eth_call',
             params: [{
                 to: this.config.funding.contract_address,
@@ -4804,6 +5035,28 @@ class ZkapiClient extends EventTarget {
     sessionHeaders(sessionId) {
         return { [SESSION_HEADER]: sessionId };
     }
+}
+
+// Keep provider selection stable through every asynchronous client boundary,
+// including intervals between nested reads and transaction journal commits.
+// Applying the scope uniformly also covers newly added recovery entry points.
+for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(ZkapiClient.prototype))) {
+    const operation = descriptor.value;
+    if (typeof operation !== 'function' || operation.constructor.name !== 'AsyncFunction') continue;
+    Object.defineProperty(ZkapiClient.prototype, name, {
+        ...descriptor,
+        value: async function (...args) {
+            const state = walletProviders.get(this);
+            if (!state.operations) state.active = state.override || globalThis.ethereum;
+            state.operations += 1;
+            try {
+                return await operation.apply(this, args);
+            } finally {
+                state.operations -= 1;
+                if (!state.operations) state.active = null;
+            }
+        }
+    });
 }
 
 const zkapiClient = new ZkapiClient();

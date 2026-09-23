@@ -42,6 +42,52 @@ private proof or key issuance requests.
 Never include note secrets, key values, proof bodies, or wallet transactions
 in host logs.
 
+## External wallets and manual signing
+
+`client.setWalletProvider(provider)` selects an instance-scoped EIP-1193
+provider. The default is the browser's injected `globalThis.ethereum`;
+`setWalletProvider(null)` restores that default. The SDK never replaces the
+browser global. Install the host provider before `client.init()` when restoring
+a saved external transaction. Changing providers during an asynchronous SDK
+operation throws `wallet_provider_busy`; nested calls retain the same provider
+through RPC reads, wallet prompts, journal commits, and receipt polling.
+`client.walletProviderBusy` exposes this state. Providers may also expose
+`hasPendingTransaction: true` to prevent switching away from an unresolved
+durable request after its UI stops waiting. Re-selecting the same provider is
+always a no-op.
+
+A host can implement manual signing without a wallet extension: obtain the
+user's public account address for `eth_requestAccounts`, use a fixed public RPC
+for reads, and display the exact `eth_sendTransaction` payload for submission
+with the user's own wallet. The connected address funds deposits and is the
+destination of a newly prepared withdrawal; resuming an existing withdrawal
+retains its original destination. Plain ERC-20 transfers do not create private
+notes: deposits require the SDK's approval and vault calldata.
+
+For durable manual signing, the provider implements
+`acknowledgeTransaction(hash)`. The SDK then includes a `zkapiRecovery` field
+alongside `method` and `params` in each send request. It contains only public
+deployment and journal identities, never note secrets, private state, or proof
+plans. Before displaying an executable payload, the provider must durably save
+the transaction (including its exact nonce) and this context. It must preserve
+them through UI dismissal and reload, verify a supplied hash matches the exact
+chain, sender, target, value, nonce, and calldata, and retain that hash until
+the SDK acknowledges it. Do not forward `zkapiRecovery` to a remote RPC service.
+
+For a live request, return the verified hash to `request()`; the SDK acknowledges
+after the existing deposit/withdrawal journal accepts it. For approval or mint
+requests, acknowledgement follows a successful receipt, or a finalized reverted
+receipt. After reload, call
+`client.resumeExternalTransaction({ transaction, hash, context })`, where
+`context` is the saved `zkapiRecovery`. This independently reads and checks the
+transaction, validates the durable SDK claim and exact plan, and invokes the
+same atomic journal methods. It does not confirm deposits or withdrawals by
+itself. Continue using `recoverBrowserDeposit()`, `syncWithdrawal()`, and
+`syncEscapeWithdrawals()` for the usual canonical-state and finality checks.
+Resumption is idempotent when a previous journal write succeeded but host
+acknowledgement was interrupted. The host owns the public pending-send record;
+private wallet material and all settlement and payout decisions stay in the SDK.
+
 In the host build:
 
 ```js
